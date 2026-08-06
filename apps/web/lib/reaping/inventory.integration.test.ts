@@ -8,7 +8,8 @@
  *
  * Everything it creates, it removes — and it only ever creates things under a
  * temporary workspace root and under names it generated itself. Skipped
- * automatically when no Docker daemon is reachable.
+ * automatically when no Docker daemon is reachable, or when the fixture image
+ * below cannot be fetched.
  */
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -44,7 +45,51 @@ async function run(cwd: string, command: string[]): Promise<void> {
   await proc.exited;
 }
 
-const available = await dockerAvailable();
+/**
+ * Any image that will sit still. Deliberately NOT the sandbox image.
+ *
+ * Nothing here classifies on the image — `classify` keys on the `paco-sbx-`
+ * name prefix and the `paco.sandbox` label — so using the real sandbox image
+ * bought no fidelity and cost the whole file: it was hardcoded to
+ * `paco-sandbox:latest`, which exists on a developer's machine and on no CI
+ * runner, so every run there died with "No such image" before asserting
+ * anything. A few megabytes that pull in a second keeps this honest on a
+ * runner as well as a laptop.
+ */
+const FIXTURE_IMAGE = "busybox:latest";
+
+/**
+ * Fetched at module scope rather than in `beforeAll`, because a first pull on a
+ * cold runner comfortably exceeds Bun's 5s hook timeout and the whole suite
+ * then fails on the fixture rather than on anything it is testing. Top-level
+ * await has no such deadline.
+ *
+ * Returns false rather than throwing if the pull fails, so a machine with a
+ * daemon but no route to a registry skips these tests the same way a machine
+ * with no daemon does.
+ */
+async function fixtureImageReady(docker: Docker): Promise<boolean> {
+  try {
+    await docker.getImage(FIXTURE_IMAGE).inspect();
+    return true;
+  } catch {
+    // Not present — pull it.
+  }
+  try {
+    const stream = await docker.pull(FIXTURE_IMAGE);
+    await new Promise<void>((resolve, reject) => {
+      docker.modem.followProgress(stream, (err: Error | null) =>
+        err ? reject(err) : resolve(),
+      );
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const available =
+  (await dockerAvailable()) && (await fixtureImageReady(new Docker()));
 const describeDocker = available ? describe : describe.skip;
 
 describeDocker("orphan detection against real resources", () => {
@@ -82,7 +127,7 @@ describeDocker("orphan detection against real resources", () => {
     const docker = new Docker();
     const container = await docker.createContainer({
       name: orphanContainer,
-      Image: "paco-sandbox:latest",
+      Image: FIXTURE_IMAGE,
       Cmd: ["sleep", "infinity"],
       Labels: { "paco.sandbox": "true" },
     });
