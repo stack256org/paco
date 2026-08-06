@@ -565,9 +565,26 @@ export class DockerSandbox implements Sandbox {
       return;
     }
 
-    await this.exec(`mkdir -p ${REPO_DIRNAME}`, CONTAINER_WORKDIR, 10_000);
-
+    // Created on the HOST, not with `exec("mkdir -p …")` inside the container.
+    //
+    // The container has no `User:` and the image sets no `USER`, so it runs as
+    // root — and on a Linux bind mount a directory it creates is root-owned on
+    // the host too. `#ensureBaselineGitignore` below then writes into that
+    // directory through `writeFile`, which is host-side `fs`, as an
+    // unprivileged user. The result is EACCES on every fresh workspace:
+    //
+    //   EACCES: permission denied, open '…/repo/.gitignore'
+    //
+    // It is invisible on macOS, where Docker Desktop maps all container-created
+    // files to the host user, and Linux is the only supported production
+    // platform — so this only ever showed up once CI ran on Linux.
+    //
+    // Creating it host-side costs nothing and fixes the direction that matters:
+    // root inside the container can still write into a directory owned by the
+    // host user, while the reverse is what fails. Everything git does here
+    // stays in the container, as before.
     const repo = repoDir(this.#config.hostWorkspace);
+    await fs.mkdir(repo, { recursive: true });
     const isRepo = await this.exec(
       "git rev-parse --is-inside-work-tree",
       repo,
