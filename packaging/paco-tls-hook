@@ -1,0 +1,142 @@
+#!/bin/sh
+# Installed as /usr/lib/paco/paco-tls-hook, and the one privileged action the
+# web app can take: obtain a TLS certificate for the domain saved in Settings.
+#
+# WHY THIS TAKES NO ARGUMENTS
+#
+# The app runs as the unprivileged `paco` user and reaches this through a
+# single sudoers line (see postinst):
+#
+#     paco ALL=(root) NOPASSWD: /usr/lib/paco/paco-tls-hook
+#
+# A rule with no arguments is the tightest grant sudo can express: there is
+# nothing for a compromised app process to smuggle through. The obvious
+# alternative — `paco-tls-hook <domain>` — would have to permit an argument,
+# and sudo cannot express "one argument, and it must look like a hostname";
+# whatever validation existed would live *inside* the thing being called,
+# after the privilege was already granted.
+#
+# So the domain is not passed in. It is read from the same row
+# `paco-entrypoint.sh` reads, which is also the only domain the operator can
+# set from Settings. The app can therefore ask for exactly one thing —
+# "get a certificate for the domain this instance is configured with" — and
+# cannot ask for a certificate for anything else, no matter what it sends.
+#
+# Everything hard (DNS pointing here, edge-TLS detection, installing certbot,
+# idempotence) already lives in `paco tls`; this resolves the domain and
+# delegates, rather than growing a second copy of that logic.
+set -eu
+
+PACO_ENV=/etc/paco/paco.env
+PACO_BIN=/usr/bin/paco
+PACO_USER=paco
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "paco-tls-hook: must run as root (it is invoked through sudo)" >&2
+  exit 1
+fi
+
+# sudo scrubs the environment, so POSTGRES_URL is not inherited from the app.
+# Read it from paco.env, which is 640 root:paco — readable here because this
+# runs as root. Only this one key is taken, and it is never echoed: the file
+# also holds APP_SECRET.
+if [ ! -r "$PACO_ENV" ]; then
+  echo "paco-tls-hook: cannot read $PACO_ENV" >&2
+  exit 1
+fi
+
+POSTGRES_URL="$(sed -n 's/^POSTGRES_URL=//p' "$PACO_ENV" | head -n 1)"
+if [ -z "$POSTGRES_URL" ]; then
+  echo "paco-tls-hook: no POSTGRES_URL in $PACO_ENV" >&2
+  exit 1
+fi
+
+# postinst's POSTGRES_URL has no host or user (see its own comment on why:
+# `postgres:///paco`, relying on PGHOST plus peer auth), so the Postgres role
+# `psql` connects as is whatever OS user runs it. This script runs as root
+# (the check above), and there is no Postgres role named "root" — a direct
+# `psql` here always fails peer auth, its stderr silently discarded below,
+# which used to make every request look like "no domain saved" even when one
+# was. Run the query as the `paco` OS user instead — the same user
+# paco.service itself runs as, so peer auth resolves to the real `paco` role
+# — and only stay root for the `paco tls` call afterward, which is the part
+# that actually needs it (certbot, nginx).
+#
+# The URL is passed as a positional parameter (`$0`) rather than pasted into
+# the script text, so a password containing `$(...)` or a quote is data. Verified
+# on Debian: `su -s /bin/sh u -c 'echo $0' 'x$(id)y; id'` prints the string
+# literally and runs nothing.
+#
+# stderr is captured rather than discarded, and the exit status is checked
+# separately from the result being empty. Those two were conflated here before —
+# `2>/dev/null || true` meant a connection that failed outright reported "no
+# domain is saved in Settings yet", which is a sentence about configuration and
+# sent the operator to look in the wrong place. A query that cannot run and a
+# query that finds nothing need different messages.
+query="SELECT app_domain FROM instance_settings WHERE app_domain IS NOT NULL LIMIT 1"
+stderr_file="$(mktemp)"
+# shellcheck disable=SC2064
+trap "rm -f '$stderr_file'" EXIT INT TERM
+
+if domain="$(
+  su -s /bin/sh "$PACO_USER" -c \
+    "psql \"\$0\" -tAc \"\$1\"" \
+    "$POSTGRES_URL" "$query" \
+    2>"$stderr_file"
+)"; then
+  # Trim surrounding whitespace only — `psql -tA` leaves a trailing newline.
+  #
+  # Deliberately not `tr -d '[:space:]'`, which deletes *internal* whitespace
+  # too and so turns two words into one plausible-looking hostname:
+  # "evil.com foo.com" would become "evil.comfoo.com" and sail through the
+  # charset check below as a single valid name. Deleting characters to make a
+  # value pass validation is the opposite of validating it; a stored value with
+  # a space in the middle is not a hostname and should be refused, which is
+  # what trimming instead of stripping makes happen.
+  domain="${domain#"${domain%%[![:space:]]*}"}"
+  domain="${domain%"${domain##*[![:space:]]}"}"
+else
+  echo "paco-tls-hook: could not read the saved domain from the database." >&2
+  if [ -s "$stderr_file" ]; then
+    sed 's/^/paco-tls-hook: psql: /' "$stderr_file" >&2
+  fi
+  exit 1
+fi
+
+if [ -z "$domain" ]; then
+  echo "paco-tls-hook: no domain is saved in Settings yet. Set one, save it, then try again." >&2
+  exit 1
+fi
+
+# The column stores a full origin (`https://paco.example.com`); certbot wants
+# a bare hostname. Strip the scheme, and any path or port that came with it.
+domain="${domain#http://}"
+domain="${domain#https://}"
+domain="${domain%%/*}"
+domain="${domain%%:*}"
+
+# The value reached the database through Settings validation, but this is the
+# last point before it becomes an argument to a root command — so check the
+# shape here too rather than trusting a boundary two processes away. Only
+# DNS labels: letters, digits, hyphens, dots. No flags (a leading `-` would
+# be read as one by certbot), no shell metacharacters, no wildcard.
+case "$domain" in
+  -* | *[!A-Za-z0-9.-]* | *..* | .* | *. | "")
+    echo "paco-tls-hook: '$domain' is not a plain hostname; refusing." >&2
+    exit 1
+    ;;
+esac
+case "$domain" in
+  *.*) : ;;
+  *)
+    echo "paco-tls-hook: '$domain' has no dot — a certificate needs a fully qualified name." >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -x "$PACO_BIN" ]; then
+  echo "paco-tls-hook: $PACO_BIN is missing" >&2
+  exit 1
+fi
+
+exec "$PACO_BIN" tls "$domain"

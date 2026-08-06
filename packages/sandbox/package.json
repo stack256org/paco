@@ -1,0 +1,33 @@
+{
+  "name": "@paco/sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./interface.js": "./interface.ts",
+    "./types.js": "./types.ts",
+    "./docker": "./docker/index.ts",
+    "./docker/index.js": "./docker/index.ts",
+    "./docker/sandbox.js": "./docker/sandbox.ts",
+    "./docker/config.js": "./docker/config.ts",
+    "./skills": "./skills/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dockerode": "5.0.1",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@paco/tsconfig": "workspace:*",
+    "@types/bun": "1.3.14",
+    "@types/dockerode": "4.0.1",
+    "@types/node": "^22"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  }
+}

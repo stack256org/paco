@@ -1,0 +1,29 @@
+{
+  "name": "@paco/claude-code",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./types.js": "./types.ts",
+    "./options.js": "./options.ts",
+    "./run.js": "./run.ts",
+    "./ui-stream.js": "./ui-stream.ts",
+    "./agent.js": "./agent.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ai": "catalog:"
+  },
+  "devDependencies": {
+    "@paco/tsconfig": "workspace:*",
+    "@types/bun": "1.3.14",
+    "@types/node": "^22"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  }
+}

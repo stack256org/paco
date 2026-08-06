@@ -1,0 +1,23 @@
+Package: paco
+Version: __VERSION__
+Architecture: __ARCH__
+Maintainer: Paco Maintainers <noreply@localhost>
+Homepage: https://github.com/stack256org/paco
+Depends: postgresql, postgresql-client, nginx, git, ca-certificates, adduser, sudo
+Recommends: docker.io
+Suggests: gh, certbot, python3-certbot-nginx
+Description: self-hosted AI coding agent
+ Paco drives the Claude Code CLI headlessly and maps its streaming output to
+ a web UI, so a team can run their own coding-agent instance instead of a
+ hosted one.
+ .
+ This package installs Paco itself, a bundled Node.js runtime, a bundled
+ Claude Code CLI, a systemd service, and an nginx site. Postgres and nginx
+ run as ordinary host packages; Docker is used only to run per-chat
+ sandboxes, so it is a recommendation rather than a hard dependency — Paco
+ starts and serves its UI without it, and an operator with an existing
+ Docker setup should not get a second one.
+ .
+ GitHub's gh CLI is not packaged here (it ships from GitHub's own APT
+ repository) but is required before anyone connects a GitHub account; the
+ postinst script warns if it is missing.

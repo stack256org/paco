@@ -1,0 +1,218 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@source "../node_modules/streamdown/dist/*.js";
+
+/*
+ * An explicit light or dark preference is applied as a `data-theme` attribute,
+ * written onto `<html>` by the server from a cookie. "system" writes no
+ * attribute at all and `prefersdark` below resolves it from the OS in pure
+ * CSS — no script, no flash, nothing to hydrate. An attribute always wins over
+ * the media query, so the two never contradict each other.
+ */
+@plugin "daisyui" {
+  themes: false;
+  logs: false;
+}
+
+/*
+ * Paco's palette: a coding-agent console, so the direction is data-dense and
+ * utilitarian. Cool neutrals carry the structure, radii stay tight (4px) to
+ * keep dense rows legible, and depth is off — elevation is expressed with the
+ * base-200/300 steps and hairline borders rather than shadow. Saturation is
+ * reserved for state: a single blue anchor for identity and focal actions, and
+ * the semantic info/success/warning/error hues for run status.
+ */
+@plugin "daisyui/theme" {
+  name: "paco-dark";
+  default: true;
+  prefersdark: true;
+  color-scheme: "dark";
+
+  --color-base-100: oklch(14.5% 0.002 285);
+  --color-base-200: oklch(19% 0.003 285);
+  --color-base-300: oklch(26% 0.004 285);
+  --color-base-content: oklch(93% 0.002 285);
+
+  --color-primary: oklch(72% 0.142 254);
+  --color-primary-content: oklch(17% 0.03 254);
+  --color-secondary: oklch(70% 0.11 300);
+  --color-secondary-content: oklch(17% 0.03 300);
+  --color-accent: oklch(76% 0.12 190);
+  --color-accent-content: oklch(17% 0.03 190);
+  --color-neutral: oklch(26% 0.004 285);
+  --color-neutral-content: oklch(93% 0.002 285);
+
+  --color-info: oklch(72% 0.142 254);
+  --color-info-content: oklch(17% 0.03 254);
+  --color-success: oklch(73% 0.15 154);
+  --color-success-content: oklch(17% 0.03 154);
+  --color-warning: oklch(80% 0.15 80);
+  --color-warning-content: oklch(19% 0.04 80);
+  --color-error: oklch(68% 0.19 22);
+  --color-error-content: oklch(17% 0.03 22);
+
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.25rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@plugin "daisyui/theme" {
+  name: "paco-light";
+  default: false;
+  prefersdark: false;
+  color-scheme: "light";
+
+  --color-base-100: oklch(99% 0 0);
+  --color-base-200: oklch(96.5% 0.001 285);
+  --color-base-300: oklch(92% 0.003 285);
+  --color-base-content: oklch(20% 0.004 285);
+
+  --color-primary: oklch(52% 0.17 254);
+  --color-primary-content: oklch(99% 0 0);
+  --color-secondary: oklch(52% 0.15 300);
+  --color-secondary-content: oklch(99% 0 0);
+  --color-accent: oklch(52% 0.12 190);
+  --color-accent-content: oklch(99% 0 0);
+  --color-neutral: oklch(30% 0.005 285);
+  --color-neutral-content: oklch(98% 0 0);
+
+  --color-info: oklch(52% 0.17 254);
+  --color-info-content: oklch(99% 0 0);
+  --color-success: oklch(52% 0.13 154);
+  --color-success-content: oklch(99% 0 0);
+  --color-warning: oklch(62% 0.15 68);
+  --color-warning-content: oklch(99% 0 0);
+  --color-error: oklch(56% 0.2 25);
+  --color-error-content: oklch(99% 0 0);
+
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.25rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+/*
+ * There is no `dark:` variant here on purpose.
+ *
+ * Every colour in the app is a daisyUI semantic token — base-100/200/300,
+ * base-content, error/success/warning/info — so it already follows whichever
+ * theme is active and needs no per-mode override. The variant that used to
+ * live here matched `[data-theme="paco-dark"]` only, which silently did
+ * nothing on the default preference (which writes no attribute at all), so
+ * every one of its ~92 call sites was inert on a dark surface. Converting them
+ * to tokens removed the class of bug rather than the symptom.
+ *
+ * Fixed colours remain in exactly two places, both deliberate: the media
+ * lightbox and the modal scrims, which dim the page to a neutral wash and must
+ * not take on a tint.
+ */
+
+@theme {
+  --breakpoint-sidebar: 900px;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/*
+ * The rules below are the authored CSS this project keeps, and why.
+ *
+ * They cannot be expressed as utilities in markup:
+ *  - the `*` border default, because Tailwind v4 defaults `border` to
+ *    currentColor and every bordered element would otherwise need a colour;
+ *  - `pre`, `pre code`, and the inline-code attribute, because they style
+ *    markdown output rendered by streamdown, which takes no class names;
+ *  - the bare `::-webkit-scrollbar` rules, because they theme the document
+ *    scrollbar, which has no element to attach a class to.
+ *
+ * Everything else — including the previous scrollbar helper classes — now lives
+ * in markup as utilities.
+ */
+@layer base {
+  * {
+    @apply border-base-300 outline-primary/50;
+  }
+  body {
+    @apply bg-base-100 text-base-content;
+  }
+  /*
+   * Scoped to streamdown's own code blocks, which is all this was ever for.
+   *
+   * It used to be a bare `pre` / `pre code`, and `!important` on a bare `pre`
+   * beats every Tailwind utility on every `pre` in the app — so
+   * `whitespace-pre-wrap` in markup did nothing, silently, anywhere. Seven
+   * places were asking for it and not getting it, including bash tool output
+   * and errors (`tool-call/renderers/bash-renderer.tsx`), tool error output
+   * (`tool-call/tool-layout.tsx`), pasted snippets (`snippet-chip.tsx`,
+   * `text-attachments-preview.tsx`) and the workspace file viewer. Long lines
+   * scrolled sideways instead of wrapping, which is what made a failing
+   * command's message unreadable without dragging a scrollbar.
+   *
+   * streamdown renders its `pre` directly inside
+   * `[data-streamdown="code-block-body"]` (verified in its dist), so naming
+   * that ancestor keeps code blocks non-wrapping — correct for code, where a
+   * wrapped line changes what the code appears to say — while leaving every
+   * other `pre` to whatever its own utilities ask for.
+   */
+  [data-streamdown="code-block-body"] pre,
+  [data-streamdown="code-block-body"] pre code {
+    white-space: pre !important;
+  }
+  [data-streamdown="inline-code"] {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /*
+    Theme tokens, so the scrollbar tracks the active theme. The previous
+    --border/--muted-foreground pair no longer exists, which left these
+    declarations invalid and the thumb painted in the browser default.
+  */
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--color-base-content) 20%, transparent);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklch, var(--color-base-content) 40%, transparent);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@keyframes slide-up-fade {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Wrapped profile page */

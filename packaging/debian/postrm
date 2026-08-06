@@ -1,0 +1,63 @@
+#!/bin/sh
+# `remove` (plain `apt remove`/`dpkg -r`) must never destroy data: a
+# remove/reinstall cycle is a normal thing an operator does — to change a
+# version pin, to work around a bad package, to move to a different
+# install method — and losing every session, every stored GitHub token, and
+# every chat workspace to that is not acceptable. Only `purge` (`apt purge`,
+# `dpkg -P`) removes /etc/paco and /var/lib/paco, and it says exactly what
+# it is about to destroy before doing it — there is no `debconf`
+# confirmation prompt available in a maintainer script by this point, so a
+# plain, unmissable message on stderr is the closest substitute.
+#
+# The Postgres role and database are deliberately untouched on purge, not
+# only on remove: they are not paco's own state to own the lifecycle of —
+# they live in the `postgresql` package's own data directory, a separate
+# host package with its own purge. Dropping them here would be reaching
+# into another package's data.
+set -e
+
+PACO_ETC=/etc/paco
+PACO_HOME=/var/lib/paco
+
+case "$1" in
+  remove)
+    if [ -d /run/systemd/system ]; then
+      systemctl disable paco.service >/dev/null 2>&1 || true
+    fi
+    # Everything in $PACO_ETC and $PACO_HOME is left exactly as it was.
+    ;;
+
+  purge)
+    echo "paco: purging — this destroys:" >&2
+    echo "paco:   $PACO_ETC (APP_SECRET and paco.env)" >&2
+    echo "paco:   $PACO_HOME (chat workspaces, Claude credentials, everything under it)" >&2
+    echo "paco: the Postgres database is NOT touched — see postrm if you also want it gone." >&2
+
+    if [ -d /run/systemd/system ]; then
+      systemctl disable paco.service >/dev/null 2>&1 || true
+    fi
+
+    rm -rf "$PACO_ETC"
+    rm -rf "$PACO_HOME"
+
+    if [ -e /etc/nginx/sites-enabled/paco ]; then
+      rm -f /etc/nginx/sites-enabled/paco
+    fi
+    if [ -e /etc/nginx/sites-available/paco ]; then
+      rm -f /etc/nginx/sites-available/paco
+      if [ -d /run/systemd/system ] && command -v nginx >/dev/null 2>&1; then
+        if nginx -t >/dev/null 2>&1; then
+          systemctl reload nginx || true
+        fi
+      fi
+    fi
+    ;;
+
+  upgrade | failed-upgrade | abort-install | abort-upgrade | disappear)
+    ;;
+
+  *)
+    ;;
+esac
+
+exit 0

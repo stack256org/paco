@@ -1,0 +1,27 @@
+{
+  "name": "paco",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "web": "pnpm --dir apps/web dev",
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "check": "ultracite check",
+    "fix": "ultracite fix",
+    "ci": "pnpm check && pnpm typecheck && pnpm test:isolated && pnpm --dir apps/web db:check",
+    "test:isolated": "node scripts/test-isolated.ts",
+    "test:verbose": "bun test --reporter=junit --reporter-outfile /dev/stdout"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.62.0",
+    "oxlint": "1.77.0",
+    "turbo": "^2.10.8",
+    "typescript": "^7",
+    "ultracite": "7.9.4"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "packageManager": "pnpm@11.20.0+sha512.9a6f330a95b66446ea088faf1521405a8a01f07fde7124cc9958dfed52d4bb436737e65b08f85f37b46fcba375092558ac51262b816844b22f63406ed166bfee"
+}

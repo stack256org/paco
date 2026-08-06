@@ -1,0 +1,39 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Version notes:
+# - `ai` is pinned to the 6.x line because @workflow/ai@4 declares `ai: ^6` as a
+#   peer dependency. ai@7 exists but would break the workflow chat transport.
+# - `@ai-sdk/react` 3.x is the line that pairs with ai@6 (4.x pairs with ai@7).
+# - The model providers are gone: model calls go through the Claude Code CLI,
+#   not the AI SDK. `ai` remains only for its UI message stream types.
+catalog:
+  ai: ^6.0.236
+  "@ai-sdk/react": ^3.0.238
+  zod: ^4.4.3
+
+overrides:
+  kysely: 0.28.17
+  zod: ^4.4.3
+
+minimumReleaseAge: 1440
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: true
+
+# Which dependencies may run install scripts. pnpm 11 refuses to install while
+# any are undecided, so leaving a placeholder here makes `pnpm install` fail —
+# which is what it did inside the production image build.
+#
+# The three that were undecided all belong to dockerode's optional SSH
+# transport, or to typings generated at install time. Paco reaches Docker over
+# the local unix socket and needs none of them.
+allowBuilds:
+  "@nestjs/core": false
+  "@swc/core": true
+  cbor-extract: true
+  cpu-features: false
+  esbuild: true
+  protobufjs: false
+  sharp: true
+  ssh2: false

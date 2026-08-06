@@ -1,0 +1,279 @@
+name: Release
+
+# Native is the only supported production path now — this workflow builds and
+# publishes exactly what an installed host needs: the `.deb` (both
+# architectures, because the bundled Node under /usr/lib/paco is
+# architecture-specific) and the sandbox image every chat depends on. It no
+# longer publishes an app image; maintaining that second delivery mechanism
+# was upkeep for a path nobody uses once install.sh installs a package.
+on:
+  push:
+    tags: ["v*"]
+  # A tag is a promise: it publishes to GHCR, cuts a GitHub release, and is
+  # what an installed host upgrades to. That makes it the wrong tool for
+  # "give me a .deb to try on a scratch VM", which is a thing worth doing far
+  # more often than a release — and the only alternative was building the
+  # package by hand on a machine of the right architecture, which tests the
+  # machine as much as the package.
+  #
+  # A dispatch build produces the same artefact through the same script and
+  # publishes none of it: `publishing` below is false, so the release and the
+  # image push are both skipped. Nothing an operator installs can come from
+  # here, so a throwaway version string costs nothing.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for the .deb (no leading v), e.g. 0.2.0-test1"
+        required: true
+        type: string
+
+# Read-only by default; each job that needs to write (the release, the
+# package registry) asks for exactly that scope itself.
+permissions:
+  contents: read
+
+jobs:
+  # One place computes the tag, the bare version (no leading "v", which is
+  # what build-deb.sh and the .deb's own Version: field expect), and whether
+  # this is a stable release — every other job reads these instead of
+  # recomputing them.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      stable: ${{ steps.version.outputs.stable }}
+      publishing: ${{ steps.version.outputs.publishing }}
+    steps:
+      - id: version
+        # Both values reach the script as environment variables rather than
+        # `${{ }}` interpolated into the shell text: `inputs.version` is
+        # attacker-controlled by anyone who can dispatch the workflow, and
+        # interpolation would paste it into the script before sh ever parses
+        # it. As an env var it is data no matter what it contains.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            # A dispatch has no tag. It publishes nothing, so it needs only a
+            # version for the .deb's own Version: field and its filename.
+            version="${INPUT_VERSION#v}"
+            tag="v$version"
+            publishing=false
+          else
+            tag="$REF_NAME"
+            version="${tag#v}"
+            publishing=true
+          fi
+
+          # dpkg requires a Version: that starts with a digit and otherwise
+          # holds only alphanumerics and `. + ~ -`; anything else is a package
+          # `apt install` refuses, so failing here beats failing after the
+          # whole matrix has built.
+          #
+          # This check is also load-bearing for more than dpkg. Downstream
+          # steps interpolate this value into a `run:` script — the "Build the
+          # .deb" step passes it to build-deb.sh as an expression, which is
+          # pasted into the shell text before sh parses it. A dispatch lets
+          # anyone who
+          # can run the workflow choose the string, a version containing a
+          # quote would close that argument and run the rest as commands.
+          # Restricting the charset here is what makes those interpolations
+          # safe, so keep it strict: no quotes, no spaces, no `$`, no `;`.
+          case "$version" in
+            "" | *[!A-Za-z0-9.+~-]* | [!0-9]*)
+              echo "version '$version' must start with a digit and hold only" >&2
+              echo "alphanumerics and . + ~ - (e.g. 0.2.0-test1)" >&2
+              exit 1
+              ;;
+          esac
+
+          # `:latest` must only ever point at a final release — a prerelease
+          # tag like v0.2.0-rc1 has to publish itself without moving `latest`,
+          # since that is the tag a default install pulls. Semver marks a
+          # prerelease with a hyphen (v0.2.0-rc1, v0.2.0-beta.1), so that is
+          # the gate: no hyphen in the tag being published means it's final.
+          case "$tag" in
+            *-*) stable=false ;;
+            *) stable=true ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+          echo "publishing=$publishing" >> "$GITHUB_OUTPUT"
+
+  # Builds the .deb for one architecture. The whole build — not just fetching
+  # the bundled Node tarball — has to happen on that architecture for real:
+  # `packaging/build-deb.sh` runs `pnpm --filter=web deploy --prod` to
+  # produce a correct node_modules, and pnpm resolves platform-specific
+  # optional dependencies (sharp, cpu-features, ...) for the machine it runs
+  # on, not a declared target
+  # (.superpowers/sdd/2026-08-05-native-installation/task-12-report.md,
+  # concern 2). Cross-compiling from amd64 would silently bundle the wrong
+  # native binaries, so arm64 runs on a real arm64 runner rather than under
+  # QEMU.
+  build-deb:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            # GitHub-hosted Linux ARM64 runner. Verify this label is still
+            # current before relying on it — GitHub has changed ARM
+            # runner-label naming before, and this workflow has never
+            # actually been run.
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      # Deliberately not `pnpm --dir apps/web build`: that script also runs
+      # `db:migrate:apply` against a real, reachable Postgres first, which a
+      # build runner does not have and packaging must not depend on.
+      # Migrations run from `/usr/bin/paco` at every service start instead —
+      # see packaging/build-deb.sh's own header comment.
+      - name: Build the standalone app output
+        run: pnpm --dir apps/web exec next build
+
+      - name: Build the .deb
+        run: sh packaging/build-deb.sh "${{ needs.version.outputs.version }}" "${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paco-deb-${{ matrix.arch }}
+          path: paco_${{ needs.version.outputs.version }}_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  # Every host needs this image to run a single chat, and today it has to be
+  # built by hand — a curl|sh install cannot run a chat without it. Unlike
+  # the .deb, a plain apt-get-based Dockerfile cross-builds fine under QEMU,
+  # so both architectures build on one runner.
+  sandbox-image:
+    needs: version
+    # A dispatch build is for trying a .deb on a scratch host, and this job
+    # pushes to a registry that installed hosts pull from — including
+    # `:latest` when the version has no hyphen. Publishing that from an
+    # arbitrary branch would let a dispatch move what every host runs.
+    if: needs.version.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/stack256org/paco-sandbox
+          tags: |
+            type=raw,value=${{ needs.version.outputs.tag }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.stable == 'true' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: packages/sandbox/docker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Uploads both .deb files to the GitHub Release, then tells Stack256org/apt
+  # to rebuild its signed index. That repository is the one place the signing
+  # key and the Packages/Release index live — this workflow does not sign
+  # anything itself.
+  release:
+    needs: [version, build-deb]
+    # Skipped for a dispatch: it cuts a GitHub Release and asks the apt
+    # repository to re-index, which together are exactly what `apt upgrade`
+    # picks up. The .deb is still on the run as an artifact to download.
+    if: needs.version.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `gh release create --generate-notes` shells out to git, so it needs a
+      # repository present — without this it fails with "not a git repository"
+      # after both .deb files have already been built, which is the most
+      # expensive place in the pipeline to discover a missing checkout.
+      # `fetch-depth: 0` because note generation compares against the previous
+      # tag, which a shallow clone does not contain.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: paco-deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create the GitHub Release and upload the .deb files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- dist/*.deb
+          if [ "${{ needs.version.outputs.stable }}" = "true" ]; then
+            gh release create "${{ needs.version.outputs.tag }}" "$@" \
+              --title "${{ needs.version.outputs.tag }}" --generate-notes
+          else
+            gh release create "${{ needs.version.outputs.tag }}" "$@" \
+              --title "${{ needs.version.outputs.tag }}" --generate-notes --prerelease
+          fi
+
+      # Stack256org/apt owns the signed index, rather than this workflow
+      # signing and publishing it itself — one signing key, in one
+      # repository's secrets, for every product.
+      #
+      # The event type is `reindex`, not something naming Paco: that
+      # repository indexes every Stack256 product from its own products.json,
+      # so a per-product event type would make it carry a growing list of
+      # names that all mean the same thing. It must match the
+      # `repository_dispatch: types:` in that repository's reindex.yml — they
+      # were `paco-release` and `reindex` at one point, and a dispatch whose
+      # type nobody listens for succeeds silently and rebuilds nothing.
+      #
+      # A dispatch that fails (missing token, or that repository unreachable)
+      # must not fail the release: the .deb files are already safely attached
+      # to the GitHub Release regardless.
+      - name: Notify Stack256org/apt to rebuild the signed index
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::APT_DISPATCH_TOKEN is not set — skipped notifying Stack256org/apt. The .deb files are attached to this GitHub Release, but https://apt.stack256.org was NOT rebuilt, so 'apt install paco' will not see this version. Run: gh workflow run reindex.yml --repo Stack256org/apt"
+            exit 0
+          fi
+          if gh api repos/Stack256org/apt/dispatches \
+            -f event_type=reindex \
+            -f "client_payload[repo]=${{ github.repository }}" \
+            -f "client_payload[tag]=${{ needs.version.outputs.tag }}" \
+            -f "client_payload[version]=${{ needs.version.outputs.version }}"; then
+            echo "Dispatched reindex to Stack256org/apt for ${{ needs.version.outputs.tag }}."
+          else
+            echo "::warning::repository_dispatch to Stack256org/apt failed. The .deb files are attached to this GitHub Release, but https://apt.stack256.org was NOT rebuilt, so 'apt install paco' will not see this version. Check that APT_DISPATCH_TOKEN still has Contents:read on Stack256org/apt, then run: gh workflow run reindex.yml --repo Stack256org/apt"
+          fi
