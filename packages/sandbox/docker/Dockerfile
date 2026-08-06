@@ -4,14 +4,18 @@
 # the host against the same bind-mounted workspace, so nothing here needs to know
 # about the agent — this image only has to run the app.
 #
-# Build it with:
+# `release.yml` builds and publishes this on every tag as
+# `ghcr.io/stack256org/paco-sandbox`, for amd64 and arm64, and Paco pulls it on
+# first use — so an installed host needs nothing from this file.
 #
-#   docker build -t paco-sandbox:latest packages/sandbox/docker
+# To build it yourself, tag it as whatever `PACO_SANDBOX_IMAGE` says (see
+# ./config.ts), because the pull only happens when the image is absent locally:
 #
-# The tag is fixed (`SANDBOX_IMAGE` in ./config.ts) and there is no fallback to a
-# stock Node image: without this build, starting a workspace fails immediately
-# and says so, rather than succeeding and then failing later for want of ripgrep
-# or a build toolchain.
+#   docker build -t ghcr.io/stack256org/paco-sandbox:latest packages/sandbox/docker
+#
+# There is no fallback to a stock Node image. That fallback was worse than an
+# error: workspaces started fine and then failed at the point of use, for want
+# of ripgrep or a build toolchain that only this image carries.
 FROM node:24-bookworm
 
 # - ripgrep makes the agent's Grep tool fast on large repos.

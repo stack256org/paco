@@ -60,9 +60,11 @@ cp apps/web/.env.example apps/web/.env
 #   APP_SECRET=$(openssl rand -hex 32)
 #   APP_URL=http://localhost:3066
 
-# 3. Build the sandbox image. Required — every chat runs inside it, and Paco
-#    refuses to start a sandbox if the image is missing.
-docker build -t paco-sandbox:latest packages/sandbox/docker
+# 3. The sandbox image every chat runs inside. Optional: Paco pulls the
+#    published one on first use, so skip this unless you are changing the
+#    image itself. Tag a local build as the name Paco asks for — the pull only
+#    happens when nothing is there under that tag.
+docker build -t ghcr.io/stack256org/paco-sandbox:latest packages/sandbox/docker
 
 # 4. Sign in to Claude. Paco drives the Claude Code CLI with your subscription.
 claude auth login

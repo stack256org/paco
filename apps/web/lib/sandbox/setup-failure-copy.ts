@@ -32,8 +32,12 @@ export const DOCKER_MISSING =
 export const DOCKER_NOT_RUNNING =
   "Docker is installed but isn't running, so there's nowhere to build your app. Start Docker Desktop, wait for it to say it's running, then try again.";
 
+// Paco downloads this image itself now, so reaching here means the download
+// failed rather than that somebody forgot a build step. The old copy told the
+// reader to run `docker build ... packages/sandbox/docker`, which is impossible
+// on a host installed from the .deb: there is no checkout to build from.
 export const IMAGE_MISSING =
-  "The workspace image Paco builds your app in hasn't been built yet. Run `docker build -t paco-sandbox:latest packages/sandbox/docker` where Paco is installed, then try again.";
+  "Paco couldn't download the workspace image it runs your app in. Check this computer can reach ghcr.io, then try again — or pull it yourself with `docker pull ghcr.io/stack256org/paco-sandbox:latest`.";
 
 export const REPO_NOT_FOUND =
   "We couldn't find that repository on GitHub. It may have been renamed or deleted, or the connected account may not be able to see it. Check it in Settings, then try again.";
@@ -140,9 +144,19 @@ const MATCHERS: ReadonlyArray<{
     reason: "docker-not-running",
   },
   {
-    // Paco's own wording from `#ensureImage`, plus what a registry says when it
-    // is asked for an image that was never pushed anywhere.
-    test: /is not built|manifest unknown|manifest for .* not found|failed to resolve reference|no such image|pull access denied/,
+    // What a registry says when a pull cannot be satisfied: the tag is absent,
+    // or the package is private and the anonymous request was refused.
+    //
+    // `is not built` is Paco's own wording from a version that refused to pull
+    // the default image at all. Nothing emits it any more, and it is kept
+    // deliberately: a provisioning failure is flattened into
+    // `sessions.lifecycleError` as a plain string, so a host upgraded from that
+    // version still has stored errors phrased that way, and they should still
+    // classify rather than fall through to "unknown".
+    // Deliberately not a bare `unauthorized`: this matcher runs before the
+    // GitHub auth one, and git says "unauthorized" too — a clone rejected by
+    // GitHub would then be reported as a missing workspace image.
+    test: /is not built|manifest unknown|manifest for .* not found|failed to resolve reference|no such image|pull access denied|denied: denied/,
     reason: "image-missing",
   },
   {

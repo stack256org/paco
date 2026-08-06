@@ -285,6 +285,70 @@ function toContainerPath(hostWorkspace: string, hostPath: string): string {
     : path.resolve(hostWorkspace);
 }
 
+/**
+ * The slice of dockerode `ensureSandboxImage` actually uses.
+ *
+ * Narrow on purpose. The whole reason this function lives at module scope
+ * rather than as a private static on the class is so it can be exercised
+ * without a Docker daemon, and a parameter typed as the full `Docker` cannot be
+ * faked in a test without lying about a hundred methods it never calls.
+ */
+export interface SandboxImageHost {
+  getImage(name: string): { inspect(): Promise<unknown> };
+  pull(name: string): Promise<NodeJS.ReadableStream>;
+  modem: {
+    followProgress(
+      stream: NodeJS.ReadableStream,
+      onFinished: (err: Error | null) => void,
+    ): void;
+  };
+}
+
+/**
+ * Make sure `image` is on this host, pulling it if it is not.
+ *
+ * Local first, and that order is load-bearing twice over: a developer who has
+ * built the image themselves keeps their build rather than having it replaced
+ * from the registry, and a host that already has it never touches the network
+ * to start a chat.
+ *
+ * There used to be a special case here that refused to pull the default image
+ * at all, throwing "is not built. Run: docker build -t paco-sandbox:latest
+ * packages/sandbox/docker" instead. That was true when the image existed only
+ * in this repository — but `release.yml` has published it to ghcr.io since, and
+ * the advice was impossible to follow on a host installed from the .deb, which
+ * has no checkout. The result was an install that served its UI and then failed
+ * every single chat. The special case is gone; the default image is a real
+ * registry reference and is pulled like any other.
+ */
+export async function ensureSandboxImage(
+  docker: SandboxImageHost,
+  image: string,
+): Promise<void> {
+  try {
+    await docker.getImage(image).inspect();
+    return;
+  } catch {
+    // Not present locally — fall through to pull.
+  }
+
+  const stream = await docker.pull(image);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    docker.modem.followProgress(stream, (err: Error | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
 export class DockerSandbox implements Sandbox {
   readonly type = "docker" as const;
   readonly host = "localhost";
@@ -366,7 +430,7 @@ export class DockerSandbox implements Sandbox {
       return sandbox;
     }
 
-    await DockerSandbox.#ensureImage(docker, config.image ?? SANDBOX_IMAGE);
+    await ensureSandboxImage(docker, config.image ?? SANDBOX_IMAGE);
 
     const exposedPorts: Record<string, Record<string, never>> = {};
     const portBindings: Record<string, Array<{ HostPort: string }>> = {};
@@ -444,40 +508,6 @@ export class DockerSandbox implements Sandbox {
     );
 
     return match ? docker.getContainer(match.Id) : undefined;
-  }
-
-  static async #ensureImage(docker: Docker, image: string): Promise<void> {
-    try {
-      await docker.getImage(image).inspect();
-      return;
-    } catch {
-      // Not present locally — fall through to pull.
-    }
-
-    // Paco's own image is built from this repository, so it exists in no
-    // registry. Pulling it produces a "manifest unknown" error that reads like
-    // a network fault; say what to actually do instead.
-    if (image === SANDBOX_IMAGE) {
-      throw new Error(
-        `Sandbox image "${image}" is not built. Run: docker build -t ${SANDBOX_IMAGE} packages/sandbox/docker`,
-      );
-    }
-
-    const stream = await docker.pull(image);
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      docker.modem.followProgress(stream, (err: Error | null) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        if (err) {
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
   }
 
   static #readPortBindings(

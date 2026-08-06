@@ -16,8 +16,8 @@ production path. Development is a separate thing and stays Docker-based; see
 curl -fsSL https://apt.stack256.org/install.sh | sudo sh
 ```
 
-> **The package is proven. The repository serving it is not live yet** — so
-> the command above 404s today, and you have to build and install by hand.
+> **This is live and verified.** `apt.stack256.org` serves a signed index over
+> a Let's Encrypt certificate, and the command above works.
 >
 > **What has been verified**, on bare Ubuntu 24.04 VMs, by installing the real
 > `.deb` and driving it in a browser rather than with `curl`:
@@ -39,6 +39,9 @@ curl -fsSL https://apt.stack256.org/install.sh | sudo sh
 > - A real domain with a real Let's Encrypt chain, served over HTTPS — via the
 >   platform's edge, with `paco tls` and **Request certificate** both correctly
 >   declining rather than running certbot (§8).
+> - And the delivery path itself, against the live repository: the keyring
+>   fetched, `apt update` accepting the signature with no warning, and
+>   `apt install paco` resolving and downloading the real 230&nbsp;MB package.
 >
 > That pass found five bugs that every earlier check had missed, each of which
 > would have hit every install: a `devDependencies`-only `dotenv` that
@@ -48,14 +51,9 @@ curl -fsSL https://apt.stack256.org/install.sh | sudo sh
 > calling deleted Docker code, and `paco-tls-hook` querying Postgres as the
 > wrong user. Nothing before that pass exercised a page the way a browser does.
 >
-> **What is still unproven:** the `curl | sh` path itself. `apt.stack256.org`
-> is not serving, so the keyring fetch, the `sources.list` entry, and
-> `apt-get install -y paco` have never run end to end. Everything downstream of
-> `dpkg` has.
->
-> So until the repository is live, build and install by hand, on the amd64 or
-> arm64 Linux host you intend to run it on — it has to be built on the same
-> architecture it installs on, not cross-compiled:
+> Building the package yourself is still supported, and is what you want for a
+> change you have not released — it has to be built on the same architecture it
+> installs on, never cross-compiled:
 >
 > ```bash
 > git clone https://github.com/stack256org/paco.git
@@ -67,9 +65,6 @@ curl -fsSL https://apt.stack256.org/install.sh | sudo sh
 > sh packaging/build-deb.sh 0.0.0-dev amd64   # or arm64 — match this host
 > sudo apt install ./paco_0.0.0-dev_amd64.deb
 > ```
->
-> Delete this whole note once `apt.stack256.org` is serving and the
-> `curl | sh` path above has been run against it once.
 
 Run as root — the installer refuses otherwise — on a host running systemd; it
 refuses on anything else too, since there is no other supported native
@@ -146,12 +141,16 @@ which the package does automatically:
   ```bash
   sudo apt install docker.io                                    # if not already present
   sudo usermod -aG docker paco && sudo systemctl restart paco    # let the service reach it
-  docker build -t paco-sandbox:latest packages/sandbox/docker    # on this host, from this repo
   ```
 
-  Nothing in the package does the middle step for you — without it, every
+  Nothing in the package does the second step for you — without it, every
   chat fails trying to reach the Docker socket. See §14 if that happens
-  after you've done all three.
+  after you've done both.
+
+  The workspace image needs no step of its own: the first chat pulls
+  `ghcr.io/stack256org/paco-sandbox` itself. It is a few gigabytes, so
+  `docker pull ghcr.io/stack256org/paco-sandbox:latest` ahead of time moves
+  that wait somewhere you chose.
 - **A certificate**, if you want `https://`. See §8.
 
 **Requirements, honestly:** a Linux host running systemd, root access, and
@@ -814,16 +813,32 @@ couldn't be read is unknown, not clean.
 
 ## 14. Troubleshooting
 
-### "Sandbox image … is not built"
+### "Paco couldn't download the workspace image"
+
+Paco pulls `ghcr.io/stack256org/paco-sandbox` on the first chat, so this means
+the pull failed rather than that a build step was skipped. Reproduce it by hand
+to see what the registry actually said:
 
 ```bash
-docker build -t paco-sandbox:latest packages/sandbox/docker
-docker images paco-sandbox
+docker pull ghcr.io/stack256org/paco-sandbox:latest
+docker images ghcr.io/stack256org/paco-sandbox
 ```
 
-Build it on this host, from a checkout of this repository — the image
-exists in no registry Paco will pull from, regardless of what the release
-pipeline publishes elsewhere.
+- `denied` or `manifest unknown` — the package is not readable anonymously.
+  That is a publishing fault on our side, not yours; please open an issue.
+- A timeout or DNS failure — this host cannot reach `ghcr.io`. On a network
+  that does not allow it, mirror the image internally and set
+  `PACO_SANDBOX_IMAGE` in `/etc/paco/paco.env` to your copy, then
+  `sudo systemctl restart paco`.
+
+A locally built image still wins if it is tagged as what Paco asks for — the
+pull only happens when the image is absent — which is how a development host
+avoids the download entirely.
+
+> Older installs failed with `Sandbox image "paco-sandbox:latest" is not built`
+> and told you to `docker build` from a checkout. That was impossible on a host
+> installed from the `.deb`, which has none. Upgrade, and the image is fetched
+> for you.
 
 ### Chats fail immediately, or the agent never starts
 
