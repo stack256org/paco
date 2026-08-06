@@ -46,35 +46,22 @@ Paco installs as a native package on a Linux host running systemd:
 curl -fsSL https://apt.stack256.org/install.sh | sudo sh
 ```
 
-> **Not live yet** — `apt.stack256.org` isn't serving, so the command above
-> 404s today.
->
-> The package itself is proven: installed on bare Ubuntu 24.04 VMs and walked
-> through in a browser, covering first-run setup, a real Let's Encrypt chain,
-> and `APP_SECRET`, the database and Claude's credential all surviving
-> reinstall and `apt remove`. What that leaves untested is only the
-> `curl | sh` path above — the keyring fetch and `apt-get install`, which need
-> the repository to exist. See [docs/self-hosting.md](docs/self-hosting.md).
->
-> Until then, build and install the package by hand, on the amd64 or arm64
-> Linux host you intend to run it on:
->
-> ```bash
-> git clone https://github.com/stack256org/paco.git
-> cd paco
-> corepack enable && pnpm install --frozen-lockfile
-> pnpm --dir apps/web exec next build   # not `pnpm --dir apps/web build` — that
->                                        # also runs migrations against a real
->                                        # database, which packaging must not do
-> sh packaging/build-deb.sh 0.0.0-dev amd64   # or arm64 — match this host
-> sudo apt install ./paco_0.0.0-dev_amd64.deb
-> ```
->
-> Delete this note once the repository is serving and `curl | sh` has been run
-> against it once.
+Verified end to end: the package installed on bare Ubuntu 24.04 VMs and walked
+through in a browser — first-run setup, a real Let's Encrypt chain, and
+`APP_SECRET`, the database and Claude's credential all surviving reinstall and
+`apt remove` — and the delivery path itself, with `apt update` accepting the
+signature and `apt install paco` pulling the real package from
+[apt.stack256.org](https://apt.stack256.org). Building it by hand instead is in
+[docs/self-hosting.md](docs/self-hosting.md).
 
-This adds `deb https://apt.stack256.org stable main` as a signed APT source
-and installs the `paco` package. What that gets you:
+This adds
+
+```text
+deb [signed-by=/etc/apt/keyrings/stack256-archive-keyring.gpg] https://apt.stack256.org stable main
+```
+
+as a signed APT source — one source and one key for every Stack256 package, not
+just this one — and installs `paco`. What that gets you:
 
 - **Postgres and nginx as ordinary host packages** — Postgres is reached over
   a Unix socket, with no TCP listener at all.
@@ -104,12 +91,17 @@ A few things happen outside that flow:
   ```bash
   sudo apt install docker.io                                    # if not already present
   sudo usermod -aG docker paco && sudo systemctl restart paco    # let the service reach it
-  docker build -t paco-sandbox:latest packages/sandbox/docker    # on the host, from this repo
   ```
 
-  Nothing in the package does the middle step for you — without it, Paco can
+  Nothing in the package does the second step for you — without it, Paco can
   start and serve its UI, but every chat fails trying to reach the Docker
   socket.
+
+  The workspace image is fetched for you: the first chat pulls
+  `ghcr.io/stack256org/paco-sandbox`, which is a few gigabytes and happens
+  once. Pre-pull it with
+  `docker pull ghcr.io/stack256org/paco-sandbox:latest` if you would rather
+  not wait at that moment, or point `PACO_SANDBOX_IMAGE` at your own mirror.
 - **TLS** is `sudo paco tls <domain>`, once DNS for that domain resolves here
   — a per-hostname Let's Encrypt certificate over HTTP-01. No wildcard, no DNS
   credential, and it does not cover preview hostnames (see below and

@@ -34,7 +34,11 @@ describe("classifySetupFailureText", () => {
       "docker-not-running",
     ],
     [
-      "sandbox image never built",
+      // Nothing emits this any more — Paco pulls the image rather than refusing
+      // to. Kept because a host upgraded from that version still has errors
+      // phrased this way stored in `sessions.lifecycleError`, and they must
+      // still classify rather than fall through to "unknown".
+      "legacy wording, from before the image was pulled",
       'Sandbox image "paco-sandbox:latest" is not built. Run: docker build -t paco-sandbox:latest packages/sandbox/docker',
       "image-missing",
     ],
@@ -42,6 +46,21 @@ describe("classifySetupFailureText", () => {
       "image absent from any registry",
       'Error response from daemon: failed to resolve reference "docker.io/library/paco-sandbox:latest": manifest unknown',
       "image-missing",
+    ],
+    [
+      // The failure that actually reaches users now, and the one that took
+      // Docket's 0.1.0 image down: a GitHub Packages entry is private until
+      // somebody makes it public, and an anonymous pull is refused outright.
+      "sandbox image published but private",
+      "Error response from daemon: Head https://ghcr.io/v2/stack256org/paco-sandbox/manifests/latest: denied: denied",
+      "image-missing",
+    ],
+    [
+      // Ordering guard: this matcher sits before the GitHub auth one, so a
+      // clone rejected by GitHub must not be reported as a missing image.
+      "github rejects the token, not the registry",
+      "Failed to clone https://github.com/acme/app: fatal: Authentication failed for 'https://github.com/acme/app.git/'",
+      "repo-auth-failed",
     ],
     [
       "private or deleted repository",

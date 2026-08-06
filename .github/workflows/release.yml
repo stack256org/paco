@@ -201,6 +201,59 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ── Could a host actually pull the sandbox image? ─────────────────────────
+  #
+  # A GitHub Packages entry is PRIVATE when it is first created, even from a
+  # public repository, and nothing in the push path reveals it: the build is
+  # green, the tags are there, and only a signed-out client is refused. Docket
+  # shipped its 0.1.0 image that way and a customer found it, not CI — so this
+  # asks the question from the one vantage point that can tell the difference.
+  #
+  # Anonymous on purpose: no docker/login-action, no GITHUB_TOKEN. An installed
+  # host pulling this image has no credentials either, which is the entire
+  # point.
+  #
+  # It does NOT gate `release` below — the image is already pushed by the time
+  # this runs, so blocking the .deb upload would punish the wrong step. A red
+  # run is the signal; the fix is one click and never needed again.
+  verify-sandbox-public:
+    needs: [version, sandbox-image]
+    if: needs.version.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the sandbox image signed out
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Fixed rather than derived from github.repository: the image is
+          # `paco-sandbox`, not `paco`, so the repository name is the wrong
+          # string here.
+          repo="stack256org/paco-sandbox"
+
+          # `|| true` so a network failure reaches the message below instead of
+          # dying inside the pipeline under `set -e` with nothing explaining
+          # what was being tested.
+          token=$(curl -sS "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
+                  | jq -r '.token // empty' || true)
+
+          if [ -z "$token" ]; then
+            echo "::error::ghcr.io/${repo} refused an anonymous pull token, so the package is PRIVATE. Every host that installs Paco will fail to pull the sandbox image, and no chat can run. Fix: https://github.com/orgs/stack256org/packages/container/paco-sandbox/settings -> Danger Zone -> Change visibility -> Public."
+            exit 1
+          fi
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/${repo}/manifests/${TAG}")
+
+          if [ "$code" != "200" ]; then
+            echo "::error::ghcr.io/${repo}:${TAG} answered HTTP ${code} to a signed-out request, so an installed host cannot pull this tag."
+            exit 1
+          fi
+
+          echo "ghcr.io/${repo}:${TAG} is publicly pullable."
+
   # Uploads both .deb files to the GitHub Release, then tells Stack256org/apt
   # to rebuild its signed index. That repository is the one place the signing
   # key and the Packages/Release index live — this workflow does not sign

@@ -9,18 +9,33 @@
 set -eu
 
 APT_REPO_URL="https://apt.stack256.org"
-APT_SOURCE=/etc/apt/sources.list.d/paco.list
+# Both of these are named after the ORGANISATION, not this product, and that is
+# load-bearing rather than cosmetic.
+#
+# apt.stack256.org is one repository serving every Stack256 package, signed by
+# one key. If each product's installer wrote its own source file, a host running
+# two of them would carry two `.list` entries for the identical `deb
+# https://apt.stack256.org stable main` line — which apt reports on every update
+# as "Target Packages ... is configured multiple times", and which means
+# removing one product silently breaks the other's updates. One repository gets
+# one source file, whichever product's installer happens to write it first.
+#
+# The same argument applies to the keyring: one key signs the whole index, so a
+# Paco-named key would read as Paco's own and become wrong the moment Paco is
+# not the only thing installed.
+#
+# These paths are verified against the live server, not assumed — see the
+# `stack256-archive-keyring.gpg` and `dists/stable/InRelease` entries published
+# by Stack256org/apt's reindex workflow.
+APT_SOURCE=/etc/apt/sources.list.d/stack256.list
 KEYRING_DIR=/etc/apt/keyrings
-KEYRING_FILE="$KEYRING_DIR/stack256-paco.gpg"
-# Stack256org/apt does not exist yet (see .github/workflows/release.yml), so
-# this exact path is an assumption about what it will publish, not something
-# verified against a live server — confirm it once that repository is real.
-# Named after the organisation, not this product: one key signs the index for
-# every Stack256 package, so a Paco-named key would read as Paco's own and
-# become wrong the moment Paco is not the only thing in the repository. The old
-# `paco-archive-keyring.gpg` path is still published as a copy, for hosts
-# installed from v0.1.0, whose installer fetched that name.
+KEYRING_FILE="$KEYRING_DIR/stack256-archive-keyring.gpg"
 GPG_KEY_URL="$APT_REPO_URL/stack256-archive-keyring.gpg"
+
+# What v0.1.0's installer wrote. Removed rather than left in place — see the
+# migration step further down for why leaving them is not harmless.
+LEGACY_APT_SOURCE=/etc/apt/sources.list.d/paco.list
+LEGACY_KEYRING_FILE="$KEYRING_DIR/stack256-paco.gpg"
 
 PACO_ETC=/etc/paco
 PACO_ENV="$PACO_ETC/paco.env"
@@ -167,6 +182,28 @@ chmod 0644 "$KEYRING_FILE"
 cat > "$APT_SOURCE" <<EOF
 deb [signed-by=$KEYRING_FILE] $APT_REPO_URL stable main
 EOF
+
+# Migrate a host installed by v0.1.0's installer, which wrote product-named
+# paths. This runs AFTER the new source file exists and BEFORE `apt-get update`,
+# so there is never a moment with no source at all, and the update below never
+# sees both.
+#
+# Not cosmetic tidying: the old and new files name the identical repository, so
+# leaving both makes every `apt update` on that host warn that the target is
+# configured multiple times. Removed only when it is the file this installer
+# itself wrote — an operator's own source pointing somewhere else is not ours to
+# delete, and `paco.list` is a plausible name for one.
+if [ -f "$LEGACY_APT_SOURCE" ] \
+  && grep -q "$APT_REPO_URL" "$LEGACY_APT_SOURCE" 2>/dev/null; then
+  echo "install.sh: removing $LEGACY_APT_SOURCE, superseded by $APT_SOURCE"
+  rm -f "$LEGACY_APT_SOURCE"
+fi
+# Safe to remove unconditionally once no source file references it: the key is
+# re-downloadable, and nothing else on a host is called this.
+if [ -f "$LEGACY_KEYRING_FILE" ] \
+  && ! grep -rqs "$LEGACY_KEYRING_FILE" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+  rm -f "$LEGACY_KEYRING_FILE"
+fi
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y paco

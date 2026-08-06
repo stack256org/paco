@@ -1,19 +1,46 @@
 import type { SandboxHooks } from "../interface.ts";
 
 /**
- * Image sandboxes are created from.
+ * Where the sandbox image is published, and therefore what a host with no
+ * checkout can pull.
  *
- * Built from `./Dockerfile`:
+ * `release.yml` builds this image from `./Dockerfile` for amd64 and arm64 and
+ * pushes it on every tag. It used to be named `paco-sandbox:latest` here — a
+ * bare local name, which Docker resolves against Docker Hub, where it has never
+ * existed. So the published image was never fetched by anything, and a host
+ * installed from the .deb could not run a single chat: it was told to
+ * `docker build` from a repository it does not have.
  *
- *   docker build -t paco-sandbox:latest packages/sandbox/docker
- *
- * Not configurable, and deliberately not falling back to a stock Node image.
- * The fallback was worse than an error: sandboxes started fine and then failed
- * at the point of use, because only this image carries the toolchain a
- * generated app needs. One image means the sandbox either works or the image
- * is missing, and the second is a clear failure at startup.
+ * `:latest` rather than a version pin, deliberately. The image is
+ * `node:24-bookworm` plus apt packages and pnpm — a toolchain, with nothing in
+ * it that tracks Paco's own version — and `release.yml` only moves `latest` on
+ * a final release, never a prerelease. Pinning would mean plumbing the package
+ * version through to runtime for a coupling that does not exist.
  */
-export const SANDBOX_IMAGE = "paco-sandbox:latest";
+export const PUBLISHED_SANDBOX_IMAGE =
+  "ghcr.io/stack256org/paco-sandbox:latest";
+
+/**
+ * Resolve the image sandboxes are created from.
+ *
+ * `PACO_SANDBOX_IMAGE` overrides it, which is the escape hatch for an operator
+ * mirroring the image inside their own network, and for a developer who has
+ * built it locally under another tag. Blank counts as unset: someone who
+ * exports the variable and leaves it empty gets the default rather than a pull
+ * of `""`.
+ *
+ * Still not falling back to a stock Node image if the pull fails. That fallback
+ * was worse than an error — sandboxes started fine and then failed at the point
+ * of use, because only this image carries the toolchain a generated app needs.
+ */
+export function resolveSandboxImage(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return env.PACO_SANDBOX_IMAGE?.trim() || PUBLISHED_SANDBOX_IMAGE;
+}
+
+/** Image sandboxes are created from. See {@link resolveSandboxImage}. */
+export const SANDBOX_IMAGE = resolveSandboxImage();
 
 /** Ports published from the container to the host for preview URLs. */
 export const DEFAULT_PORTS = [3000, 5173, 4321, 8000] as const;
