@@ -40,39 +40,64 @@ Browser  ->  Next.js + durable workflow  ->  Claude Code (host)  ->  Docker sand
 
 ## Installing
 
-Paco installs as a native package on a Linux host running systemd:
+One command, on a fresh Linux host running systemd:
 
 ```bash
 curl -fsSL https://apt.stack256.org/install.sh | sudo sh
 ```
 
-Verified end to end: the package installed on bare Ubuntu 24.04 VMs and walked
-through in a browser — first-run setup, a real Let's Encrypt chain, and
-`APP_SECRET`, the database and Claude's credential all surviving reinstall and
-`apt remove` — and the delivery path itself, with `apt update` accepting the
-signature and `apt install paco` pulling the real package from
-[apt.stack256.org](https://apt.stack256.org). Building it by hand instead is in
-[docs/self-hosting.md](docs/self-hosting.md).
+That is the whole install. It brings its own dependencies — you do not install
+Docker, or a database, or a web server, and there is nothing to wire together
+afterwards:
 
-This adds
+- **Docker**, installed and started, and the service account put in the
+  `docker` group. Chats run in containers, so this is not optional; the
+  installer does it rather than telling you to.
+- **PostgreSQL and nginx** as ordinary host packages. Postgres is reached over
+  a Unix socket, with no TCP listener at all.
+- **Its own bundled Node and Claude Code CLI**, pinned — no system Node, no npm.
+- **The database created, a secret generated, and the service started**, all
+  before the command returns.
+- **`apt upgrade` as the update mechanism** thereafter — the same trust model
+  and the same command as every other package on the host.
+
+When it finishes there is exactly **one** thing left, and only because it needs
+your Claude account:
+
+```bash
+sudo paco auth
+```
+
+Then open the URL it printed and create your account.
+
+**What it needs:** a Linux host running systemd, root access, and ports 80 and
+443 free — nginx owns both, and there's no flag to move them.
+
+<details>
+<summary>What the installer actually does, if you'd rather not pipe a script into a shell</summary>
+
+It adds one signed APT source
 
 ```text
 deb [signed-by=/etc/apt/keyrings/stack256-archive-keyring.gpg] https://apt.stack256.org stable main
 ```
 
-as a signed APT source — one source and one key for every Stack256 package, not
-just this one — and installs `paco`. What that gets you:
+— one source and one key for every Stack256 package, not just this one —
+installs `docker.io` if no container runtime is present, then installs `paco`,
+which pulls in PostgreSQL and nginx and runs the setup above from its
+`postinst`. Run it with `--dry-run` to have it print each of those steps
+without doing any of them, or read it first: it is served from
+[apt.stack256.org/install.sh](https://apt.stack256.org/install.sh) and lives at
+[`install.sh`](install.sh) in this repository.
 
-- **Postgres and nginx as ordinary host packages** — Postgres is reached over
-  a Unix socket, with no TCP listener at all.
-- **Its own bundled Node and Claude Code CLI** (pinned version), so nothing
-  else needs installing on the host to run it — no system Node, no npm.
-- **A systemd service**, started and enabled immediately.
-- **`apt upgrade` as the update mechanism** thereafter — the same trust
-  model and the same command as every other package on the host.
+`apt install paco` on a host that already has the source works identically —
+the package does its own setup, so neither route leaves you with steps to
+finish by hand.
 
-**Requirements, honestly:** a Linux host running systemd, root access, and
-ports 80 and 443 free — nginx owns both, and there's no flag to move them.
+Building the package yourself instead is in
+[docs/self-hosting.md](docs/self-hosting.md).
+
+</details>
 
 ## After you install
 
@@ -84,24 +109,14 @@ until one is set), then done.
 
 A few things happen outside that flow:
 
-- **`sudo paco auth`** signs the service into Claude Code — do this before
-  the first chat, or every turn fails with nothing to run.
-- **Chats need Docker**, which the package only recommends, not requires:
-
-  ```bash
-  sudo apt install docker.io                                    # if not already present
-  sudo usermod -aG docker paco && sudo systemctl restart paco    # let the service reach it
-  ```
-
-  Nothing in the package does the second step for you — without it, Paco can
-  start and serve its UI, but every chat fails trying to reach the Docker
-  socket.
-
-  The workspace image is fetched for you: the first chat pulls
-  `ghcr.io/stack256org/paco-sandbox`, which is a few gigabytes and happens
-  once. Pre-pull it with
-  `docker pull ghcr.io/stack256org/paco-sandbox:latest` if you would rather
-  not wait at that moment, or point `PACO_SANDBOX_IMAGE` at your own mirror.
+- **`sudo paco auth`** signs the service into Claude Code. The one step the
+  installer cannot do for you, because it needs your account — and every turn
+  fails with nothing to run until it is done.
+- **The first chat is slower than the rest.** It pulls
+  `ghcr.io/stack256org/paco-sandbox`, the image your app is built inside, which
+  is a few gigabytes and happens once. Nothing to do — but
+  `docker pull ghcr.io/stack256org/paco-sandbox:latest` moves that wait
+  somewhere you chose, and `PACO_SANDBOX_IMAGE` points it at your own mirror.
 - **TLS** is `sudo paco tls <domain>`, once DNS for that domain resolves here
   — a per-hostname Let's Encrypt certificate over HTTP-01. No wildcard, no DNS
   credential, and it does not cover preview hostnames (see below and

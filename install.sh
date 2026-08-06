@@ -154,7 +154,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "install.sh: --dry-run - the following would happen, but nothing below actually runs:"
   echo "  - install ca-certificates, gnupg, curl if missing"
   echo "  - add $APT_SOURCE (deb $APT_REPO_URL stable main), signed by $KEYRING_FILE"
+  echo "  - install and start docker.io if no container runtime is present"
   echo "  - apt-get update && apt-get install -y paco"
+  echo "    (which also brings PostgreSQL and nginx, and puts the paco user in"
+  echo "     the docker group so chats can run)"
   if [ -n "$DOMAIN" ]; then
     echo "  - set APP_URL=http://$DOMAIN in $PACO_ENV and restart the paco service"
   fi
@@ -206,6 +209,40 @@ if [ -f "$LEGACY_KEYRING_FILE" ] \
 fi
 
 apt-get update
+
+# Docker, installed here rather than left to whoever ran this.
+#
+# Every chat runs inside a container. A host without Docker installs cleanly,
+# serves its UI, and then fails the first chat — which is the least useful
+# possible outcome of a one-command install, because everything looks fine
+# until the moment someone tries to use it.
+#
+# It stays `Recommends` rather than `Depends` in the package: Paco is still
+# worth installing on a host that will never run chats, and a hard dependency
+# would drag a container runtime onto machines that do not want one. The
+# installer's job is different from the package's — it is meant to produce a
+# host that works — so it installs Docker explicitly.
+#
+# Explicitly, and BEFORE paco, for a second reason: apt gives no ordering
+# guarantee for a recommended package, and paco's postinst can only add the
+# service account to the `docker` group if that group already exists. Doing it
+# here is what makes that branch reliable instead of a coin toss.
+if command -v docker >/dev/null 2>&1; then
+  echo "install.sh: Docker is already installed."
+else
+  echo "install.sh: installing Docker, which every chat runs inside."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io \
+    || fail "could not install docker.io. Install a container runtime yourself, then re-run this script."
+fi
+
+# A runtime that is installed but not running fails exactly like one that is
+# absent, and a fresh container install is not always started. `--now` covers
+# both enable and start; the service is `docker.service` on Debian and Ubuntu,
+# with the bare name kept as a fallback for derivatives that name it otherwise.
+systemctl enable --now docker.service >/dev/null 2>&1 \
+  || systemctl enable --now docker >/dev/null 2>&1 \
+  || echo "install.sh: WARNING - could not start the Docker service. Chats will fail until it runs; check 'systemctl status docker'." >&2
+
 DEBIAN_FRONTEND=noninteractive apt-get install -y paco
 
 # --- 4. Wire the domain in, if one was given, and print what's next. -------
@@ -239,10 +276,13 @@ else
   echo "Paco is installed. Visit http://<this host's address>/ to finish setup."
 fi
 echo
-echo "Next steps:"
-echo "  - Open the URL above and complete first-run registration."
-echo "  - Run 'paco auth' (as root) to sign the paco user into Claude Code -"
-echo "    do this before starting your first chat."
+echo "Everything is installed and running: the app, its database, nginx, and"
+echo "Docker for the sandboxes chats run in. One thing is left, and it cannot"
+echo "be automated because it needs your Claude account:"
+echo
+echo "  sudo paco auth"
+echo
+echo "Then open the URL above and create your account. Also worth knowing:"
 echo "  - A domain can be set (or changed) later from Settings."
 echo "  - For TLS: if this host has its own public IP, run"
 echo "    'sudo paco tls <domain>' once the domain resolves here. If your"

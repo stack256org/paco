@@ -244,6 +244,41 @@ fi
 rm -f /tmp/paco-sudoers-check.log
 
 # -----------------------------------------------------------------------------
+# 6b. Docker group membership for the service account.
+#
+# Every chat runs in a container, and paco.service talks to
+# /var/run/docker.sock as the unprivileged paco user — which the socket only
+# permits for members of the `docker` group. Without this the app starts,
+# serves its UI, and fails every single chat with a permission error on the
+# socket, which reads like a Docker fault rather than a missing group.
+#
+# Deliberately here rather than only in install.sh, so `apt install paco` on a
+# host that already has Docker is as complete as the curl|sh path.
+#
+# Note this grants the paco user effective root on the host, because access to
+# the Docker socket always does. That is inherent to running containers on
+# behalf of an agent, not something conferred here; it is stated plainly rather
+# than done quietly.
+#
+# Guarded on the group existing, because docker is Recommends and apt gives no
+# guarantee that a recommended package is configured before this one.
+# install.sh installs Docker first precisely so this branch is taken; when it
+# is not, say so and carry on rather than failing the install — Paco is still
+# useful without chats, and the fix is two commands.
+#
+# Must run BEFORE the restart in step 7: group membership is read when a
+# process starts, so a service already running would not pick it up.
+if getent group docker >/dev/null 2>&1; then
+  if ! id -nG "$PACO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    usermod -aG docker "$PACO_USER"
+    echo "paco: added the '$PACO_USER' user to the 'docker' group so chats can run."
+  fi
+else
+  echo "paco: Docker was not found, so chats cannot run yet. Install it and reconfigure paco:" >&2
+  echo "        apt-get install -y docker.io && dpkg-reconfigure paco" >&2
+fi
+
+# -----------------------------------------------------------------------------
 # 7. Enable and (re)start the service. `daemon-reload` picks up a changed
 # unit file on upgrade; `restart` (not `try-restart`) so an upgrade always
 # ends up running the new version, not the old one left running from

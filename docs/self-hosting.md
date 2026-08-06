@@ -130,28 +130,28 @@ only ever runs once, for the account that claims the instance.
 
 ### What installing does not do for you
 
-Three things need a manual step after `apt install paco` finishes, none of
-which the package does automatically:
+Almost nothing. Docker is installed and started, the `paco` user is put in the
+`docker` group, PostgreSQL and nginx are configured, a secret is generated and
+the service is running — all before the installer returns. What is left:
 
-- **`sudo paco auth`** — see §3. Nothing runs a chat until this is done.
-- **Docker, for chats.** The package only recommends Docker, it does not
-  depend on it — Paco starts and serves its UI without it. To actually run
-  chats:
+- **`sudo paco auth`** — see §3. It needs your Claude account, so no installer
+  can do it for you, and nothing runs a chat until it is done.
+- **A certificate**, if you want `https://`. See §8.
 
-  ```bash
-  sudo apt install docker.io                                    # if not already present
-  sudo usermod -aG docker paco && sudo systemctl restart paco    # let the service reach it
-  ```
+Two things that look like steps but are not:
 
-  Nothing in the package does the second step for you — without it, every
-  chat fails trying to reach the Docker socket. See §14 if that happens
-  after you've done both.
-
-  The workspace image needs no step of its own: the first chat pulls
+- **The workspace image.** The first chat pulls
   `ghcr.io/stack256org/paco-sandbox` itself. It is a few gigabytes, so
   `docker pull ghcr.io/stack256org/paco-sandbox:latest` ahead of time moves
-  that wait somewhere you chose.
-- **A certificate**, if you want `https://`. See §8.
+  that wait somewhere you chose — but doing nothing is fine.
+- **The docker group.** `postinst` adds the `paco` user to it, so
+  `apt install paco` is as complete as the `curl | sh` route. It only skips
+  this if Docker is absent at that moment, and says so when it does. Be aware
+  of what it grants: access to `/var/run/docker.sock` is equivalent to root on
+  this host, because a process that can reach it can create its own privileged
+  container. That is inherent to running containers on behalf of an agent
+  rather than something this package adds — but it is real, and worth knowing
+  before you put Paco on a host that does other things.
 
 **Requirements, honestly:** a Linux host running systemd, root access, and
 ports 80 and 443 free. nginx owns both, and there is no flag to move either
@@ -847,19 +847,27 @@ sudo paco auth
 sudo su -s /bin/sh -l paco -c "claude auth status"   # should print a logged-in account
 ```
 
-### Chats fail trying to reach Docker, even though the image is built
+### Chats fail trying to reach the Docker socket
 
-Nothing in this package puts the `paco` user in the `docker` group — install
-does not do it for you:
+`postinst` puts the `paco` user in the `docker` group, so this should not
+happen. It does if Docker was installed *after* Paco — the group did not exist
+when the package was configured, and the install said so at the time.
+
+Check first, then repair:
 
 ```bash
+id -nG paco                      # should list: paco docker
 sudo usermod -aG docker paco
-sudo systemctl restart paco
+sudo systemctl restart paco      # membership is read at process start
 ```
+
+The restart is not optional: a running process keeps the groups it started
+with, so adding the user without it changes nothing until the service bounces.
 
 Group membership for `/var/run/docker.sock` is equivalent to root on this
 host: a process that can reach it can create its own privileged container.
-Grant it only where you're comfortable with that.
+That is inherent to running containers on behalf of an agent, but grant it only
+where you are comfortable with it.
 
 ### `paco status` / `paco logs` / `paco tls` isn't a recognised command
 
