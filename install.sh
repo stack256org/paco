@@ -227,21 +227,36 @@ apt-get update
 # guarantee for a recommended package, and paco's postinst can only add the
 # service account to the `docker` group if that group already exists. Doing it
 # here is what makes that branch reliable instead of a coin toss.
+#
+# A failure here warns rather than aborting. Stopping would leave the operator
+# with nothing at all over something recoverable — a transient mirror problem,
+# or a derivative whose runtime is packaged under another name. Paco itself
+# still installs and runs; only chats are affected, and the closing message
+# says so instead of claiming everything is ready.
+DOCKER_READY=1
 if command -v docker >/dev/null 2>&1; then
   echo "install.sh: Docker is already installed."
 else
   echo "install.sh: installing Docker, which every chat runs inside."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io \
-    || fail "could not install docker.io. Install a container runtime yourself, then re-run this script."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || DOCKER_READY=0
 fi
 
 # A runtime that is installed but not running fails exactly like one that is
 # absent, and a fresh container install is not always started. `--now` covers
 # both enable and start; the service is `docker.service` on Debian and Ubuntu,
 # with the bare name kept as a fallback for derivatives that name it otherwise.
-systemctl enable --now docker.service >/dev/null 2>&1 \
-  || systemctl enable --now docker >/dev/null 2>&1 \
-  || echo "install.sh: WARNING - could not start the Docker service. Chats will fail until it runs; check 'systemctl status docker'." >&2
+if [ "$DOCKER_READY" -eq 1 ]; then
+  systemctl enable --now docker.service >/dev/null 2>&1 \
+    || systemctl enable --now docker >/dev/null 2>&1 \
+    || DOCKER_READY=0
+fi
+
+if [ "$DOCKER_READY" -eq 0 ]; then
+  echo "install.sh: WARNING - Docker is not available, so chats will not run." >&2
+  echo "install.sh:           Everything else is installed normally. To fix it:" >&2
+  echo "install.sh:             apt-get install -y docker.io" >&2
+  echo "install.sh:             usermod -aG docker paco && systemctl restart paco" >&2
+fi
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y paco
 
@@ -276,9 +291,15 @@ else
   echo "Paco is installed. Visit http://<this host's address>/ to finish setup."
 fi
 echo
-echo "Everything is installed and running: the app, its database, nginx, and"
-echo "Docker for the sandboxes chats run in. One thing is left, and it cannot"
-echo "be automated because it needs your Claude account:"
+if [ "$DOCKER_READY" -eq 1 ]; then
+  echo "Everything is installed and running: the app, its database, nginx, and"
+  echo "Docker for the sandboxes chats run in. One thing is left, and it cannot"
+  echo "be automated because it needs your Claude account:"
+else
+  echo "The app, its database and nginx are installed and running. Docker is NOT,"
+  echo "so chats will fail until you fix that (see the warning above). Once it is"
+  echo "sorted, this still needs doing, because it needs your Claude account:"
+fi
 echo
 echo "  sudo paco auth"
 echo

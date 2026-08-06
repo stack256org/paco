@@ -270,8 +270,16 @@ rm -f /tmp/paco-sudoers-check.log
 # process starts, so a service already running would not pick it up.
 if getent group docker >/dev/null 2>&1; then
   if ! id -nG "$PACO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-    usermod -aG docker "$PACO_USER"
-    echo "paco: added the '$PACO_USER' user to the 'docker' group so chats can run."
+    # Not allowed to abort the install. This script runs under `set -e`, and an
+    # unreadable group database or a usermod that fails for any other reason
+    # would otherwise leave the package half-configured — a far worse outcome
+    # than an install that works for everything except chats and says so.
+    if usermod -aG docker "$PACO_USER"; then
+      echo "paco: added the '$PACO_USER' user to the 'docker' group so chats can run."
+    else
+      echo "paco: WARNING - could not add '$PACO_USER' to the 'docker' group. Chats will fail on the Docker socket until this is done by hand:" >&2
+      echo "        usermod -aG docker $PACO_USER && systemctl restart paco" >&2
+    fi
   fi
 else
   echo "paco: Docker was not found, so chats cannot run yet. Install it and reconfigure paco:" >&2
