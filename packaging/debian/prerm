@@ -1,0 +1,18 @@
+#!/bin/sh
+# Stop the service before files are removed, on every path that removes
+# them (upgrade, remove, deconfigure) — not just plain `remove`, so a
+# package replaced mid-upgrade isn't left running against files that are
+# about to disappear out from under it.
+set -e
+
+case "$1" in
+  remove | upgrade | deconfigure)
+    if [ -d /run/systemd/system ]; then
+      systemctl stop paco.service || true
+    fi
+    ;;
+  *)
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,371 @@
+#!/bin/sh
+# paco — operate an installed Paco instance (systemd + apt).
+#
+# POSIX sh. Installed to /usr/bin/paco by the .deb (see
+# packaging/build-deb.sh — not this file's namesake
+# packaging/paco-entrypoint.sh, which is what the systemd unit actually
+# execs). Every subcommand below assumes what the .deb's maintainer scripts
+# set up: a `paco.service` unit, `/etc/paco/paco.env`, and a `paco` OS user
+# whose home (/var/lib/paco) holds the Claude credential.
+set -eu
+
+PACO_ETC=/etc/paco
+PACO_ENV="$PACO_ETC/paco.env"
+PACO_USER=paco
+UNIT=paco.service
+NGINX_SITE=/etc/nginx/sites-available/paco
+
+fail() {
+  echo "paco: $1" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: paco <command>
+
+  upgrade    Update the package: apt-get update && apt-get install
+             --only-upgrade paco. Same package manager, same trust model as
+             every other package on this host — there is no separate
+             mechanism to keep in sync.
+  logs       Follow the service's journal (journalctl -u paco -f). Extra
+             arguments are passed through, e.g. `paco logs -n 200`.
+  restart    systemctl restart paco. Re-reads /etc/paco/paco.env — run this
+             after hand-editing that file (e.g. APP_URL, SMTP_*).
+  status     Unit state, installed version, configured domain, whether the
+             bundled Claude Code CLI is present, and whether the paco user
+             is authenticated with it.
+  auth       Run `claude auth login` as the paco user, so the credential is
+             written to /var/lib/paco/.claude — the one thing `dpkg` never
+             touches on upgrade or `remove`. Requires root.
+  tls DOMAIN Obtain and install a certificate for DOMAIN with certbot's
+             nginx plugin (the HTTP-01 challenge, served on port 80), then
+             reload nginx. Requires root.
+
+             Refuses first, before installing certbot or touching anything,
+             if DOMAIN does not already resolve to an address on this host —
+             the HTTP-01 challenge is served here, so pointing it at a name
+             that resolves elsewhere fails with an error that reads like a
+             certbot bug rather than a DNS mistake. Safe to re-run for a
+             domain that already has a certificate: an unexpired one is left
+             alone, a soon-to-expire one is renewed.
+
+             Certificates are issued per hostname, over HTTP-01 only: there
+             is no wildcard certificate and no DNS-provider credential to
+             configure. That means a preview hostname
+             (<slug>.<preview base domain>, see Settings → Domain) is its
+             own separate hostname and needs its own certificate — this
+             command only ever covers the one DOMAIN you pass it, never
+             every preview at once.
+
+There is no `uninstall`. Use `apt remove paco` to stop Paco and keep
+/etc/paco and /var/lib/paco, or `apt purge paco` to also destroy them.
+EOF
+}
+
+require_root() {
+  [ "$(id -u)" = "0" ] || fail "'$1' must run as root (try: sudo paco $1)."
+}
+
+# Reads one KEY from paco.env without ever sourcing it — a stray `$(...)` or
+# unbalanced quote in a hand-edited value would otherwise execute as root
+# the moment any subcommand below ran.
+env_get() {
+  [ -f "$PACO_ENV" ] || return 0
+  sed -n "s/^$1=//p" "$PACO_ENV" | tail -1
+}
+
+# --- upgrade -----------------------------------------------------------------
+
+cmd_upgrade() {
+  require_root upgrade
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y paco
+}
+
+# --- logs ----------------------------------------------------------------------
+
+cmd_logs() {
+  journalctl -u paco -f "$@"
+}
+
+# --- restart -------------------------------------------------------------------
+
+cmd_restart() {
+  require_root restart
+  systemctl restart "$UNIT"
+}
+
+# --- auth ------------------------------------------------------------------
+
+cmd_auth() {
+  require_root auth
+  id "$PACO_USER" >/dev/null 2>&1 \
+    || fail "the '$PACO_USER' user does not exist — is paco installed? See install.sh."
+  if ! su -s /bin/sh -l "$PACO_USER" -c 'command -v claude' >/dev/null 2>&1; then
+    fail "the 'claude' CLI is not on PATH for the '$PACO_USER' user. It ships bundled in the package (/usr/bin/claude) — this means the install is broken. Try 'sudo apt-get install --reinstall paco', then re-run 'paco auth'."
+  fi
+  echo "paco: running 'claude auth login' as $PACO_USER — the credential lands in /var/lib/paco/.claude and survives every future upgrade or 'apt remove'."
+  su -s /bin/sh -l "$PACO_USER" -c 'claude auth login'
+}
+
+# --- tls ---------------------------------------------------------------------
+#
+# `install.sh` only ever prints http://; the plan names certbot but nothing
+# wired it up. This is that wiring, for one hostname at a time — the app's
+# own domain, set in Settings, not previews (see the help text in usage()).
+
+# This host's own addresses, best-effort: the private/internal address
+# `hostname -I` and `ip` see, plus (for a cloud VM behind NAT, where DNS
+# points at a public address neither of those knows about) the same
+# short-timeout public-address lookups install.sh already uses for its
+# domain prompt. Any single one of these matching what DOMAIN resolves to is
+# enough — see cmd_tls.
+local_addresses() {
+  {
+    hostname -I 2>/dev/null
+    ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1
+    curl -fsS --max-time 3 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null
+    curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null
+    echo
+  } | tr ' ' '\n' | sed '/^$/d' | sort -u
+}
+
+# What DOMAIN resolves to right now, one address per line. `getent` reads
+# the same resolver configuration and NSS chain the rest of the system does,
+# without depending on `dig`/`host` being installed.
+resolved_addresses() {
+  getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u
+}
+
+cmd_tls() {
+  domain="${1:-}"
+  if [ -z "$domain" ] || [ $# -gt 1 ]; then
+    echo "Usage: paco tls <domain>" >&2
+    echo "See 'paco help' for what this does and does not cover (one hostname, no wildcard, previews excluded)." >&2
+    exit 1
+  fi
+  require_root tls
+
+  # Let's Encrypt does not issue certificates for bare IP addresses — fail
+  # before any of the DNS-resolution work below, with a message that says
+  # so plainly rather than however certbot itself would phrase it.
+  case "$domain" in
+    *[!0-9.]*) : ;;
+    *) fail "'$domain' looks like a bare IPv4 address. Let's Encrypt only issues certificates for hostnames — point a DNS name at this host and pass that instead." ;;
+  esac
+  case "$domain" in
+    *:*) fail "'$domain' looks like an IPv6 address. Let's Encrypt only issues certificates for hostnames — point a DNS name at this host and pass that instead." ;;
+  esac
+
+  echo "paco: checking that '$domain' resolves to this host..."
+  resolved="$(resolved_addresses "$domain")"
+  if [ -z "$resolved" ]; then
+    fail "'$domain' does not resolve to any address right now. Point DNS at this host (an A or AAAA record), then re-run 'paco tls $domain'. certbot's HTTP-01 challenge is served on port 80 at whatever address the domain resolves to — running it against a name that points elsewhere fails with an error that reads like a certbot bug, not a DNS one."
+  fi
+
+  local_ips="$(local_addresses)"
+  match=0
+  for ip in $resolved; do
+    if printf '%s\n' "$local_ips" | grep -qx "$ip"; then
+      match=1
+      break
+    fi
+  done
+  if [ "$match" -ne 1 ]; then
+    echo "paco: '$domain' resolves to: $(printf '%s' "$resolved" | tr '\n' ' ')" >&2
+    echo "paco: this host's own addresses: $(printf '%s' "$local_ips" | tr '\n' ' ')" >&2
+
+    # Resolving elsewhere is not always misconfigured DNS. On a platform that
+    # terminates TLS at its edge — Krova Cloud, Cloudflare's proxy, any load
+    # balancer — the domain is *supposed* to point at the edge rather than at
+    # this host, and HTTPS already works. Telling that operator to "fix DNS"
+    # sends them to break the one thing that is set up correctly, so check
+    # whether the name already serves HTTPS before blaming the records.
+    # `curl` is not in the package's Depends, so check for it rather than
+    # relying on a "command not found" exit status to fall through.
+    if command -v curl >/dev/null 2>&1 &&
+      curl -fsS -o /dev/null --max-time 10 "https://$domain/" 2>/dev/null; then
+      echo "paco: https://$domain/ already works." >&2
+      fail "'$domain' is already served over HTTPS by something in front of this host, which is why it resolves elsewhere — your DNS is fine and there is nothing for this command to do. Platforms that terminate TLS at their edge (Krova Cloud, Cloudflare's proxy, a load balancer) handle certificates for you. Set the domain in Settings if you have not already; skip 'paco tls'. A certificate requested here could not be validated anyway, because the HTTP-01 challenge is answered by the edge and not by this host."
+    fi
+
+    fail "'$domain' does not resolve to this host. Fix DNS, then re-run 'paco tls $domain'. If something in front of this host is meant to terminate TLS, skip this command entirely — it is only for a host reachable at its own public address."
+  fi
+  echo "paco: '$domain' resolves here — proceeding."
+
+  # Only after the DNS check passes — installing a package to then refuse
+  # to use it is worse than not installing it at all.
+  if ! command -v certbot >/dev/null 2>&1; then
+    echo "paco: installing certbot"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y certbot python3-certbot-nginx
+  fi
+
+  # Make sure the site certbot has to edit actually names this domain.
+  # Without this, certbot's nginx plugin can't match `server_name _;`
+  # against a real hostname and creates a second, competing server block
+  # instead of augmenting this one. Skipped once the domain is already
+  # there — the same re-run this whole command is meant to be a no-op for.
+  if [ -f "$NGINX_SITE" ] && ! grep -q "$domain" "$NGINX_SITE"; then
+    echo "paco: adding '$domain' to $NGINX_SITE"
+    original="$(cat "$NGINX_SITE")"
+    tmp_site="$NGINX_SITE.tmp.$$"
+    sed "s/^\([[:space:]]*server_name \)_;/\1_ $domain;/" "$NGINX_SITE" > "$tmp_site"
+    mv "$tmp_site" "$NGINX_SITE"
+    if ! nginx -t >/dev/null 2>&1; then
+      printf '%s\n' "$original" > "$NGINX_SITE"
+      fail "adding '$domain' to $NGINX_SITE produced an invalid nginx config; left the file unchanged. Check $NGINX_SITE by hand."
+    fi
+  fi
+
+  echo "paco: requesting a certificate for '$domain' via certbot..."
+  # --register-unsafely-without-email: no admin address is on hand here to
+  # pass as -m (paco.env holds no such thing) — renewal itself is automatic
+  # regardless (certbot's own systemd timer/cron job), so the only real cost
+  # is not getting Let's Encrypt's own expiry-reminder email. --nginx finds
+  # (or, per above, now finds) the server block for $domain, installs the
+  # certificate into it, adds the redirect, and reloads nginx itself on
+  # success. No --force-renewal: an existing, unexpired certificate for
+  # $domain is left alone rather than reissued, which is what makes running
+  # this again for the same domain a no-op instead of an error.
+  certbot --nginx -d "$domain" \
+    --non-interactive --agree-tos --register-unsafely-without-email --redirect \
+    || fail "certbot failed for '$domain' — see its output above."
+
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx || systemctl restart nginx
+  else
+    echo "paco: WARNING — nginx's config test failed after certbot ran. Check 'nginx -t' by hand; nginx was not reloaded." >&2
+  fi
+
+  echo "paco: certificate for '$domain' is installed; nginx now serves it on 443 and redirects 80 to it."
+  echo "paco: if '$domain' is this instance's own domain, also set APP_URL=https://$domain in $PACO_ENV (or in Settings) and run 'paco restart', so links and redirects use https too."
+}
+
+# --- status ------------------------------------------------------------------
+
+unit_state() {
+  state=$(systemctl is-active "$UNIT" 2>/dev/null) || state="inactive"
+  enabled=$(systemctl is-enabled "$UNIT" 2>/dev/null) || enabled="not enabled"
+  echo "$state ($enabled)"
+}
+
+installed_version() {
+  version=$(dpkg-query -W -f='${Version}' paco 2>/dev/null) || version="not installed"
+  echo "$version"
+}
+
+# APP_URL in paco.env, if the operator (or install.sh's --domain) set one,
+# else the domain saved from Settings (instance_settings.app_domain),
+# queried the same way the paco.service process itself would reach
+# Postgres: as the paco OS user, over the Unix socket, via peer auth.
+configured_domain() {
+  app_url="$(env_get APP_URL)"
+  if [ -n "$app_url" ]; then
+    echo "$app_url (set in $PACO_ENV)"
+    return 0
+  fi
+
+  if [ "$(id -u)" != "0" ]; then
+    echo "unknown (run as root to check Settings — no APP_URL set in $PACO_ENV)"
+    return 0
+  fi
+  if ! id "$PACO_USER" >/dev/null 2>&1; then
+    echo "unknown (the $PACO_USER user does not exist)"
+    return 0
+  fi
+
+  if domain_raw=$(su -s /bin/sh "$PACO_USER" -c \
+    "psql -U paco -d paco -tAc \"SELECT app_domain FROM instance_settings WHERE app_domain IS NOT NULL LIMIT 1\"" \
+    2>/dev/null); then
+    domain="$(printf '%s' "$domain_raw" | tr -d '[:space:]')"
+    if [ -n "$domain" ]; then
+      echo "$domain (saved in Settings)"
+    else
+      echo "not configured (reachable on this host's address)"
+    fi
+  else
+    echo "unknown (could not query Postgres - is it running?)"
+  fi
+}
+
+# Whether the bundled Claude Code CLI (/usr/bin/claude, see
+# packaging/claude-wrapper.sh) is actually on PATH for the paco user.
+# Checked separately from authentication below: a missing CLI means the
+# package itself is broken (postinst already warns about this at install
+# time — see packaging/debian/postinst) and no amount of 'paco auth' fixes
+# it, so the two must never be collapsed into one line that only ever says
+# "no" without saying which problem it is.
+claude_cli_present() {
+  if [ "$(id -u)" != "0" ]; then
+    echo "unknown (run as root to check)"
+    return 0
+  fi
+  if ! id "$PACO_USER" >/dev/null 2>&1; then
+    echo "unknown (the $PACO_USER user does not exist)"
+    return 0
+  fi
+  if su -s /bin/sh -l "$PACO_USER" -c 'command -v claude' >/dev/null 2>&1; then
+    echo "yes"
+  else
+    echo "no (bundled CLI missing - the install is broken; try 'sudo apt-get install --reinstall paco')"
+  fi
+}
+
+claude_auth_state() {
+  if [ "$(id -u)" != "0" ]; then
+    echo "unknown (run as root to check)"
+    return 0
+  fi
+  if ! id "$PACO_USER" >/dev/null 2>&1; then
+    echo "unknown (the $PACO_USER user does not exist)"
+    return 0
+  fi
+  if ! su -s /bin/sh -l "$PACO_USER" -c 'command -v claude' >/dev/null 2>&1; then
+    echo "unknown (CLI not present - see 'CLI:' above)"
+    return 0
+  fi
+  if su -s /bin/sh -l "$PACO_USER" -c 'claude auth status' >/dev/null 2>&1; then
+    echo "yes"
+  else
+    echo "no (run 'sudo paco auth')"
+  fi
+}
+
+cmd_status() {
+  echo "Unit:      $(unit_state)"
+  echo "Version:   $(installed_version)"
+  echo "Domain:    $(configured_domain)"
+  echo "CLI:       $(claude_cli_present)"
+  echo "Claude:    $(claude_auth_state)"
+}
+
+# --- dispatch ----------------------------------------------------------------
+
+command="${1:-}"
+if [ $# -gt 0 ]; then
+  shift
+fi
+
+case "$command" in
+  upgrade) cmd_upgrade ;;
+  logs) cmd_logs "$@" ;;
+  restart) cmd_restart ;;
+  status) cmd_status ;;
+  auth) cmd_auth ;;
+  tls) cmd_tls "$@" ;;
+  uninstall)
+    echo "paco: there is no uninstall." >&2
+    echo "'apt remove paco' stops Paco and keeps /etc/paco and /var/lib/paco (including the Claude credential and every workspace)." >&2
+    echo "'apt purge paco' also destroys /etc/paco and /var/lib/paco — see docs/self-hosting.md before running it." >&2
+    exit 1
+    ;;
+  "" | help | -h | --help)
+    usage
+    ;;
+  *)
+    usage >&2
+    fail "unknown command: $command"
+    ;;
+esac

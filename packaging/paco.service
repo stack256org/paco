@@ -1,0 +1,47 @@
+[Unit]
+Description=Paco
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=paco
+Group=paco
+WorkingDirectory=/usr/lib/paco
+EnvironmentFile=/etc/paco/paco.env
+# Not a bare `node .../server.js`: migrations have to run at service start
+# (see postinst, and docs/agents/native-installation notes) rather than from
+# a maintainer script, so that a migration failure surfaces as a failed
+# `systemctl start paco` — visible and retryable — instead of aborting an
+# `apt upgrade` partway through, or silently skipping migrations altogether.
+# `/usr/lib/paco/paco-entrypoint.sh` (packaging/paco-entrypoint.sh, installed
+# under that name — deliberately NOT /usr/bin/paco, which is the operator
+# CLI installed from scripts/paco; see packaging/build-deb.sh) runs
+# `lib/db/migrate.ts` against the same `apps/web/.next/standalone` output the
+# systemd unit itself serves, then execs `node server.js` in place — so this
+# is the one process systemd tracks, restarts, and can send signals to.
+ExecStart=/usr/lib/paco/paco-entrypoint.sh
+Restart=always
+RestartSec=5
+StateDirectory=paco
+
+# No sandboxing directives (ProtectSystem=strict, PrivateTmp, NoNewPrivileges,
+# etc.) are added here. None of them were tested against a real chat — this
+# package is not installed on any machine as part of building it (see
+# packaging/build-deb.sh and the native-installation task notes), and adding
+# a directive without running a real chat through it is exactly how one of
+# these breaks Paco silently at the first sandbox:
+#   - ProtectSystem=strict / ProtectHome would make most of the filesystem
+#     read-only, including /var/lib/paco/workspaces, which Paco writes chat
+#     worktrees into, and could interfere with reaching
+#     /var/run/docker.sock depending on its group and how it's mounted.
+#   - NoNewPrivileges could block whatever re-exec or setuid path a given
+#     distribution's `docker.io` packaging relies on for group membership.
+# If a future change adds any of these, test a real chat end-to-end first
+# (a sandbox created, a command run in it, the container reaped) and record
+# which directives were tried and with what result — an untested guess at
+# "this one is probably fine" is not a basis for shipping it.
+
+[Install]
+WantedBy=multi-user.target

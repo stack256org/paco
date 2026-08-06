@@ -1,0 +1,280 @@
+#!/bin/sh
+# postinst runs on every install AND every upgrade — every step below has to
+# be a no-op the second time it runs, or an `apt upgrade` would silently
+# redo something that must only ever happen once (regenerating APP_SECRET
+# chief among them: it signs sessions and derives the key that encrypts
+# every stored GitHub token, so regenerating it on upgrade would silently
+# and permanently orphan every one of them).
+set -e
+
+PACO_ETC=/etc/paco
+PACO_ENV="$PACO_ETC/paco.env"
+PACO_HOME=/var/lib/paco
+PACO_USER=paco
+PACO_GROUP=paco
+NGINX_SITE=/etc/nginx/sites-available/paco
+NGINX_ENABLED=/etc/nginx/sites-enabled/paco
+# Where Paco itself writes generated preview-routing server blocks
+# (apps/web/lib/preview/nginx-reload.ts) — a directory it owns outright,
+# rather than loosening permissions on /etc/nginx/conf.d, which stays
+# root:root throughout. Pulled into nginx's config by the small, static,
+# root-owned include file below (step 5).
+PACO_NGINX_DIR=/etc/paco/nginx
+NGINX_PREVIEWS_INCLUDE=/etc/nginx/conf.d/paco-previews.conf
+# Grants the paco user exactly enough sudo access to test and reload nginx
+# after writing preview configs — see step 6.
+SUDOERS_FILE=/etc/sudoers.d/paco
+
+case "$1" in
+  configure)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+# -----------------------------------------------------------------------------
+# 1. System user. `adduser` on Debian is itself idempotent when the account
+# already exists with matching properties, but check explicitly so the
+# intent reads clearly and a `--home` mismatch on some future Debian
+# doesn't silently become a no-op we didn't mean.
+if ! getent passwd "$PACO_USER" >/dev/null 2>&1; then
+  adduser --system --group --home "$PACO_HOME" "$PACO_USER"
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Directories. `install -d` is already a no-op when the directory exists
+# with different ownership/mode — it fixes them to match, which is the
+# right behaviour on upgrade too (a mode fixed by hand shouldn't survive).
+install -d -m 0750 -o root -g "$PACO_GROUP" "$PACO_ETC"
+install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_HOME"
+# Owned by paco itself (unlike $PACO_ETC above, which stays root:paco) so
+# the unprivileged service user can write preview configs directly — no
+# sudo needed for the file-write half of syncPreviewRoutes, only for the
+# nginx-test-and-reload half the sudoers rule in step 6 covers.
+install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_NGINX_DIR"
+
+# -----------------------------------------------------------------------------
+# 3. APP_SECRET and paco.env — generated once, ever. This is the step in
+# this whole script that must never run twice: regenerating APP_SECRET
+# invalidates every session and makes every already-stored GitHub token
+# permanently undecryptable (AES-256-GCM with a key derived from it — not a
+# hash, so there is no "re-derive and compare", only "decrypt with the
+# wrong key and fail"). Guarded on the file not existing, nothing else.
+if [ ! -f "$PACO_ENV" ]; then
+  APP_SECRET=$(openssl rand -base64 32)
+  umask 077
+  # POSTGRES_URL intentionally omits a host: both `postgres` (the
+  # postgres.js driver used by Drizzle/lib/db/client.ts) and `pg`
+  # (node-postgres, used by pg-boss and the Workflow SDK's world — see
+  # instrumentation.ts) reject a connection string of the form
+  # `postgres://paco@/paco?host=/var/run/postgresql` outright: passing a
+  # non-empty username with an empty host makes the WHATWG `URL` parser
+  # both libraries call internally throw `Invalid URL` before either one
+  # ever looks at the `?host=` query string — verified directly with both
+  # drivers, not assumed. A bare `postgres:///paco` (no username, no host)
+  # parses cleanly in both, and both then fall back to the standard libpq
+  # `PGHOST` environment variable for the actual socket directory, and to
+  # the OS user (peer auth) for the role — which is exactly `paco`, since
+  # this file is only ever read by the paco.service process. See
+  # .superpowers/sdd/2026-08-05-native-installation/vm-test-report.md for
+  # the failing/working transcripts this was verified against on a real
+  # Debian-family host.
+  cat > "$PACO_ENV" <<EOF
+# Generated once by paco's postinst — see the comment there before editing
+# APP_SECRET by hand. Regenerating it invalidates every session and makes
+# every already-stored GitHub token permanently undecryptable.
+NODE_ENV=production
+PORT=3000
+POSTGRES_URL=postgres:///paco
+PGHOST=/var/run/postgresql
+APP_SECRET=$APP_SECRET
+PACO_WORKSPACE_ROOT=$PACO_HOME/workspaces
+EOF
+  chown root:"$PACO_GROUP" "$PACO_ENV"
+  chmod 640 "$PACO_ENV"
+  unset APP_SECRET
+fi
+
+# -----------------------------------------------------------------------------
+# 4. Postgres role and database, created over the Unix socket as the
+# `postgres` OS user — never over TCP, so there is no port to expose and no
+# password to leak. `paco`'s systemd unit runs as the `paco` OS user
+# connecting as the `paco` Postgres role over that same socket, which
+# Debian's default `pg_hba.conf` (`local all all peer`) authenticates by OS
+# username with no password at all — hence no password anywhere in
+# paco.env's POSTGRES_URL above.
+#
+# Both guarded by an existence check, so a second run — an upgrade — is a
+# no-op rather than an error from `CREATE ROLE`/`CREATE DATABASE` on
+# something that already exists.
+if ! su -s /bin/sh postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='paco'\"" | grep -q 1; then
+  su -s /bin/sh postgres -c "psql -c 'CREATE ROLE paco LOGIN'"
+fi
+if ! su -s /bin/sh postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='paco'\"" | grep -q 1; then
+  su -s /bin/sh postgres -c "createdb -O paco paco"
+fi
+
+# -----------------------------------------------------------------------------
+# 5. nginx server block. `nginx -t` gates the reload: a package script that
+# leaves a broken config un-reloaded and says so is far better than one
+# that takes a working site down. The site itself proxies to the app on
+# localhost — no domain baked in, matching APP_URL being unset by default
+# (Settings, or localhost, decide that at runtime).
+cat > "$NGINX_SITE" <<'EOF'
+# Installed by paco's postinst. Edit freely — this file is never
+# regenerated once it exists, only re-tested and reloaded on upgrade.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+if [ ! -L "$NGINX_ENABLED" ] && [ ! -e "$NGINX_ENABLED" ]; then
+  ln -s "$NGINX_SITE" "$NGINX_ENABLED"
+fi
+
+# Delegates into $PACO_NGINX_DIR, which Paco itself owns and writes preview
+# server blocks into (see PACO_NGINX_DIR above, and nginx-reload.ts) —
+# static and root-owned, unlike the directory it points at, so Paco never
+# needs write access under /etc/nginx itself. An `include` glob matching
+# zero files (a fresh install, before any preview has ever run) is valid
+# nginx config, not an error, so writing this before $PACO_NGINX_DIR has
+# anything in it is safe. Regenerated every run, unlike $NGINX_SITE above —
+# there is no operator customization to preserve here.
+cat > "$NGINX_PREVIEWS_INCLUDE" <<EOF
+# Installed by paco's postinst. Do not edit by hand — regenerated every run.
+include $PACO_NGINX_DIR/*.conf;
+EOF
+
+# The nginx package's own stock site (/etc/nginx/sites-available/default,
+# symlinked into sites-enabled by that package) also declares
+# `listen 80 default_server;` — two `default_server`s on the same
+# `0.0.0.0:80` make `nginx -t` fail outright ("a duplicate default server"),
+# which left this site untested and unloaded the first time this ran:
+# `nginx -t` failed, the reload was skipped by design (see the comment
+# below), and the *old* config — the stock nginx welcome page — kept
+# serving, while `curl / ` still returned 200, silently masking the
+# failure. Only ever remove the *symlink* here, never the file it points
+# to: nginx's own package documents removing it from sites-enabled/ as the
+# normal admin step, and its packaging owns sites-available/default's
+# lifecycle, not paco's. Guarded on the symlink actually pointing at that
+# file, so a from-scratch nginx site an operator has since put there is
+# left alone.
+if [ -L /etc/nginx/sites-enabled/default ] \
+  && [ "$(readlink -f /etc/nginx/sites-enabled/default)" = /etc/nginx/sites-available/default ]; then
+  rm -f /etc/nginx/sites-enabled/default
+fi
+
+if nginx -t >/tmp/paco-nginx-test.log 2>&1; then
+  systemctl reload nginx || systemctl restart nginx
+else
+  echo "paco: nginx config test failed — leaving the running nginx config untouched." >&2
+  cat /tmp/paco-nginx-test.log >&2
+  echo "paco: fix the config at $NGINX_SITE and run 'nginx -t' yourself, then 'systemctl reload nginx'." >&2
+fi
+rm -f /tmp/paco-nginx-test.log
+
+# -----------------------------------------------------------------------------
+# 6. Sudoers rule for preview routing, the TLS hook, and self-restart.
+# `paco.service` runs as the unprivileged paco user (step 1, and
+# paco.service's User=), but apps/web/lib/preview/nginx-reload.ts has to run
+# `nginx -t` and `systemctl reload nginx` as root every time a preview starts
+# or stops — see $PACO_NGINX_DIR above for the other half (the directory it
+# writes the configs themselves into) — and Settings' "Restart now" button
+# (apps/web/app/api/admin/restart/route.ts) needs to restart paco.service
+# itself once a newly-saved domain needs to reach better-auth's trusted-host
+# list. Scoped to exactly those invocations, nothing wider: no shell, no
+# arbitrary nginx subcommand, no other systemctl unit.
+#
+# Regenerated every run rather than guarded on not-existing like $PACO_ENV
+# in step 3 — unlike APP_SECRET there is no state to lose by rewriting this,
+# and a fixed rule here should always win over a stale or hand-edited one.
+#
+# Written to a temp file *in the same directory* first — so the `mv` below
+# is an atomic rename, never a moment where a partial file is live — and
+# validated with `visudo -cf` before it ever occupies $SUDOERS_FILE: a
+# malformed sudoers file breaks `sudo` for the entire host, which needs
+# console access to recover. `mktemp`'s dot-prefixed name is also skipped
+# by sudo's own `#includedir` loading (which ignores names containing "."
+# or ending in "~"), so even a temp file left behind by an interrupted
+# install is inert. On failure, the temp file is removed, a clear warning
+# is printed, and any existing rule is left exactly as it was — never
+# replaced with something unvalidated.
+sudoers_tmp=$(mktemp /etc/sudoers.d/.paco.XXXXXX)
+cat > "$sudoers_tmp" <<'EOF'
+# Installed by paco's postinst. Do not edit by hand — regenerated (after
+# validation with `visudo -cf`) on every install and upgrade. Grants the
+# paco user exactly enough sudo access to reconcile nginx preview routing
+# (apps/web/lib/preview/nginx-reload.ts), to obtain a certificate for the
+# domain saved in Settings, and to restart its own unit when Settings asks
+# for it — nothing wider.
+paco ALL=(root) NOPASSWD: /usr/sbin/nginx -t
+paco ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+# No argument, deliberately: the hook reads the domain from the database
+# itself, so there is nothing for the app to pass and nothing to validate
+# after the privilege is granted. See packaging/paco-tls-hook's header.
+paco ALL=(root) NOPASSWD: /usr/lib/paco/paco-tls-hook
+# The unit is named explicitly, not a bare `systemctl restart`, which would
+# let a compromised app process restart anything on the host instead of just
+# itself. See apps/web/app/api/admin/restart/route.ts.
+paco ALL=(root) NOPASSWD: /usr/bin/systemctl restart paco.service
+EOF
+chmod 0440 "$sudoers_tmp"
+if visudo -cf "$sudoers_tmp" >/tmp/paco-sudoers-check.log 2>&1; then
+  chown root:root "$sudoers_tmp"
+  mv -f "$sudoers_tmp" "$SUDOERS_FILE"
+else
+  echo "paco: WARNING — the generated sudoers rule failed 'visudo -cf' validation; NOT installing it. Preview routing (nginx -t / systemctl reload nginx as the paco user) will not work until this is fixed by hand." >&2
+  cat /tmp/paco-sudoers-check.log >&2
+  rm -f "$sudoers_tmp"
+fi
+rm -f /tmp/paco-sudoers-check.log
+
+# -----------------------------------------------------------------------------
+# 7. Enable and (re)start the service. `daemon-reload` picks up a changed
+# unit file on upgrade; `restart` (not `try-restart`) so an upgrade always
+# ends up running the new version, not the old one left running from
+# before the package was replaced.
+systemctl daemon-reload
+systemctl enable paco.service
+systemctl restart paco.service
+
+# -----------------------------------------------------------------------------
+# 8. The bundled Claude Code CLI. build-deb.sh installs it into
+# /usr/lib/paco/node and exposes it as /usr/bin/claude (see
+# packaging/claude-wrapper.sh) — unlike gh below, this is not optional and
+# not something the operator installs: its absence here means the package
+# itself was built or staged wrong, and every chat will fail with no
+# `claude` to run. Loud rather than silent, same reasoning as the nginx
+# test above: a package script that reports a broken install clearly is far
+# better than one that reports success and lets it surface as a confusing
+# first-chat failure. `paco status` also reports this (see scripts/paco).
+if [ ! -x /usr/bin/claude ]; then
+  echo "paco: WARNING — the bundled Claude Code CLI was not found at /usr/bin/claude. Every chat will fail, and 'paco auth' has nothing to run, until this is fixed. This means the .deb was built or staged incorrectly; try 'apt-get install --reinstall paco', or rebuild the package (packaging/build-deb.sh)." >&2
+fi
+
+# -----------------------------------------------------------------------------
+# 9. gh is not a dependency (see control) — only needed once someone connects
+# a GitHub account, and it ships from GitHub's own APT repository, not
+# Debian's.
+if ! command -v gh >/dev/null 2>&1; then
+  echo "paco: the 'gh' CLI was not found on PATH. Connecting a GitHub account will not work until it is installed:" >&2
+  echo "        https://github.com/cli/cli/blob/trunk/docs/install_linux.md" >&2
+fi
+
+echo "paco: installed. Open http://<this host>/ to finish setup."
+
+exit 0
