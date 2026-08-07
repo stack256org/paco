@@ -328,5 +328,5 @@ jobs:
             -f "client_payload[version]=${{ needs.version.outputs.version }}"; then
             echo "Dispatched reindex to Stack256org/apt for ${{ needs.version.outputs.tag }}."
           else
-            echo "::warning::repository_dispatch to Stack256org/apt failed. The .deb files are attached to this GitHub Release, but https://apt.stack256.org was NOT rebuilt, so 'apt install paco' will not see this version. Check that APT_DISPATCH_TOKEN still has Contents:read on Stack256org/apt, then run: gh workflow run reindex.yml --repo Stack256org/apt"
+            echo "::warning::repository_dispatch to Stack256org/apt failed. The .deb files are attached to this GitHub Release, but https://apt.stack256.org was NOT rebuilt, so 'apt install paco' will not see this version. Check that APT_DISPATCH_TOKEN still has Contents: write on Stack256org/apt (read is NOT enough - POST /repos/../dispatches is a write endpoint), then run: gh workflow run reindex.yml --repo Stack256org/apt"
           fi

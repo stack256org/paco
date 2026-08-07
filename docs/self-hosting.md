@@ -13,7 +13,7 @@ production path. Development is a separate thing and stays Docker-based; see
 ## 1. Installing
 
 ```bash
-curl -fsSL https://apt.stack256.org/install.sh | sudo sh
+curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 ```
 
 > **This is live and verified.** `apt.stack256.org` serves a signed index over

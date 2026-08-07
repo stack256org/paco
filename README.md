@@ -43,7 +43,7 @@ Browser  ->  Next.js + durable workflow  ->  Claude Code (host)  ->  Docker sand
 One command, on a fresh Linux host running systemd:
 
 ```bash
-curl -fsSL https://apt.stack256.org/install.sh | sudo sh
+curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 ```
 
 That is the whole install. It brings its own dependencies — you do not install
@@ -87,8 +87,11 @@ installs `docker.io` if no container runtime is present, then installs `paco`,
 which pulls in PostgreSQL and nginx and runs the setup above from its
 `postinst`. Run it with `--dry-run` to have it print each of those steps
 without doing any of them, or read it first: it is served from
-[apt.stack256.org/install.sh](https://apt.stack256.org/install.sh) and lives at
-[`install.sh`](install.sh) in this repository.
+[apt.stack256.org/paco/install.sh](https://apt.stack256.org/paco/install.sh) and
+lives at [`install.sh`](install.sh) in this repository. It is served under
+`/paco/` rather than at the site root because that repository serves every
+Stack256 product, and there is only one root for them to fight over — the old
+root path still works, for anyone who copied it from an earlier release.
 
 `apt install paco` on a host that already has the source works identically —
 the package does its own setup, so neither route leaves you with steps to
