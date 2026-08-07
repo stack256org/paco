@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { appUrl } from "@/lib/app-url";
 import { auth } from "@/lib/auth/config";
 import { isFirstRun } from "@/lib/auth/first-run";
 import { tokenCaptureMetadata } from "@/lib/auth/first-run-token-capture";
+import { isSameOrigin, requestHost } from "@/lib/http/same-origin";
 import { renameOrganization } from "@/lib/org/organization";
 
 /**
@@ -65,7 +65,14 @@ export async function POST(request: Request): Promise<Response> {
   // the app itself always sends a same-origin `Origin` header, so there is no
   // legitimate case where letting a missing one through helps anyone.
   const origin = request.headers.get("origin");
-  if (origin !== appUrl().origin) {
+  if (!isSameOrigin(origin, request)) {
+    // Logged with both sides, because the message the user gets cannot say
+    // which host it expected without telling an attacker the same thing. This
+    // was previously unactionable from either end: the page said the request
+    // came from somewhere else, and the journal said nothing at all.
+    console.warn(
+      `[first-run] rejected: Origin ${origin ?? "(none)"} does not match the host this request arrived on (${requestHost(request) || "(unknown)"}). If this is a legitimate address for this instance, the proxy in front of Paco is rewriting Host.`,
+    );
     return Response.json(
       { error: "That request didn't come from this Paco instance." },
       { status: 403 },

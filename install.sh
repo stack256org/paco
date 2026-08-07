@@ -148,7 +148,7 @@ fi
 if [ -n "$DOMAIN" ]; then
   echo "install.sh: domain: $DOMAIN"
 else
-  echo "install.sh: domain: none - will be reachable on this host's address"
+  echo "install.sh: domain: none - Paco will answer on any address that reaches this host (its IP, or a domain you point here later). Nothing else to do; the address is printed at the end."
 fi
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "install.sh: --dry-run - the following would happen, but nothing below actually runs:"
@@ -288,7 +288,29 @@ if [ -n "$DOMAIN" ]; then
   echo "Paco is installed: http://$DOMAIN/"
   echo "Point DNS for $DOMAIN at this host if you haven't already."
 else
-  echo "Paco is installed. Visit http://<this host's address>/ to finish setup."
+  # Print the address rather than a placeholder. "Visit http://<this host's
+  # address>/" is not an instruction — it is a puzzle, and on a fresh VM the
+  # person running this often does not know which of several addresses is the
+  # reachable one.
+  #
+  # The route to a public resolver names the interface that carries traffic off
+  # this box, which is the address a browser elsewhere will use. `hostname -I`
+  # is the fallback and prints every address, first one first. Neither reaches
+  # the network — `ip route get` only consults the routing table.
+  host_addr=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+  [ -n "$host_addr" ] || host_addr=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+  if [ -n "$host_addr" ]; then
+    echo "Paco is installed. Open it at:"
+    echo
+    echo "    http://$host_addr/"
+    echo
+    echo "Any address that reaches this host works — that one, a private IP, or"
+    echo "a domain you point here. No domain is required, and nothing needs"
+    echo "configuring first: set one later in Settings if you want it."
+  else
+    echo "Paco is installed. Open http://<this host's address>/ to finish setup."
+  fi
 fi
 echo
 if [ "$DOCKER_READY" -eq 1 ]; then

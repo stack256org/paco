@@ -91,7 +91,18 @@ async function pingServerAlive(): Promise<boolean> {
  * restarts. The section says "saved", never "applied" or "live", until that
  * restart happens, and it is the one place that offers to do it.
  */
-export function DomainSection() {
+/**
+ * `onSaved`, when given, is called after every successful save with whether a
+ * domain is now set — the same shape `SmtpSection` uses, and for the same
+ * reason: the onboarding step that embeds this needs to know, and re-reading
+ * the settings from the server just to learn what this component already knows
+ * would race the write that caused it.
+ */
+export function DomainSection({
+  onSaved,
+}: {
+  onSaved?: (hasDomain: boolean) => void;
+} = {}) {
   const [form, setForm] = useState<DomainFormState | null>(null);
   const [saving, setSaving] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
@@ -180,6 +191,7 @@ export function DomainSection() {
       if (result.success) {
         toast.success("Domain settings saved.");
         setJustSaved(true);
+        onSaved?.(form.appDomain.trim() !== "");
         // `CertificateSection` keys everything off whether a domain exists, so
         // it has to hear about this — otherwise it keeps telling the operator
         // to do the thing they just did.

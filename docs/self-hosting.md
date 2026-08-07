@@ -136,6 +136,13 @@ the service is running — all before the installer returns. What is left:
 
 - **`sudo paco auth`** — see §3. It needs your Claude account, so no installer
   can do it for you, and nothing runs a chat until it is done.
+- **A domain**, entered in step 2 of the wizard, which will not continue without
+  one. Not for reaching Paco — it answers on whatever address the request came
+  in on, so the IP the installer prints works straight away — but for the links
+  it *sends*. Invitations and sign-in links are built from this; unset, they are
+  built from a localhost fallback and arrive in somebody else's inbox pointing
+  at a host only this server can open. Point an A record at this host, then
+  enter it. `--domain` at install time sets the same value up front.
 - **A certificate**, if you want `https://`. See §8.
 
 Two things that look like steps but are not:

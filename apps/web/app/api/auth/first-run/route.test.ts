@@ -116,6 +116,68 @@ describe("GET /api/auth/first-run", () => {
 });
 
 describe("POST /api/auth/first-run", () => {
+  test("accepts a same-origin request on a host APP_URL does not name", async () => {
+    // The bug this covers made every default install unclaimable.
+    //
+    // `curl | sudo sh` has no terminal, so the domain prompt is always skipped
+    // and APP_URL is left unset — at which point `appUrl()` falls back to
+    // `http://localhost:3000`. Comparing the browser's Origin against *that*
+    // meant a browser at the host's real address or domain was refused with
+    // "That request didn't come from this Paco instance", and there was no way
+    // to claim the instance at all.
+    //
+    // What this endpoint actually needs is a same-origin check — the request
+    // came from a page this server served — and that is a question about the
+    // request's own Host, not about a value in the environment.
+    // Blank, not deleted: `appUrl()` treats an empty value as unset and falls
+    // back to localhost either way, and assigning a string keeps `process.env`
+    // typed as the string map it is.
+    const previous = process.env.APP_URL ?? "";
+    process.env.APP_URL = "";
+    firstRun = true;
+    capturedEmail = null;
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(
+      new Request("http://paco.example.test/api/auth/first-run", {
+        body: JSON.stringify({ email: "owner@example.com" }),
+        headers: {
+          "content-type": "application/json",
+          origin: "http://paco.example.test",
+        },
+        method: "POST",
+      }),
+    );
+
+    process.env.APP_URL = previous;
+
+    expect(response.status).toBe(200);
+    expect(currentValue(() => capturedEmail)).toBe("owner@example.com");
+  });
+
+  test("rejects an Origin whose host merely ends with the real one", async () => {
+    // `paco.example.test.evil.example` ends with nothing useful, but the
+    // reverse — a suffix match — is the classic way an origin check is got
+    // wrong. Compared as whole hosts, neither direction matches.
+    firstRun = true;
+    capturedEmail = null;
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(
+      new Request("http://paco.example.test/api/auth/first-run", {
+        body: JSON.stringify({ email: "attacker@evil.com" }),
+        headers: {
+          "content-type": "application/json",
+          origin: "http://paco.example.test.evil.example",
+        },
+        method: "POST",
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(capturedEmail).toBeNull();
+  });
+
   test("rejects a request from a foreign Origin", async () => {
     firstRun = true;
     capturedEmail = null;

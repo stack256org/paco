@@ -73,6 +73,33 @@ Then open the URL it printed and create your account.
 **What it needs:** a Linux host running systemd, root access, and ports 80 and
 443 free — nginx owns both, and there's no flag to move them.
 
+### About the domain
+
+**You do not need one to get in.** Paco answers on whatever address the request
+arrived at, so the IP the installer prints works immediately — nothing to point,
+nothing to configure first.
+
+**You do need one to finish setup.** Step 2 of the wizard asks for it and will
+not continue without it, because it is what the links Paco *sends* get built
+from — invitations and sign-in links. Left unset those are built from a
+localhost fallback, which produces a link that only this server can open,
+emailed to somebody else. That breaks days later, in someone else's inbox, and
+looks like a broken invite rather than an empty setting.
+
+So: point an **A record at the IP the installer printed**, then enter the domain
+in step 2.
+
+```text
+paco.example.com.   A   203.0.113.10
+```
+
+`--domain` at install time does the same thing up front, and
+**Settings → Admin → Domain** changes it later. Reaching the app never depended
+on any of this — only the links it sends do.
+
+For HTTPS, run `sudo paco tls <domain>` once the record resolves — unless
+something in front of you already terminates TLS, in which case skip it.
+
 <details>
 <summary>What the installer actually does, if you'd rather not pipe a script into a shell</summary>
 
