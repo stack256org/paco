@@ -142,8 +142,9 @@ Two things that look like steps but are not:
 
 - **The workspace image.** The first chat pulls
   `ghcr.io/stack256org/paco-sandbox` itself. It is a few gigabytes, so
-  `docker pull ghcr.io/stack256org/paco-sandbox:latest` ahead of time moves
-  that wait somewhere you chose — but doing nothing is fine.
+  pulling it ahead of time moves that wait somewhere you chose — but doing
+  nothing is fine. The tag is `v<your version>`, not `latest`; see §14 for the
+  exact command.
 - **The docker group.** `postinst` adds the `paco` user to it, so
   `apt install paco` is as complete as the `curl | sh` route. It only skips
   this if Docker is absent at that moment, and says so when it does. Be aware
@@ -676,7 +677,7 @@ stop`; nothing is deleted, which is what makes resuming instant.
 
 | What | Rough size | Reclaim with |
 | --- | --- | --- |
-| `paco-sandbox:latest` | a few GB, once | `docker image rm` (rebuild before the next sandbox starts) |
+| `ghcr.io/stack256org/paco-sandbox:v<version>` | a few GB, once | `docker image rm` (re-pulled before the next sandbox starts) |
 | Stopped sandbox containers | small each, but one per session forever | `docker rm` |
 | Workspace directories (`/var/lib/paco/workspaces`) | one clone plus one worktree per chat, plus whatever the agent installs | `rm -rf` the directory |
 | Postgres | message history and cached diffs | `pg_dump`/`VACUUM FULL`, or delete old sessions |
@@ -816,11 +817,15 @@ couldn't be read is unknown, not clean.
 ### "Paco couldn't download the workspace image"
 
 Paco pulls `ghcr.io/stack256org/paco-sandbox` on the first chat, so this means
-the pull failed rather than that a build step was skipped. Reproduce it by hand
-to see what the registry actually said:
+the pull failed rather than that a build step was skipped.
+
+The tag it asks for is **`v<your installed version>`**, not `latest` — the image
+has to match the package, because the container runs as your host's uid and only
+an image built for that works. `paco status` prints the version, or:
 
 ```bash
-docker pull ghcr.io/stack256org/paco-sandbox:latest
+. /usr/lib/paco/version.env && echo "$PACO_VERSION"
+docker pull "ghcr.io/stack256org/paco-sandbox:v$PACO_VERSION"
 docker images ghcr.io/stack256org/paco-sandbox
 ```
 

@@ -1,8 +1,11 @@
 import type { SandboxHooks } from "../interface.ts";
 
+/** Registry repository the sandbox image is published to by `release.yml`. */
+export const SANDBOX_IMAGE_REPO = "ghcr.io/stack256org/paco-sandbox";
+
 /**
- * Where the sandbox image is published, and therefore what a host with no
- * checkout can pull.
+ * What to pull when nothing says otherwise — a checkout, rather than a host
+ * that installed the `.deb`.
  *
  * `release.yml` builds this image from `./Dockerfile` for amd64 and arm64 and
  * pushes it on every tag. It used to be named `paco-sandbox:latest` here — a
@@ -10,33 +13,51 @@ import type { SandboxHooks } from "../interface.ts";
  * existed. So the published image was never fetched by anything, and a host
  * installed from the .deb could not run a single chat: it was told to
  * `docker build` from a repository it does not have.
- *
- * `:latest` rather than a version pin, deliberately. The image is
- * `node:24-bookworm` plus apt packages and pnpm — a toolchain, with nothing in
- * it that tracks Paco's own version — and `release.yml` only moves `latest` on
- * a final release, never a prerelease. Pinning would mean plumbing the package
- * version through to runtime for a coupling that does not exist.
  */
-export const PUBLISHED_SANDBOX_IMAGE =
-  "ghcr.io/stack256org/paco-sandbox:latest";
+export const PUBLISHED_SANDBOX_IMAGE = `${SANDBOX_IMAGE_REPO}:latest`;
 
 /**
  * Resolve the image sandboxes are created from.
  *
- * `PACO_SANDBOX_IMAGE` overrides it, which is the escape hatch for an operator
- * mirroring the image inside their own network, and for a developer who has
- * built it locally under another tag. Blank counts as unset: someone who
- * exports the variable and leaves it empty gets the default rather than a pull
- * of `""`.
+ * Three sources, most specific first:
  *
- * Still not falling back to a stock Node image if the pull fails. That fallback
+ * 1. `PACO_SANDBOX_IMAGE` — a full reference. The escape hatch for an operator
+ *    mirroring inside their own network, or a developer running a local build.
+ * 2. `PACO_VERSION` — the installed package's version, written into
+ *    `/usr/lib/paco/version.env` by `build-deb.sh` and read by the unit. Pins
+ *    the image to `:v<version>`.
+ * 3. `:latest`.
+ *
+ * The version pin exists because the image and the app are no longer
+ * independent. The container runs as the host's uid so that files it creates on
+ * a bind mount are writable by Paco — and that only works on an image built to
+ * tolerate an arbitrary uid, with a writable HOME and pnpm store. Pair a new
+ * app with an old image and every sandbox fails on an unwritable HOME; pair an
+ * old app with a new image and the container is still root. `:latest` cannot
+ * express "the one that matches what I just installed", and an upgraded host
+ * that already has an old `:latest` locally would never re-pull it.
+ *
+ * Blank counts as unset throughout: someone who exports a variable and leaves
+ * it empty gets the next source down, not a pull of `""` or of `:v`.
+ *
+ * Still no fallback to a stock Node image when the pull fails. That fallback
  * was worse than an error — sandboxes started fine and then failed at the point
  * of use, because only this image carries the toolchain a generated app needs.
  */
 export function resolveSandboxImage(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env.PACO_SANDBOX_IMAGE?.trim() || PUBLISHED_SANDBOX_IMAGE;
+  const explicit = env.PACO_SANDBOX_IMAGE?.trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const version = env.PACO_VERSION?.trim();
+  if (version) {
+    return `${SANDBOX_IMAGE_REPO}:v${version}`;
+  }
+
+  return PUBLISHED_SANDBOX_IMAGE;
 }
 
 /** Image sandboxes are created from. See {@link resolveSandboxImage}. */

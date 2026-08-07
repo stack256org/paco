@@ -36,8 +36,12 @@ export const DOCKER_NOT_RUNNING =
 // failed rather than that somebody forgot a build step. The old copy told the
 // reader to run `docker build ... packages/sandbox/docker`, which is impossible
 // on a host installed from the .deb: there is no checkout to build from.
+// No literal tag in here any more. The image is pinned to the installed
+// version, so a `docker pull …:latest` in this sentence would hand the reader a
+// command that fetches the wrong image and leaves them no better off. `paco
+// status` prints the version this host actually wants.
 export const IMAGE_MISSING =
-  "Paco couldn't download the workspace image it runs your app in. Check this computer can reach ghcr.io, then try again — or pull it yourself with `docker pull ghcr.io/stack256org/paco-sandbox:latest`.";
+  "Paco couldn't download the workspace image it runs your app in. Check this computer can reach ghcr.io, then try again. `paco status` on the server prints the version, and `docs/self-hosting.md` has the pull command if you need to fetch it by hand.";
 
 export const REPO_NOT_FOUND =
   "We couldn't find that repository on GitHub. It may have been renamed or deleted, or the connected account may not be able to see it. Check it in Settings, then try again.";

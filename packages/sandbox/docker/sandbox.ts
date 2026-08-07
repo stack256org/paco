@@ -349,6 +349,72 @@ export async function ensureSandboxImage(
   });
 }
 
+/** The uid:gid a sandbox container runs as — this process's own. */
+export function hostContainerUser(): string {
+  return `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`;
+}
+
+/**
+ * Hand a workspace built by an older, root-running sandbox back to the host.
+ *
+ * Before the container ran as the host user, everything it created — `repo/`,
+ * `.git`, every worktree — was root-owned on a Linux bind mount. Those files
+ * outlive the upgrade that fixed it: the workspace is a real directory on the
+ * host, deliberately, so that state survives. A container running as the host
+ * uid then cannot write a single one of them, and the sessions that existed
+ * before the upgrade would be broken for good.
+ *
+ * Paco is unprivileged and cannot chown them, so a throwaway root container
+ * does it — the one place root is still available, and only for as long as the
+ * chown takes.
+ *
+ * Only when something is actually mis-owned, checked from the host first: this
+ * is on the path of every sandbox start, and spawning a container to discover
+ * there was nothing to do would be a needless second or two each time.
+ */
+export async function repairWorkspaceOwnership(
+  docker: Docker,
+  hostWorkspace: string,
+  image: string,
+): Promise<boolean> {
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+
+  let needsRepair = false;
+  try {
+    for (const entry of await fs.readdir(hostWorkspace)) {
+      const stats = await fs.stat(path.join(hostWorkspace, entry));
+      if (stats.uid !== uid) {
+        needsRepair = true;
+        break;
+      }
+    }
+  } catch {
+    // An unreadable workspace is not something a chown fixes, and the caller
+    // is about to fail on it far more legibly than this would.
+    return false;
+  }
+
+  if (!needsRepair) {
+    return false;
+  }
+
+  const container = await docker.createContainer({
+    Image: image,
+    User: "0:0",
+    // The workspace only. Nothing else is mounted, so the worst this container
+    // can reach is the tree it is repairing.
+    Cmd: ["chown", "-R", `${uid}:${gid}`, "/workspace"],
+    HostConfig: {
+      Binds: [`${hostWorkspace}:/workspace`],
+      AutoRemove: true,
+    },
+  });
+  await container.start();
+  await container.wait();
+  return true;
+}
+
 export class DockerSandbox implements Sandbox {
   readonly type = "docker" as const;
   readonly host = "localhost";
@@ -408,7 +474,36 @@ export class DockerSandbox implements Sandbox {
       await ensureNetworkExists(docker, config.network);
     }
 
-    const existing = await DockerSandbox.#findContainer(docker, containerName);
+    const image = config.image ?? SANDBOX_IMAGE;
+    let existing = await DockerSandbox.#findContainer(docker, containerName);
+
+    // A container created before sandboxes ran as the host user is still root,
+    // and keeps its `User` for life — Docker has no way to change it in place.
+    // Reconnecting to one would silently reinstate the bug this release fixes
+    // for every session that already existed, so it is replaced instead.
+    //
+    // Throwing the container away is cheap and safe by design: all state lives
+    // in the bind-mounted workspace on the host, which is the whole reason
+    // containers here are disposable. A dev server running inside it stops, and
+    // starts again on next use.
+    if (existing) {
+      const info = await existing.inspect();
+      if (info.Config?.User !== hostContainerUser()) {
+        await existing.remove({ force: true });
+        existing = undefined;
+      }
+    }
+
+    // The image has to be here before the repair below, which runs a throwaway
+    // container from it — and it is needed for the create path regardless.
+    await ensureSandboxImage(docker, image);
+
+    // Then hand the workspace back to the host user, whichever path follows.
+    // Doing this only on reconnect would miss the case that matters most: the
+    // container above was just removed for being root, so the very next thing
+    // to touch this still-root-owned tree is a brand new container running
+    // unprivileged.
+    await repairWorkspaceOwnership(docker, hostWorkspace, image);
 
     if (existing) {
       const info = await existing.inspect();
@@ -430,8 +525,6 @@ export class DockerSandbox implements Sandbox {
       return sandbox;
     }
 
-    await ensureSandboxImage(docker, config.image ?? SANDBOX_IMAGE);
-
     const exposedPorts: Record<string, Record<string, never>> = {};
     const portBindings: Record<string, Array<{ HostPort: string }>> = {};
     for (const port of ports) {
@@ -443,8 +536,26 @@ export class DockerSandbox implements Sandbox {
 
     const container = await docker.createContainer({
       name: containerName,
-      Image: config.image ?? SANDBOX_IMAGE,
+      Image: image,
       WorkingDir: CONTAINER_WORKDIR,
+      // Run as the host's own uid:gid rather than root.
+      //
+      // The workspace is a bind mount shared with the host: the agent runs
+      // there, Paco reads and writes files there, and git worktrees are created
+      // in the container but resolved from both sides. With the container as
+      // root, everything it created was root-owned and Paco — unprivileged —
+      // could not touch it. Creating those files host-side instead only moved
+      // the failure: git in the container then refused a host-owned repository
+      // as "dubious ownership" and returned nothing.
+      //
+      // Matching the uid is the only arrangement where both sides can read and
+      // write the same tree. It needs an image built for an unknown uid (see
+      // the Dockerfile), which is why the image is version-pinned.
+      //
+      // Invisible on macOS, where Docker Desktop maps container-created files
+      // to the host user whatever uid the container claims — which is exactly
+      // why this survived until CI ran on Linux.
+      User: hostContainerUser(),
       // Keep PID 1 alive so the container outlives individual exec calls.
       Cmd: ["sleep", "infinity"],
       Tty: false,

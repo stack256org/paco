@@ -45,6 +45,35 @@ describe("resolveSandboxImage", () => {
       PUBLISHED_SANDBOX_IMAGE,
     );
   });
+
+  test("pins to the installed version when the package declares one", () => {
+    // The image is no longer a free-floating toolchain: it has to be built to
+    // tolerate an arbitrary uid, because the container runs as the host user.
+    // Old app + new image, or new app + old image, both break — so an upgraded
+    // host has to fetch the image matching the package it just installed rather
+    // than whatever `latest` happens to be.
+    expect(resolveSandboxImage({ PACO_VERSION: "0.1.2" })).toBe(
+      "ghcr.io/stack256org/paco-sandbox:v0.1.2",
+    );
+  });
+
+  test("an explicit image still wins over the version pin", () => {
+    // An operator mirroring internally has already said exactly what they want.
+    expect(
+      resolveSandboxImage({
+        PACO_VERSION: "0.1.2",
+        PACO_SANDBOX_IMAGE: "registry.internal/paco-sandbox:pinned",
+      }),
+    ).toBe("registry.internal/paco-sandbox:pinned");
+  });
+
+  test("falls back to latest when no version is declared", () => {
+    // Running from a checkout rather than the .deb: there is no package
+    // version, and `latest` is the only sensible thing to ask for.
+    expect(resolveSandboxImage({ PACO_VERSION: "  " })).toBe(
+      PUBLISHED_SANDBOX_IMAGE,
+    );
+  });
 });
 
 /** Records what was inspected and pulled, and can fail either on demand. */

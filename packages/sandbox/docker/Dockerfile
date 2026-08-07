@@ -45,6 +45,30 @@ RUN corepack enable \
   && corepack prepare pnpm@latest --activate \
   && pnpm --version
 
+# This image runs as the HOST's uid:gid, not as root — see `User:` in
+# sandbox.ts. On a Linux bind mount that is what makes files the container
+# creates writable by Paco, which runs unprivileged; as root it created
+# root-owned files the app then could not touch, and creating them host-side
+# instead only moved the failure (git inside the container rejected a
+# host-owned repository as "dubious ownership").
+#
+# That uid is not in this image's /etc/passwd and cannot be, because it is
+# whatever the host happens to use. So everything written at runtime has to be
+# writable by an unknown uid:
+#
+#   HOME       `git config --global` writes ~/.gitconfig, and Paco sets a git
+#              identity on every sandbox. With no writable HOME that fails, and
+#              a sandbox that cannot commit cannot host a chat. Node, pnpm and
+#              npm all cache under HOME too.
+#   PNPM_HOME  the store every `pnpm install` in a generated project writes to.
+#
+# 0777 rather than a named user: there is no single uid to grant it to. These
+# two paths hold no secrets, the container is disposable and per-session, and
+# the workspace itself is a bind mount whose permissions come from the host.
+ENV HOME=/home/sandbox
+RUN mkdir -p "$HOME" "$PNPM_HOME" \
+  && chmod -R 0777 "$HOME" "$PNPM_HOME"
+
 WORKDIR /workspace
 
 # The app's own process is started on demand (the dev server), so the container

@@ -118,8 +118,11 @@ A few things happen outside that flow:
 - **The first chat is slower than the rest.** It pulls
   `ghcr.io/stack256org/paco-sandbox`, the image your app is built inside, which
   is a few gigabytes and happens once. Nothing to do — but
-  `docker pull ghcr.io/stack256org/paco-sandbox:latest` moves that wait
-  somewhere you chose, and `PACO_SANDBOX_IMAGE` points it at your own mirror.
+  `docker pull ghcr.io/stack256org/paco-sandbox:v$(paco status | awk '/^Version/{print $2}')`
+  moves that wait somewhere you chose, and `PACO_SANDBOX_IMAGE` points it at
+  your own mirror. The tag matches your installed version rather than being
+  `latest`, because the container runs as your own uid and the image has to be
+  built for that.
 - **TLS** is `sudo paco tls <domain>`, once DNS for that domain resolves here
   — a per-hostname Let's Encrypt certificate over HTTP-01. No wildcard, no DNS
   credential, and it does not cover preview hostnames (see below and

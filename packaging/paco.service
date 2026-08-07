@@ -10,6 +10,18 @@ User=paco
 Group=paco
 WorkingDirectory=/usr/lib/paco
 EnvironmentFile=/etc/paco/paco.env
+# The installed package's version, generated into the package by
+# packaging/build-deb.sh. Read second so an operator can still override
+# anything here from paco.env, and marked optional with `-` so a host upgraded
+# from a package that predates the file starts normally instead of failing on a
+# missing EnvironmentFile.
+#
+# It carries PACO_VERSION, which pins the sandbox image to the one built
+# alongside this exact package (see packages/sandbox/docker/config.ts). It has
+# to ship IN the package rather than live in paco.env, because paco.env is
+# generated once and never rewritten — a version pinned there would freeze at
+# whatever was installed first and never move again.
+EnvironmentFile=-/usr/lib/paco/version.env
 # Not a bare `node .../server.js`: migrations have to run at service start
 # (see postinst, and docs/agents/native-installation notes) rather than from
 # a maintainer script, so that a migration failure surfaces as a failed

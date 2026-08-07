@@ -37,8 +37,19 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # Built here, not pulled. The sandbox integration tests exercise the image
+      # together with the code that drives it, and those two now have to match:
+      # the container runs as the host's uid, which only works on an image built
+      # for an arbitrary uid. Pulling the published `:latest` would test the
+      # last release's image against this branch's code — and on the commit that
+      # changes the Dockerfile, that is guaranteed to be the wrong pairing.
+      - name: Build the sandbox image this branch describes
+        run: docker build -t paco-sandbox:ci packages/sandbox/docker
+
       - name: Test
         run: pnpm test:isolated
+        env:
+          PACO_SANDBOX_IMAGE: paco-sandbox:ci
 
       - name: DB Check
         run: pnpm --dir apps/web db:check

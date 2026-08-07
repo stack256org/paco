@@ -40,33 +40,18 @@ async function dockerAvailable(): Promise<boolean> {
 }
 
 /**
- * Opt-in, because these cannot pass on Linux until the sandbox runs as the host
- * user — and that is a product bug, not a test bug.
+ * These were opt-in for one release, because they could not pass on Linux: the
+ * container ran as root while Paco runs unprivileged, so on a bind mount
+ * ownership disagreed in both directions — anything the container created was
+ * root-owned and the host could not write it, and anything the host created was
+ * host-owned and git inside the container refused it as "dubious ownership".
+ * Fixing one direction moved the failure to the other.
  *
- * The container has no `User:` and the image sets no `USER`, so it runs as
- * root, while Paco runs as an unprivileged user. On a Linux bind mount that
- * makes ownership disagree in both directions:
- *
- *   - anything the container creates is root-owned, so the host cannot write
- *     it (this is what `EACCES … repo/.gitignore` was);
- *   - anything the host creates is owned by the host user, so git inside the
- *     container refuses it as "dubious ownership" and every `git rev-parse`
- *     returns nothing.
- *
- * Fixing one direction moves the failure to the other. The real fix is running
- * the container as the host uid:gid, which also needs the image changed —
- * `PNPM_HOME=/usr/local/pnpm` is root-owned and a non-root user cannot write a
- * store there — and therefore a republished image. That is its own change.
- *
- * None of this is visible on macOS: Docker Desktop maps every container-created
- * file to the host user, so the whole class of problem disappears, which is why
- * it survived until CI first ran these on Linux.
- *
- * So: run them where they can pass — a developer's machine — and do not pretend
- * in CI. Set PACO_DOCKER_INTEGRATION=1 to opt in.
+ * The container now runs as the host's uid:gid, which is the only arrangement
+ * where both sides can read and write the same tree, so they are back on by
+ * default and CI is where they are expected to pass.
  */
-const optedIn = process.env.PACO_DOCKER_INTEGRATION === "1";
-const available = optedIn && (await dockerAvailable());
+const available = await dockerAvailable();
 const describeDocker = available ? describe : describe.skip;
 
 describeDocker("DockerSandbox", () => {
