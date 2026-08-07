@@ -2,17 +2,27 @@ import { describe, expect, mock, test } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
-// The route reads `appUrl()` (via `@/lib/app-url`) to compare against the
-// request's `Origin` header, so the tests fix `APP_URL` rather than mocking
-// that module — it's a pure function of the env, and using the real thing
-// keeps the test honest about what the route actually compares against.
+// The default Origin these requests carry. The route no longer reads APP_URL
+// at all — what it compares against is the domain configured in settings, which
+// `configuredDomain` below stands in for — but requests still need *some*
+// origin, and one that matches the request URL keeps the fixtures realistic.
 const APP_ORIGIN = "http://localhost:3066";
-process.env.APP_URL = APP_ORIGIN;
 
 let firstRun = true;
 
 mock.module("@/lib/auth/first-run", () => ({
   isFirstRun: async () => firstRun,
+}));
+
+/**
+ * The domain the instance has been configured with, which is what decides
+ * whether the origin check enforces anything at all. `null` is a fresh install
+ * — the state every one of these starts in unless it says otherwise.
+ */
+let configuredDomain: string | null = null;
+
+mock.module("@/lib/settings/instance-settings", () => ({
+  readInstanceSettings: async () => ({ appDomain: configuredDomain }),
 }));
 
 type CaptureMetadata = { captureToken?: (token: string) => void };
@@ -116,69 +126,63 @@ describe("GET /api/auth/first-run", () => {
 });
 
 describe("POST /api/auth/first-run", () => {
-  test("accepts a same-origin request on a host APP_URL does not name", async () => {
-    // The bug this covers made every default install unclaimable.
+  test("claims a fresh install from whatever address reached it", async () => {
+    // The bug this covers made every default install unclaimable, twice over.
     //
-    // `curl | sudo sh` has no terminal, so the domain prompt is always skipped
-    // and APP_URL is left unset — at which point `appUrl()` falls back to
-    // `http://localhost:3000`. Comparing the browser's Origin against *that*
-    // meant a browser at the host's real address or domain was refused with
-    // "That request didn't come from this Paco instance", and there was no way
-    // to claim the instance at all.
+    // `curl | sudo sh` has no terminal, so the installer's domain prompt is
+    // always skipped and no domain is ever configured. Judging the browser's
+    // Origin in that state — first against APP_URL's localhost fallback, then
+    // against a Host any edge proxy rewrites — refused every real address, and
+    // there was no address that worked.
     //
-    // What this endpoint actually needs is a same-origin check — the request
-    // came from a page this server served — and that is a question about the
-    // request's own Host, not about a value in the environment.
-    // Blank, not deleted: `appUrl()` treats an empty value as unset and falls
-    // back to localhost either way, and assigning a string keeps `process.env`
-    // typed as the string map it is.
-    const previous = process.env.APP_URL ?? "";
-    process.env.APP_URL = "";
+    // An instance that has not been told its own address accepts any.
+    configuredDomain = null;
     firstRun = true;
     capturedEmail = null;
     const { POST } = await routeModulePromise;
 
     const response = await POST(
-      new Request("http://paco.example.test/api/auth/first-run", {
-        body: JSON.stringify({ email: "owner@example.com" }),
-        headers: {
-          "content-type": "application/json",
-          origin: "http://paco.example.test",
-        },
-        method: "POST",
-      }),
+      postRequest({ email: "owner@example.com" }, "https://paco.2sc.dev"),
     );
-
-    process.env.APP_URL = previous;
 
     expect(response.status).toBe(200);
     expect(currentValue(() => capturedEmail)).toBe("owner@example.com");
   });
 
-  test("rejects an Origin whose host merely ends with the real one", async () => {
-    // `paco.example.test.evil.example` ends with nothing useful, but the
-    // reverse — a suffix match — is the classic way an origin check is got
-    // wrong. Compared as whole hosts, neither direction matches.
+  test("accepts a request with no Origin at all while unconfigured", async () => {
+    configuredDomain = null;
     firstRun = true;
     capturedEmail = null;
     const { POST } = await routeModulePromise;
 
     const response = await POST(
-      new Request("http://paco.example.test/api/auth/first-run", {
-        body: JSON.stringify({ email: "attacker@evil.com" }),
-        headers: {
-          "content-type": "application/json",
-          origin: "http://paco.example.test.evil.example",
-        },
-        method: "POST",
-      }),
+      postRequest({ email: "owner@example.com" }, null),
     );
 
+    expect(response.status).toBe(200);
+    expect(currentValue(() => capturedEmail)).toBe("owner@example.com");
+  });
+
+  test("rejects a foreign Origin once a domain is configured", async () => {
+    configuredDomain = "https://paco.2sc.dev";
+    firstRun = true;
+    capturedEmail = null;
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(
+      postRequest({ email: "attacker@evil.com" }, "https://evil.example"),
+    );
+
+    configuredDomain = null;
+
     expect(response.status).toBe(403);
+    // Never even reached the point of starting a sign-in.
     expect(capturedEmail).toBeNull();
   });
 
-  test("rejects a request from a foreign Origin", async () => {
+  test("rejects a host that merely extends the configured domain", async () => {
+    // A suffix match is the classic way an origin check is got wrong.
+    configuredDomain = "https://paco.2sc.dev";
     firstRun = true;
     capturedEmail = null;
     const { POST } = await routeModulePromise;
@@ -186,26 +190,11 @@ describe("POST /api/auth/first-run", () => {
     const response = await POST(
       postRequest(
         { email: "attacker@evil.com" },
-        "http://192.168.1.10.evil.example",
+        "https://paco.2sc.dev.evil.example",
       ),
     );
 
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({
-      error: "That request didn't come from this Paco instance.",
-    });
-    // Never even reached the point of starting a sign-in.
-    expect(capturedEmail).toBeNull();
-  });
-
-  test("rejects a request with no Origin header at all", async () => {
-    firstRun = true;
-    capturedEmail = null;
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(
-      postRequest({ email: "attacker@evil.com" }, null),
-    );
+    configuredDomain = null;
 
     expect(response.status).toBe(403);
     expect(capturedEmail).toBeNull();

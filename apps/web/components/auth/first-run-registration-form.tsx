@@ -96,6 +96,19 @@ export function FirstRunRegistrationForm({
         only.
       </p>
 
+      {/*
+        Said plainly rather than left implicit. Until an owner exists, this form
+        accepts whatever address reached it — which is what makes a fresh
+        install claimable at all, and is also worth knowing: anyone who can
+        reach this page right now can take the instance. The honest advice is
+        to do it now, and the domain gets pinned in the next step.
+      */}
+      <p className="text-base-content/50 text-xs">
+        No domain is set yet, so this page answers on any address that reaches
+        this server. Claim it now — you&rsquo;ll set the domain in the next
+        step, and after that only that address is accepted.
+      </p>
+
       {error ? (
         <div className="alert alert-error alert-soft" role="alert">
           <span>{error}</span>
