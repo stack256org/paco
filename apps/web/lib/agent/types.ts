@@ -68,3 +68,23 @@ export interface AgentCallOptions {
    */
   tools?: string[];
 }
+
+/**
+ * Lets a caller steer a running turn once the backend handle exists.
+ *
+ * `runAgentTurn` calls `onSteer` synchronously right after the backend's
+ * `startTurn()` returns — before any chunks are read — handing back a bound
+ * `steer(text)` function. The caller stores it and invokes it later, once it
+ * actually has something to steer with (the workflow's steer monitor in
+ * `app/workflows/chat.ts` may detect a buffered message before the handle
+ * even exists, in which case it holds the text until `onSteer` fires).
+ *
+ * This exists so steering goes through the backend's own `steer()` — which
+ * lets it wind down cleanly and report `steered` plus a resumable session id
+ * — instead of a bare `AbortController.abort()`, which the backend can only
+ * see as an unexplained interrupt (see `TurnHandle`'s contract in
+ * `@paco/agent-backend`).
+ */
+export interface SteerController {
+  onSteer(steer: (text: string) => Promise<void>): void;
+}

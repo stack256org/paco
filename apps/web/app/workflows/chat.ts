@@ -23,7 +23,7 @@ import {
   appendSessionEvents,
   listUnconsumedSteerEvents,
 } from "@/lib/db/session-events";
-import type { AgentCallOptions } from "@/lib/agent/types";
+import type { AgentCallOptions, SteerController } from "@/lib/agent/types";
 import {
   getChatClaudeSessionId,
   setChatClaudeSessionId,
@@ -439,6 +439,38 @@ async function sendDataPart(
   }
 }
 
+/**
+ * Read buffered-but-unconsumed steer messages, as a step.
+ *
+ * `runAgentWorkflow`'s body runs `"use workflow"` — the Workflow SDK replays
+ * it in a sandboxed VM with no Node modules, so it cannot call a Postgres
+ * client directly (every other DB read/write in this file is already
+ * wrapped in its own `"use step"` function for the same reason; this is the
+ * continuation loop's).
+ */
+async function readPendingSteerStep(
+  chatId: string,
+): Promise<Array<{ id: number; messageId: string; text: string }>> {
+  "use step";
+  return listUnconsumedSteerEvents(chatId);
+}
+
+/**
+ * Record that a buffered message has been consumed, as a step. See
+ * `readPendingSteerStep` for why this can't be a direct call from the
+ * workflow body.
+ */
+async function consumeSteerStep(
+  chatId: string,
+  messageId: string,
+  mode: TurnPolicy,
+): Promise<void> {
+  "use step";
+  await appendSessionEvents(chatId, [
+    { type: "steer/consumed", messageId, mode },
+  ]);
+}
+
 export async function runAgentWorkflow(options: Options) {
   "use workflow";
 
@@ -537,12 +569,15 @@ export async function runAgentWorkflow(options: Options) {
   let caughtError: unknown;
   let sandboxState: AgentCallOptions["sandbox"]["state"] | undefined;
   let shouldRefreshCachedDiff = false;
-  // Carried out of the last completed `runTurn` call for the post-turn
-  // distillation step below, which needs the turn it should learn from and
-  // where its project-scope output belongs — neither of which the workflow
-  // body can otherwise compute without importing sandbox/filesystem modules
-  // it must not pull in statically (see `runAgentStep`'s own comment on this).
-  let finalTurnId: string | undefined;
+  // Collected from every completed `runTurn` call (the primary turn and each
+  // continuation) for the post-turn distillation step below, which learns
+  // from every turn that ran, not just the last. `sessionRepoDir` — where a
+  // turn's project-scope output belongs — is the same directory for all of
+  // them (it does not vary per turn), so only the latest is kept; neither
+  // value can otherwise be computed in the workflow body without importing
+  // sandbox/filesystem modules it must not pull in statically (see
+  // `runAgentStep`'s own comment on this).
+  const turnIds: string[] = [];
   let finalSessionRepoDir: string | undefined;
 
   try {
@@ -607,18 +642,35 @@ export async function runAgentWorkflow(options: Options) {
     /**
      * Run one agent turn and fold its result into the workflow's running
      * state. Used for the primary turn and for every continuation turn that
-     * consumes a buffered steer message — both go through the identical
-     * step invocation, including the recorder and checkpoint threaded above.
+     * consumes a buffered steer message — both go through the identical step
+     * invocation (recorder, checkpointing, resume via claudeSessionId).
+     *
+     * Each turn gets its own assistant message id, its own seed messages, and
+     * its own checkpoint. A buffered message already got its own persisted
+     * row in `chatMessages` (Task 9), so the reply that answers it needs to
+     * be its own row too: `getChatMessages` renders whatever rows exist for a
+     * chat in insertion order, so a single, repeatedly-overwritten assistant
+     * message would either discard earlier replies (the primary turn's reply
+     * vanishing under a later continuation's) or leave the buffered user
+     * messages without a reply of their own when the transcript loads back.
+     * Retaking the checkpoint per turn (rather than sharing the primary
+     * turn's) gives each turn its own revert point.
      */
-    const runTurn = async (prompt: string, stepNumber: number) => {
+    const runTurn = async (
+      prompt: string,
+      stepNumber: number,
+      turnAssistantId: string,
+      turnOriginalMessages: WebAgentUIMessage[],
+      turnCheckpoint: { sha: string; dirty: boolean } | null,
+    ) => {
       let stepResult: Awaited<ReturnType<typeof runAgentStep>>;
 
       try {
         stepResult = await runAgentStep(
           modelMessages,
           prompt,
-          originalMessagesForStep,
-          assistantId,
+          turnOriginalMessages,
+          turnAssistantId,
           writable,
           workflowRunId,
           options.chatId,
@@ -629,7 +681,7 @@ export async function runAgentWorkflow(options: Options) {
           agentOptions,
           stepNumber,
           options.maxSteps,
-          checkpoint,
+          turnCheckpoint,
         );
       } catch (error) {
         if (isStepTimingError(error)) {
@@ -648,8 +700,10 @@ export async function runAgentWorkflow(options: Options) {
       wasAborted = wasAborted || stepResult.stepWasAborted;
       finalFinishReason = stepResult.finishReason;
       exhaustedMaxSteps = stepResult.finishReason === "length";
-      finalTurnId = stepResult.turnId;
-      finalSessionRepoDir = stepResult.sessionRepoDir;
+      if (stepResult.turnId) {
+        turnIds.push(stepResult.turnId);
+      }
+      finalSessionRepoDir = stepResult.sessionRepoDir ?? finalSessionRepoDir;
 
       if (stepResult.stepUsage) {
         totalUsage = totalUsage
@@ -661,13 +715,34 @@ export async function runAgentWorkflow(options: Options) {
         await refreshLifecycleActivity(options.sessionId);
       }
 
+      // Applied here, per turn, rather than once at the end: `responseMessage`
+      // above replaces the whole message object, so anything attached earlier
+      // is discarded by the time the turn finishes — and each turn now has
+      // its own checkpoint rather than sharing the primary turn's.
+      if (turnCheckpoint) {
+        pendingAssistantResponse = {
+          ...pendingAssistantResponse,
+          metadata: {
+            ...pendingAssistantResponse.metadata,
+            checkpointSha: turnCheckpoint.sha,
+            checkpointCommitted: turnCheckpoint.dirty,
+          },
+        };
+      }
+
       return stepResult;
     };
 
     // The prompt comes from the whole message list, not just the newest
     // entry: when a stopped run is resumed the newest entry is the partial
     // assistant message, and reading only that yields an empty prompt.
-    let result = await runTurn(extractLatestUserText(options.messages), 1);
+    let result = await runTurn(
+      extractLatestUserText(options.messages),
+      1,
+      assistantId,
+      originalMessagesForStep,
+      checkpoint,
+    );
 
     /*
      * Consume buffered messages as continuation turns, oldest first, exactly
@@ -681,22 +756,65 @@ export async function runAgentWorkflow(options: Options) {
      * A turn the user genuinely stopped (aborted, but not by steering) ends
      * the loop instead of continuing: that abort didn't come from a buffered
      * message, so nothing here should auto-resume the turn.
+     *
+     * `readPendingSteerStep` here and the steer monitor inside `runAgentStep`
+     * agree on which message is "next" without coordinating directly: both
+     * read `listUnconsumedSteerEvents`, which orders by the underlying
+     * session-events row id ascending — i.e. insertion order — so the oldest
+     * unconsumed message is always the same one on both sides.
+     *
+     * Both DB calls here go through their own `"use step"` wrapper
+     * (`readPendingSteerStep`/`consumeSteerStep`) rather than calling
+     * `listUnconsumedSteerEvents`/`appendSessionEvents` directly: this
+     * function's body runs `"use workflow"`, which the Workflow SDK replays
+     * in a sandboxed VM with no Node modules — a direct DB call here would
+     * crash on every turn in production.
      */
     let nextStepNumber = 2;
     while (!result.stepWasAborted || result.stepWasSteered) {
-      const pending = await listUnconsumedSteerEvents(options.chatId);
+      const pending = await readPendingSteerStep(options.chatId);
       const next = pending[0];
       if (!next) {
         break;
       }
-      await appendSessionEvents(options.chatId, [
+
+      // This turn's reply is finished and another is about to start under a
+      // new message id: persist it now, as its own row — see the comment on
+      // `runTurn` above for why. The eventual final turn is persisted once
+      // more below, with the enrichment (cumulative usage, auto-commit data
+      // parts) that is only known once the whole exchange has finished;
+      // `persistAssistantMessage` upserts by id, so re-persisting the same
+      // row there is a harmless no-op for a message that hasn't changed.
+      await persistAssistantMessage(options.chatId, pendingAssistantResponse);
+
+      await consumeSteerStep(options.chatId, next.messageId, turnPolicy);
+
+      const continuationAssistantId = generateIdAi();
+      pendingAssistantResponse = {
+        role: "assistant",
+        id: continuationAssistantId,
+        parts: [],
+        metadata: withModelMetadata(undefined, selectedModelId, modelId),
+      };
+      const continuationOriginalMessages: WebAgentUIMessage[] = [
         {
-          type: "steer/consumed",
-          messageId: next.messageId,
-          mode: turnPolicy,
+          role: "user",
+          id: next.messageId,
+          parts: [{ type: "text", text: next.text }],
         },
-      ]);
-      result = await runTurn(next.text, nextStepNumber);
+      ];
+      const continuationCheckpoint = await takeChatCheckpoint({
+        sandboxState: runtime.sandboxState,
+        chatId: options.chatId,
+      });
+
+      result = await runTurn(
+        next.text,
+        nextStepNumber,
+        continuationAssistantId,
+        continuationOriginalMessages,
+        continuationCheckpoint,
+      );
       nextStepNumber += 1;
     }
 
@@ -706,20 +824,6 @@ export async function runAgentWorkflow(options: Options) {
         metadata: {
           ...pendingAssistantResponse.metadata,
           totalMessageUsage: totalUsage,
-        },
-      };
-    }
-
-    // Applied here rather than before the turn: `result.responseMessage`
-    // replaces the whole message object above, so anything attached earlier is
-    // discarded by the time the turn finishes.
-    if (checkpoint) {
-      pendingAssistantResponse = {
-        ...pendingAssistantResponse,
-        metadata: {
-          ...pendingAssistantResponse.metadata,
-          checkpointSha: checkpoint.sha,
-          checkpointCommitted: checkpoint.dirty,
         },
       };
     }
@@ -899,13 +1003,22 @@ export async function runAgentWorkflow(options: Options) {
     // costs the workflow run some wall-clock time but never delays the
     // user's turn. A Section 3 Task 6 reviewer gate will be inserted BEFORE
     // this call once it lands on this branch.
-    if (finalTurnId && finalSessionRepoDir) {
-      await distillTurnMemoryStep({
-        chatId: options.chatId,
-        sessionRepoDir: finalSessionRepoDir,
-        userId: options.userId,
-        turnId: finalTurnId,
-      });
+    //
+    // One call per turn that actually ran (the primary turn, plus every
+    // continuation a steer/queue buffer produced), sequentially and awaited:
+    // each turn said something different, so each is a separate thing to
+    // learn from — distilling only the last would silently drop whatever the
+    // earlier turns did. `sessionRepoDir` doesn't vary per turn, so the same
+    // value is reused for all of them.
+    if (finalSessionRepoDir) {
+      for (const turnId of turnIds) {
+        await distillTurnMemoryStep({
+          chatId: options.chatId,
+          sessionRepoDir: finalSessionRepoDir,
+          userId: options.userId,
+          turnId,
+        });
+      }
     }
   } catch (error) {
     workflowStatus = wasAborted ? "aborted" : "failed";
@@ -1032,13 +1145,33 @@ const runAgentStep = async (
   // the turn's end even though the recorder itself is created part-way
   // through the try block.
   let recorder: TurnEventRecorder | undefined;
-  // Set by the steer monitor when a buffered message aborts this turn, so the
-  // abort-catch branch below can tell a steer-abort apart from a user stop —
-  // the two mean different things to the workflow's continuation loop.
-  let steeredMessage: { messageId: string; text: string } | undefined;
   let steerMonitor: { stop: () => void } | undefined;
+  // Registered by `runAgentTurn` (via `steerController.onSteer`) once the
+  // backend handle exists. The steer monitor below may detect a buffered
+  // message before that happens — memory loading and the dynamic imports
+  // above it all run first — so a steer that arrives early is held in
+  // `pendingSteerText` and replayed the moment `steerFn` is set.
+  let steerFn: ((text: string) => Promise<void>) | undefined;
+  let pendingSteerText: string | undefined;
+  const triggerSteer = (text: string) => {
+    if (!steerFn) {
+      pendingSteerText = text;
+      return;
+    }
+    // The backend may reject (e.g. `SteeringUnsupportedError`, or the turn
+    // just finished on its own): either way this turn keeps running to
+    // completion, and the buffered message stays pending — the workflow's
+    // continuation loop picks it up once the turn ends naturally, exactly
+    // like the queue policy does.
+    void steerFn(text).catch((error) => {
+      console.error(
+        "[workflow] steer() failed; the turn will run to completion:",
+        error,
+      );
+    });
+  };
   // Declared outside the try for the same reason as `recorder`: the
-  // abort-catch branches below also need it, to thread through to the
+  // abort-catch branch below also needs it, to thread through to the
   // post-turn distillation step.
   let sessionRepoDir: string | undefined;
 
@@ -1050,9 +1183,22 @@ const runAgentStep = async (
     const turnPolicy: TurnPolicy = chat?.turnPolicy ?? "steer";
     if (turnPolicy === "steer") {
       steerMonitor = startSteerMonitor(chatId, abortController, (steered) => {
-        steeredMessage = steered;
+        triggerSteer(steered.text);
       });
     }
+    const steerController: SteerController | undefined =
+      turnPolicy === "steer"
+        ? {
+            onSteer: (steer) => {
+              steerFn = steer;
+              if (pendingSteerText !== undefined) {
+                const text = pendingSteerText;
+                pendingSteerText = undefined;
+                triggerSteer(text);
+              }
+            },
+          }
+        : undefined;
 
     // Claude Code keeps its own conversation history, so only the newest user
     // turn is sent; prior turns are recovered with `--resume`.
@@ -1108,6 +1254,13 @@ const runAgentStep = async (
      * so loading the org and retrieving memory is wrapped in one try/catch
      * and simply leaves `memorySection` unset on any failure.
      *
+     * Not gated on `sessionRepoDir`: only project-scope memory lives under
+     * it, and user/org scope don't — a chat whose repo dir failed to resolve
+     * above still has a user (and usually an organisation), so it would be
+     * wrong to drop all three scopes over the one that needs a directory.
+     * `loadMemorySectionForTurn` skips project scope on its own when
+     * `sessionRepoDir` is absent.
+     *
      * Loaded fresh every turn, right here rather than threaded in from an
      * earlier step, for the same reason the roster/skills are: this step can
      * replay independently under the durable workflow runtime, and memory
@@ -1115,23 +1268,21 @@ const runAgentStep = async (
      * promotion) should be visible to this one.
      */
     let memorySection: string | undefined;
-    if (sessionRepoDir) {
-      try {
-        const [{ getOrganization }, { loadMemorySectionForTurn }] =
-          await Promise.all([
-            import("@/lib/org/organization"),
-            import("@/lib/memory/load-for-turn"),
-          ]);
-        const organization = await getOrganization();
-        memorySection = await loadMemorySectionForTurn({
-          sessionRepoDir,
-          userId,
-          organizationId: organization?.id,
-          prompt,
-        });
-      } catch (error) {
-        console.error("[workflow] Failed to load memory for turn:", error);
-      }
+    try {
+      const [{ getOrganization }, { loadMemorySectionForTurn }] =
+        await Promise.all([
+          import("@/lib/org/organization"),
+          import("@/lib/memory/load-for-turn"),
+        ]);
+      const organization = await getOrganization();
+      memorySection = await loadMemorySectionForTurn({
+        ...(sessionRepoDir ? { sessionRepoDir } : {}),
+        userId,
+        organizationId: organization?.id,
+        prompt,
+      });
+    } catch (error) {
+      console.error("[workflow] Failed to load memory for turn:", error);
     }
 
     const step = await runAgentTurn<WebAgentUIMessage>({
@@ -1147,6 +1298,7 @@ const runAgentStep = async (
       chatId,
       approval: { url: approvalUrl, token: approvalToken() },
       abortSignal: abortController.signal,
+      ...(steerController ? { steerController } : {}),
       onChunk: async (chunk) => {
         const writer = writable.getWriter();
         try {
@@ -1232,7 +1384,11 @@ const runAgentStep = async (
       stepUsage,
       stepCost: step.costUsd,
       stepWasAborted: false,
-      stepWasSteered: false,
+      // Steering now goes through the backend's own `steer()` (see
+      // `steerController` above), which winds the turn down cleanly and
+      // resolves here — it never throws — so a steered turn is recognized
+      // from `step.steered` on this success path, not from an abort.
+      stepWasSteered: Boolean(step.steered),
       stepTiming: buildStepTiming(
         stepNumber,
         stepStartedAt,
@@ -1249,36 +1405,10 @@ const runAgentStep = async (
     const stepFinishedAt = new Date();
 
     if (isAbortError(error)) {
+      // Steering never reaches this branch (see the comment on
+      // `stepWasSteered` above): an abort here is always the stop button, via
+      // `startStopMonitor`.
       const abortedFinishReason: FinishReason = "stop";
-
-      if (steeredMessage) {
-        // The signal fired because the steer monitor saw a buffered message,
-        // not because the user pressed stop: record what steered it, and let
-        // the workflow's continuation loop pick the buffered message back up.
-        await recorder?.finish({
-          finishReason: "stop",
-          isError: false,
-          steered: { text: steeredMessage.text },
-        });
-        return {
-          responseMessage: undefined,
-          responseMessages: [] as ModelMessage[],
-          finishReason: abortedFinishReason,
-          rawFinishReason: undefined,
-          stepUsage: undefined,
-          stepCost: undefined,
-          stepWasAborted: false,
-          stepWasSteered: true,
-          stepTiming: buildStepTiming(
-            stepNumber,
-            stepStartedAt,
-            stepFinishedAt,
-            abortedFinishReason,
-          ),
-          turnId: recorder?.getTurnId(),
-          sessionRepoDir,
-        };
-      }
 
       await recorder?.finish({ finishReason: "stop", isError: false });
       return {
@@ -1360,13 +1490,19 @@ function startStopMonitor(runId: string, abortController: AbortController) {
 
 /**
  * Polls for steer/buffered events during a turn (steer policy only) and
- * aborts the in-flight turn when one arrives; the workflow loop then consumes
- * the buffer as a continuation turn. Same lifecycle as startStopMonitor.
+ * hands the caller the buffered message once one arrives, so it can steer
+ * the backend directly (see `steerController` in `runAgentStep`) instead of
+ * aborting the turn — the workflow loop then consumes the buffer as a
+ * continuation turn. Same polling/cleanup lifecycle as `startStopMonitor`;
+ * `abortController` here only stops polling once the turn ends for some
+ * other reason (a genuine user stop), it is never `.abort()`-ed by this
+ * function itself.
  *
- * `onSteerDetected` is handed the buffered message that triggered the abort,
- * not just a boolean: the abort-catch branch needs its text to record on
- * `turn/end` as `steered`, and re-querying after the fact would race the
- * workflow's own consumption loop over which message is "next".
+ * `onSteerDetected` is handed the buffered message, not just a boolean: the
+ * caller needs its text to actually steer with, and re-querying after the
+ * fact would race the workflow's own consumption loop over which message is
+ * "next" (both agree because both read `listUnconsumedSteerEvents`, which
+ * orders by insertion id).
  */
 function startSteerMonitor(
   chatId: string,
@@ -1382,7 +1518,6 @@ function startSteerMonitor(
         const next = pending[0];
         if (next) {
           onSteerDetected(next);
-          abortController.abort();
           return;
         }
       } catch {

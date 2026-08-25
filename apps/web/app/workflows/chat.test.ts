@@ -242,6 +242,14 @@ mock.module("workflow/api", () => ({
 
 mock.module("./chat-post-finish", () => spies);
 
+/**
+ * Recorded calls to the (mock) backend's `steer()` — the follow-up review of
+ * Task 10 requires steering to go through the backend's own contract
+ * (`TurnHandle.steer`) rather than aborting the turn, so tests assert against
+ * this instead of an aborted `abortSignal`.
+ */
+let backendSteerCalls: Array<{ text: string }> = [];
+
 mock.module("@/lib/agent/run-step", () => ({
   runAgentTurn: async (params: {
     prompt: string;
@@ -250,6 +258,9 @@ mock.module("@/lib/agent/run-step", () => ({
     claudeSessionId?: string;
     originalMessages?: Array<Record<string, unknown>>;
     abortSignal?: AbortSignal;
+    steerController?: {
+      onSteer: (steer: (text: string) => Promise<void>) => void;
+    };
     onChunk: (chunk: Record<string, unknown>) => Promise<void>;
     options?: { memorySection?: string };
   }) => {
@@ -267,23 +278,26 @@ mock.module("@/lib/agent/run-step", () => ({
       });
     }
 
-    // Steer test support: while a message is still buffered and the chat is
-    // on the steer policy, behave like a turn that hasn't finished yet and
-    // let the workflow's real AbortController-based steer monitor (Task 10)
-    // cancel it — mirrors production instead of a canned immediate throw.
+    // Steer test support: register a `steer` function exactly like
+    // run-step.ts registers `handle.steer` (`onSteer((text) =>
+    // handle.steer(text))`) — the workflow calls it later, once its monitor
+    // has something to steer with. While a message is still buffered and the
+    // chat is on the steer policy, this turn holds open until that happens.
+    // Mirrors the real `TurnHandle.steer()` contract: the call resolves
+    // NORMALLY with `steered`, it never throws/aborts.
+    let steeredText: string | undefined;
+    const steeredPromise = new Promise<string>((resolve) => {
+      params.steerController?.onSteer((text: string) => {
+        backendSteerCalls.push({ text });
+        resolve(text);
+        return Promise.resolve();
+      });
+    });
     if (
-      params.abortSignal &&
       testChatRecord.turnPolicy === "steer" &&
       pendingSteerEvents.length > 0
     ) {
-      if (params.abortSignal.aborted) {
-        throw Object.assign(new Error("Steered"), { name: "AbortError" });
-      }
-      await new Promise((_resolve, reject) => {
-        params.abortSignal?.addEventListener("abort", () => {
-          reject(Object.assign(new Error("Steered"), { name: "AbortError" }));
-        });
-      });
+      steeredText = await steeredPromise;
     }
 
     const priorAssistantMessage = params.originalMessages?.at(-1);
@@ -295,7 +309,9 @@ mock.module("@/lib/agent/run-step", () => ({
             // message; mirror that here so persistence keys on a real id.
             id: params.messageId,
             role: "assistant",
-            parts: agentAssistantParts ?? [{ type: "text", text: "Hello!" }],
+            parts: agentAssistantParts ?? [
+              { type: "text", text: `Reply to: ${params.prompt}` },
+            ],
             metadata: {},
           }
     ) as {
@@ -323,11 +339,32 @@ mock.module("@/lib/agent/run-step", () => ({
       claudeSessionId: "claude-session-1",
       costUsd: undefined,
       isError: false,
+      ...(steeredText !== undefined ? { steered: { text: steeredText } } : {}),
     };
   },
 }));
 
+/**
+ * Backs the `generateId` mock below with a counter, not a constant: the
+ * primary turn calls it once for its assistantId, and steer/queue tests that
+ * run a continuation turn call it again for the continuation's own message
+ * id (Task 10 follow-up — each turn is a separate persisted message, so it
+ * needs a distinct id). Reset per test so existing single-call tests still
+ * see "gen-id-1" for their first (and only) id.
+ */
+let generateIdCounter = 0;
+
+// Spread over the real module rather than replacing it outright: this file
+// mocks `@/lib/agent/run-step` wholesale, so it never needed `readUIMessageStream`
+// (real `run-step.ts`'s only other use of "ai") — but `run-step.test.ts`
+// exercises the real `run-step.ts`, and `bun test` shares one module registry
+// across every file in a single invocation. A from-scratch mock here that
+// omitted `readUIMessageStream` used to leak into that file whenever both
+// ran in the same process, breaking it with no relation to what it tests.
+const realAi = await import("ai");
+
 mock.module("ai", () => ({
+  ...realAi,
   convertToModelMessages: async (
     msgs: Array<Record<string, unknown>>,
     options?: { convertDataPart?: (part: Record<string, unknown>) => unknown },
@@ -362,7 +399,7 @@ mock.module("ai", () => ({
         content,
       };
     }),
-  generateId: () => "gen-id-1",
+  generateId: () => `gen-id-${++generateIdCounter}`,
   isToolUIPart: (part: { type: string }) =>
     part.type === "tool-invocation" || part.type.startsWith("tool-"),
   pruneMessages: ({ messages }: { messages: Array<Record<string, unknown>> }) =>
@@ -401,15 +438,22 @@ let organizationRecord: { id: string } | null = { id: "org-1" };
 let memorySectionToReturn: string | undefined;
 const loadMemorySectionForTurnSpy = mock(
   (_params: {
-    sessionRepoDir: string;
+    sessionRepoDir?: string;
     userId: string;
     organizationId?: string;
     prompt: string;
   }) => Promise.resolve(memorySectionToReturn),
 );
 
+/** Lets a test simulate the repo directory failing to resolve. */
+let resolveWorkCwdShouldThrow = false;
 mock.module("@/lib/agent/workspace-paths", () => ({
-  resolveWorkCwd: () => SESSION_REPO_DIR,
+  resolveWorkCwd: () => {
+    if (resolveWorkCwdShouldThrow) {
+      throw new Error("Could not resolve the session repo dir");
+    }
+    return SESSION_REPO_DIR;
+  },
 }));
 mock.module("@/lib/org/organization", () => ({
   getOrganization: () => Promise.resolve(organizationRecord),
@@ -471,6 +515,8 @@ beforeEach(() => {
   agentTotalUsage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 };
   agentInputMessages = undefined;
   agentTurnCalls = [];
+  backendSteerCalls = [];
+  generateIdCounter = 0;
   agentAbortsTurn = false;
   testSessionRecord = {
     id: "session-1",
@@ -501,6 +547,7 @@ beforeEach(() => {
   nextSteerEventId = 1;
   organizationRecord = { id: "org-1" };
   memorySectionToReturn = undefined;
+  resolveWorkCwdShouldThrow = false;
   appendSessionEventsSpy.mockClear();
   listUnconsumedSteerEventsSpy.mockClear();
   setChatClaudeSessionIdSpy.mockClear();
@@ -607,16 +654,66 @@ describe("runAgentWorkflow", () => {
     expect(types[types.length - 1]).toBe("finish");
   });
 
-  test("runs post-turn memory distillation with the session repo dir once the turn finishes", async () => {
+  test("still loads user/org memory when the session repo dir fails to resolve", async () => {
+    // Only project-scope memory needs the repo dir; losing it shouldn't also
+    // drop the user's and organisation's memory for the turn.
+    resolveWorkCwdShouldThrow = true;
+
     await runAgentWorkflow(makeOptions());
+
+    expect(loadMemorySectionForTurnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-1",
+        organizationId: "org-1",
+        prompt: "Hello",
+      }),
+    );
+    const call = loadMemorySectionForTurnSpy.mock.calls.at(-1)?.[0] as {
+      sessionRepoDir?: string;
+    };
+    expect(call.sessionRepoDir).toBeUndefined();
+  });
+
+  test("runs post-turn memory distillation with the session repo dir and the recorder's turnId once the turn finishes", async () => {
+    await runAgentWorkflow(makeOptions());
+
+    // The turnId distillation is called with must be the same one the
+    // recorder logged for this turn, not an independently-generated value.
+    const turnStartEvent = appendSessionEventsSpy.mock.calls
+      .flatMap(([, events]) => events as Array<Record<string, unknown>>)
+      .find((event) => event.type === "turn/start");
+    expect(typeof turnStartEvent?.turnId).toBe("string");
 
     expect(spies.distillTurnMemoryStep).toHaveBeenCalledWith(
       expect.objectContaining({
         chatId: "chat-1",
         sessionRepoDir: SESSION_REPO_DIR,
         userId: "user-1",
+        turnId: turnStartEvent?.turnId,
       }),
     );
+  });
+
+  test("distills every turn once each, not just the last, when a buffered message runs as a continuation", async () => {
+    disableAutoSave();
+    testChatRecord.turnPolicy = "queue";
+    bufferSteerMessage("buffered-2", "Follow-up instruction");
+
+    await runAgentWorkflow(makeOptions());
+
+    const turnStartTurnIds = appendSessionEventsSpy.mock.calls
+      .flatMap(([, events]) => events as Array<Record<string, unknown>>)
+      .filter((event) => event.type === "turn/start")
+      .map((event) => event.turnId as string | undefined);
+    // Two turns ran (primary + one continuation), each with its own turnId.
+    expect(turnStartTurnIds).toHaveLength(2);
+    expect(new Set(turnStartTurnIds).size).toBe(2);
+
+    expect(spies.distillTurnMemoryStep).toHaveBeenCalledTimes(2);
+    const distilledTurnIds = spies.distillTurnMemoryStep.mock.calls.map(
+      ([params]) => (params as { turnId?: string }).turnId,
+    );
+    expect(distilledTurnIds).toEqual(turnStartTurnIds);
   });
 
   test("does not stream transient workspace setup status from runtime prep", async () => {
@@ -1519,24 +1616,40 @@ describe("turn steering", () => {
       .filter((event) => event.type === "steer/consumed");
   }
 
-  test("steer policy: a buffered message aborts the turn and runs as a continuation", async () => {
+  test("steer policy: a buffered message steers the backend and runs as a continuation", async () => {
     disableAutoSave();
     testChatRecord.turnPolicy = "steer";
-    testClaudeSessionId = "existing-claude-session";
+    // No prior claudeSessionId: this is the chat's very first turn, the case
+    // where steering-via-abort used to lose the session id entirely (the
+    // whole `runAgentTurn` call rejected, so `result.resumeToken` was never
+    // read). Steering through the backend's own `steer()` instead resolves
+    // normally, so the id it carries back is captured just like any other
+    // turn.
+    testClaudeSessionId = null;
     bufferSteerMessage("buffered-1", "Actually, do this instead");
 
     await runAgentWorkflow(makeOptions());
 
+    // The workflow's steer monitor called the backend's steer() — not
+    // AbortController.abort() — with the buffered text.
+    expect(backendSteerCalls).toEqual([{ text: "Actually, do this instead" }]);
+
     expect(agentTurnCalls).toEqual([
       expect.objectContaining({
         prompt: "Hello",
-        claudeSessionId: "existing-claude-session",
+        claudeSessionId: undefined,
       }),
       expect.objectContaining({
         prompt: "Actually, do this instead",
-        claudeSessionId: "existing-claude-session",
+        // Resumed using the session id the STEERED result carried back, not
+        // a fresh session — proving the id survived the steer.
+        claudeSessionId: "claude-session-1",
       }),
     ]);
+    expect(setChatClaudeSessionIdSpy).toHaveBeenCalledWith(
+      "chat-1",
+      "claude-session-1",
+    );
     expect(consumedEvents()).toEqual([
       { type: "steer/consumed", messageId: "buffered-1", mode: "steer" },
     ]);
@@ -1554,10 +1667,39 @@ describe("turn steering", () => {
       "Hello",
       "Follow-up instruction",
     ]);
+    expect(backendSteerCalls).toEqual([]);
     expect(consumedEvents()).toEqual([
       { type: "steer/consumed", messageId: "buffered-2", mode: "queue" },
     ]);
     expect(pendingSteerEvents).toEqual([]);
+  });
+
+  test("queue policy: both turns' replies survive as separate persisted messages", async () => {
+    // Regression: the primary turn and the continuation used to share one
+    // assistant message object, so persisting only at the very end silently
+    // dropped the primary turn's reply the moment the continuation replaced
+    // it in memory.
+    disableAutoSave();
+    testChatRecord.turnPolicy = "queue";
+    bufferSteerMessage("buffered-2", "Follow-up instruction");
+
+    await runAgentWorkflow(makeOptions());
+
+    const persistedMessages = spies.persistAssistantMessage.mock.calls.map(
+      ([, message]) => message as { id: string; parts: unknown[] },
+    );
+    const persistedIds = new Set(persistedMessages.map((m) => m.id));
+    // Two distinct rows, not one repeatedly overwritten.
+    expect(persistedIds.size).toBe(2);
+
+    const persistedTexts = persistedMessages.map(
+      (m) =>
+        (m.parts as Array<{ type: string; text?: string }>).find(
+          (part) => part.type === "text",
+        )?.text,
+    );
+    expect(persistedTexts).toContain("Reply to: Hello");
+    expect(persistedTexts).toContain("Reply to: Follow-up instruction");
   });
 
   test("two buffered messages are each consumed exactly once, in order, as separate continuation turns", async () => {
@@ -1572,6 +1714,12 @@ describe("turn steering", () => {
       "Hello",
       "First follow-up",
       "Second follow-up",
+    ]);
+    // Steered twice: once by the primary turn seeing buffered-1, once more by
+    // the buffered-1 continuation itself still finding buffered-2 pending.
+    expect(backendSteerCalls).toEqual([
+      { text: "First follow-up" },
+      { text: "Second follow-up" },
     ]);
     expect(consumedEvents()).toEqual([
       { type: "steer/consumed", messageId: "buffered-1", mode: "steer" },
@@ -1598,5 +1746,52 @@ describe("turn steering", () => {
     expect(pendingSteerEvents).toEqual([
       { id: 1, messageId: "buffered-3", text: "Should not run" },
     ]);
+  });
+});
+
+/**
+ * Lint-style guard, per review: `runAgentWorkflow`'s body runs `"use
+ * workflow"`, which the Workflow SDK replays in a sandboxed VM with no Node
+ * modules. A direct call to a `@/lib/db/*` export from inside that body
+ * would crash on every turn in production — invisible here because this
+ * suite mocks the DB modules — so this reads the source and checks the
+ * workflow body's text never calls one directly; every such call must go
+ * through its own `"use step"` wrapper instead (e.g. `readPendingSteerStep`,
+ * `consumeSteerStep`).
+ */
+describe("workflow-sandbox safety", () => {
+  test("the workflow body never calls a @/lib/db/* export directly", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("chat.ts", import.meta.url), "utf8");
+
+    const dbImportSymbols = new Set<string>();
+    const importRegex =
+      /import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+"@\/lib\/db\/[^"]+";/g;
+    for (const match of source.matchAll(importRegex)) {
+      for (const rawName of (match[1] ?? "").split(",")) {
+        const name = rawName.replace(/^\s*type\s+/, "").trim();
+        if (name) {
+          dbImportSymbols.add(name);
+        }
+      }
+    }
+    // Sanity: the regex above actually found something to check, so this
+    // test would fail loudly (empty violations trivially pass) if chat.ts
+    // ever stopped importing from @/lib/db/* altogether.
+    expect(dbImportSymbols.size).toBeGreaterThan(0);
+
+    const workflowStart = source.indexOf(
+      "export async function runAgentWorkflow",
+    );
+    const workflowEnd = source.indexOf("\nfunction extractLatestUserText");
+    expect(workflowStart).toBeGreaterThan(-1);
+    expect(workflowEnd).toBeGreaterThan(workflowStart);
+    const workflowBody = source.slice(workflowStart, workflowEnd);
+
+    const violations = [...dbImportSymbols].filter((name) =>
+      new RegExp(`[^.\\w]${name}\\(`).test(workflowBody),
+    );
+
+    expect(violations).toEqual([]);
   });
 });

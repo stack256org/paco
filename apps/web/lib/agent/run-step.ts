@@ -10,7 +10,7 @@ import {
 } from "@paco/claude-code";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
 import { buildAppendSystemPrompt } from "./system-prompt";
-import type { AgentCallOptions } from "./types";
+import type { AgentCallOptions, SteerController } from "./types";
 import { hostWorkspaceFor } from "./workspace-paths";
 
 export interface AgentStepResult<UI extends UIMessage> {
@@ -89,6 +89,12 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
   /** Where the hook posts, and the secret it authenticates with. */
   approval?: { url: string; token: string };
   abortSignal?: AbortSignal;
+  /**
+   * Registers a `steer(text)` function with the caller once the backend
+   * handle exists, so a running turn can be steered through the backend's
+   * own contract instead of `abortSignal` (see `SteerController`'s doc).
+   */
+  steerController?: SteerController;
   onChunk: (chunk: UIMessageChunk) => Promise<void>;
   backend?: AgentBackend;
 }): Promise<AgentStepResult<UI>> {
@@ -167,6 +173,11 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
     backendOptions,
   });
+  // Handed to the caller synchronously, before any chunk is read: a caller
+  // that wants to steer as soon as possible (the workflow's monitor may
+  // already have something buffered) shouldn't have to wait for the stream
+  // to start.
+  params.steerController?.onSteer((text) => handle.steer(text));
 
   const stream = new ReadableStream<UIMessageChunk>({
     async start(controller) {

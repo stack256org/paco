@@ -339,4 +339,74 @@ describe("runAgentTurn", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     );
   });
+
+  /**
+   * Follow-up review of Task 10 (turn steering): steering used to go through
+   * the caller's `AbortController`, which the backend can only see as an
+   * unexplained interrupt — it never learns *why* the turn stopped, so it
+   * can't report a clean `steered` result or the session id needed to
+   * resume. `steerController` lets the caller reach the backend's own
+   * `steer()` instead, which winds the turn down on purpose.
+   */
+  test("registers a steer function via steerController, and the result carries `steered` when it is called", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    // `holdOpen` keeps the turn running after its scripted chunks, so there
+    // is time to call the registered steer function before the turn would
+    // otherwise finish on its own.
+    const backend = new FakeBackend({ script: chunks, holdOpen: true });
+
+    let registeredSteer: ((text: string) => Promise<void>) | undefined;
+
+    const stepPromise = runAgentTurn<UIMessage>({
+      prompt: "hi",
+      options: makeOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend,
+      steerController: {
+        onSteer: (steer) => {
+          registeredSteer = steer;
+        },
+      },
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    // `startTurn` and the `onSteer` registration both happen synchronously
+    // inside `runAgentTurn`, before its first `await` — so this is already
+    // set by the time the call above returns a promise. Awaiting a resolved
+    // promise first keeps the assertion robust even if that ever changes.
+    await Promise.resolve();
+    expect(registeredSteer).toBeDefined();
+
+    await registeredSteer?.("actually, do this instead");
+
+    const step = await stepPromise;
+    expect(step.steered).toEqual({ text: "actually, do this instead" });
+    expect(step.finishReason).toBe("stop");
+    expect(step.isError).toBe(false);
+  });
+
+  test("never registers a steer function when no steerController is given", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = new FakeBackend({ script: chunks });
+
+    // Exercises the plain default path (no steerController at all) to prove
+    // `runAgentTurn` doesn't require one — the option is additive.
+    const step = await runAgentTurn<UIMessage>({
+      prompt: "hi",
+      options: makeOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    expect(step.steered).toBeUndefined();
+  });
 });

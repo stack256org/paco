@@ -72,6 +72,37 @@ describe("loadMemorySectionForTurn", () => {
     expect(section).toContain("Org test conventions");
   });
 
+  test("skips project scope entirely when no sessionRepoDir is given, but still loads user/org", async () => {
+    // The repo directory can fail to resolve independently of user/org
+    // scope — losing project memory for one turn shouldn't also lose the
+    // user's and organisation's.
+    await writeMemory(projectMemoryDir(sessionRepoDir), {
+      title: "Uses pnpm for tests",
+      body: "Run `bun test` for unit tests.",
+      source: "distilled",
+    });
+    await writeMemory(userMemoryDir("user-1"), {
+      title: "Prefers concise test output",
+      body: "Wants `bun test` output without the verbose reporter.",
+      source: "manual",
+    });
+    await writeMemory(orgMemoryDir("org-1"), {
+      title: "Org test conventions",
+      body: "Every PR runs `bun test` in CI before merge.",
+      source: "promoted",
+    });
+
+    const section = await loadMemorySectionForTurn({
+      userId: "user-1",
+      organizationId: "org-1",
+      prompt: "How do I run the tests?",
+    });
+
+    expect(section).toContain("Prefers concise test output");
+    expect(section).toContain("Org test conventions");
+    expect(section).not.toContain("Uses pnpm for tests");
+  });
+
   test("skips org scope entirely when no organizationId is given", async () => {
     await writeMemory(orgMemoryDir("org-1"), {
       title: "Org test conventions",
