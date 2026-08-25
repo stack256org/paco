@@ -80,10 +80,39 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
       "text/html; charset=utf-8",
     );
     expect(response.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'self'",
+      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox allow-scripts",
     );
     expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
     expect(await response.text()).toBe("<!doctype html><body>hi</body>");
+  });
+
+  /**
+   * The iframe in `plugin-renderer.tsx` carries `sandbox="allow-scripts"`,
+   * but this URL is same-origin and directly navigable — paste it into the
+   * address bar and the plugin's HTML runs on Paco's own origin, with
+   * `script-src 'unsafe-inline'` and no iframe attribute anywhere in sight.
+   * From there it can read Paco's storage or auto-submit a same-origin form
+   * against the app's own API.
+   *
+   * The `sandbox` CSP directive is the same restriction expressed by the
+   * response itself, so it applies however the document is reached. It has
+   * to grant `allow-scripts` (renderers are scripted) and must NOT grant
+   * `allow-same-origin` — the two together cancel the sandbox out — or
+   * `allow-forms`, which is the auto-submit route.
+   */
+  test("sandboxes the document itself, so a direct navigation is as confined as the iframe", async () => {
+    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    await writeRenderer("demo-plugin", "search.html", "<body>hi</body>");
+
+    const response = await callRoute("demo-plugin", "search.html");
+
+    const csp = response.headers.get("content-security-policy") ?? "";
+    const sandbox = csp
+      .split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("sandbox"));
+
+    expect(sandbox).toBe("sandbox allow-scripts");
   });
 
   test("401s an unauthenticated request before any plugin/fs lookup", async () => {

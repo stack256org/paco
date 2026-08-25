@@ -109,15 +109,28 @@ const RENDERER_FILE_PATTERN = /^[a-z0-9_-]+\.html$/;
  * `frame-ancestors` is excluded from the fetch-directive fallback chain by
  * spec, so it must be listed explicitly or embedding is left unrestricted.
  * `X-Frame-Options: SAMEORIGIN` is set alongside it for browsers that don't
- * honor `frame-ancestors`. Both restrict WHO may embed this document (an
- * origin check); neither is what stops the embedded document from reaching
- * Paco's storage/cookies — that's the iframe's own `sandbox` attribute,
- * which lives in `plugin-renderer.tsx`, not here.
+ * honor `frame-ancestors`. Both restrict WHO may embed this document — an
+ * origin check, and nothing more.
+ *
+ * `sandbox allow-scripts` is what confines the document itself. The iframe
+ * in `plugin-renderer.tsx` already carries `sandbox="allow-scripts"`, but
+ * that attribute only applies when the document is reached THROUGH that
+ * iframe — and this URL is same-origin and directly navigable. Pasted into
+ * an address bar, plugin-authored HTML would otherwise run on Paco's own
+ * origin under `script-src 'unsafe-inline'`, free to read the app's storage
+ * or auto-submit a same-origin form against its API. Expressed as a
+ * response header instead, the same restriction travels with the document
+ * however it is reached.
+ *
+ * The grant is exactly `allow-scripts` — renderers are scripted, so it is
+ * required. `allow-same-origin` must never be added: with `allow-scripts`
+ * it hands the opaque origin back and cancels the sandbox out. Neither may
+ * `allow-forms`, which is the auto-submit route this closes.
  */
 const RESPONSE_HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "content-security-policy":
-    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'self'",
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox allow-scripts",
   "x-frame-options": "SAMEORIGIN",
 } as const;
 
