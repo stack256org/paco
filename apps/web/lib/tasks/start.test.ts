@@ -9,11 +9,6 @@ mock.module("ai", () => ({
 mock.module("nanoid", () => ({
   nanoid: () => "new-chat-id",
 }));
-mock.module("@/app/workflows/chat", () => ({
-  // Never actually invoked: `start` (mocked below) receives the reference
-  // but this test never lets a real workflow runtime call it.
-  runAgentWorkflow: () => undefined,
-}));
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -90,8 +85,10 @@ mock.module("@/lib/db/tasks", () => ({
 
 // ── `@/lib/db/sessions` ──────────────────────────────────────────
 
-let sessionRow: { userId: string } | undefined = { userId: "user-1" };
-let claimResult = true;
+let sessionRow: { userId: string; status: string } | undefined = {
+  userId: "user-1",
+  status: "running",
+};
 
 const getSessionByIdMock = mock(async (_sessionId: string) => sessionRow);
 const createChatMock = mock(
@@ -105,17 +102,14 @@ const createChatMock = mock(
     sessionId: input.sessionId,
     title: input.title,
     modelId: input.modelId ?? null,
+    activeStreamId: null as string | null,
   }),
-);
-const claimChatActiveStreamIdMock = mock(
-  async (_chatId: string, _runId: string) => claimResult,
 );
 const deleteChatMock = mock(async (_chatId: string) => undefined);
 
 mock.module("@/lib/db/sessions", () => ({
   getSessionById: getSessionByIdMock,
   createChat: createChatMock,
-  claimChatActiveStreamId: claimChatActiveStreamIdMock,
   deleteChat: deleteChatMock,
 }));
 
@@ -128,17 +122,29 @@ mock.module("@/lib/db/user-preferences", () => ({
   getUserPreferences: getUserPreferencesMock,
 }));
 
-// ── `workflow/api` ───────────────────────────────────────────────
+// ── `@/lib/chat/submit-message` ───────────────────────────────────
 
-let startImpl: (
-  ...args: unknown[]
-) => Promise<{ runId: string }> = async () => ({
+type SubmitOutcome =
+  | { kind: "archived" }
+  | { kind: "buffer-failed" }
+  | { kind: "conflict" }
+  | { kind: "streaming"; runId: string; stream: unknown };
+
+let submitOutcome: SubmitOutcome = {
+  kind: "streaming",
   runId: "run-1",
-});
-const startMock = mock((...args: unknown[]) => startImpl(...args));
-const cancelMock = mock(() => undefined);
-const getRunMock = mock((_runId: string) => ({ cancel: cancelMock }));
-mock.module("workflow/api", () => ({ start: startMock, getRun: getRunMock }));
+  stream: null,
+};
+let submitImpl: (
+  input: Record<string, unknown>,
+) => Promise<SubmitOutcome> = async () => submitOutcome;
+const submitChatMessageMock = mock((input: Record<string, unknown>) =>
+  submitImpl(input),
+);
+
+mock.module("@/lib/chat/submit-message", () => ({
+  submitChatMessage: submitChatMessageMock,
+}));
 
 const { buildTaskPrompt, startTask, TASK_DEFAULT_MAX_TURNS } =
   await import("./start");
@@ -147,21 +153,18 @@ beforeEach(() => {
   taskTreeNode = makeNode();
   parentTask = undefined;
   transitionRunningError = undefined;
-  sessionRow = { userId: "user-1" };
-  claimResult = true;
-  startImpl = async () => ({ runId: "run-1" });
+  sessionRow = { userId: "user-1", status: "running" };
+  submitOutcome = { kind: "streaming", runId: "run-1", stream: null };
+  submitImpl = async () => submitOutcome;
 
   taskTreeMock.mockClear();
   getTaskMock.mockClear();
   transitionTaskStatusMock.mockClear();
   getSessionByIdMock.mockClear();
   createChatMock.mockClear();
-  claimChatActiveStreamIdMock.mockClear();
   deleteChatMock.mockClear();
   getUserPreferencesMock.mockClear();
-  startMock.mockClear();
-  cancelMock.mockClear();
-  getRunMock.mockClear();
+  submitChatMessageMock.mockClear();
 });
 
 // ── buildTaskPrompt ───────────────────────────────────────────────
@@ -270,7 +273,7 @@ describe("startTask", () => {
     expect(createChatMock).not.toHaveBeenCalled();
   });
 
-  test("creates the chat, transitions to running, and kicks the workflow", async () => {
+  test("creates the chat, transitions to running, and submits through the shared message path", async () => {
     const result = await startTask("org-1", "task-1");
 
     expect(result).toEqual({ ok: true, chatId: "new-chat-id" });
@@ -290,17 +293,18 @@ describe("startTask", () => {
       { chatId: "new-chat-id" },
     );
 
-    expect(startMock).toHaveBeenCalledTimes(1);
-    const [, workflowArgs] = startMock.mock.calls[0] as [
-      unknown,
-      [Record<string, unknown>],
-    ];
-    const options = workflowArgs[0];
-    expect(options.chatId).toBe("new-chat-id");
-    expect(options.sessionId).toBe("session-1");
-    expect(options.userId).toBe("user-1");
-    expect(options.maxSteps).toBe(TASK_DEFAULT_MAX_TURNS);
-    const messages = options.messages as Array<{
+    expect(submitChatMessageMock).toHaveBeenCalledTimes(1);
+    const input = submitChatMessageMock.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(input.chatId).toBe("new-chat-id");
+    expect(input.sessionId).toBe("session-1");
+    expect(input.userId).toBe("user-1");
+    expect(input.sessionStatus).toBe("running");
+    expect(input.activeStreamId).toBeNull();
+    expect(input.maxSteps).toBe(TASK_DEFAULT_MAX_TURNS);
+    const messages = input.messages as Array<{
       role: string;
       parts: Array<{ type: string; text: string }>;
     }>;
@@ -310,10 +314,6 @@ describe("startTask", () => {
       { type: "text", text: "Add tests for the widget" },
     ]);
 
-    expect(claimChatActiveStreamIdMock).toHaveBeenCalledWith(
-      "new-chat-id",
-      "run-1",
-    );
     expect(deleteChatMock).not.toHaveBeenCalled();
   });
 
@@ -331,11 +331,10 @@ describe("startTask", () => {
     await startTask("org-1", "task-1");
 
     expect(getTaskMock).toHaveBeenCalledWith("org-1", "task-parent");
-    const [, workflowArgs] = startMock.mock.calls[0] as [
-      unknown,
-      [{ messages: Array<{ parts: Array<{ text: string }> }> }],
-    ];
-    expect(workflowArgs[0].messages[0]?.parts[0]?.text).toBe(
+    const input = submitChatMessageMock.mock.calls[0]?.[0] as {
+      messages: Array<{ parts: Array<{ text: string }> }>;
+    };
+    expect(input.messages[0]?.parts[0]?.text).toBe(
       'Add tests for the widget\n\nParent task: "Ship the widget" — Build and ship the customer widget end-to-end\n\nDelegate this work to the "qa-reviewer" subagent.',
     );
   });
@@ -343,11 +342,10 @@ describe("startTask", () => {
   test("passes opts.maxTurns through as maxSteps", async () => {
     await startTask("org-1", "task-1", { maxTurns: 10 });
 
-    const [, workflowArgs] = startMock.mock.calls[0] as [
-      unknown,
-      [{ maxSteps?: number }],
-    ];
-    expect(workflowArgs[0].maxSteps).toBe(10);
+    const input = submitChatMessageMock.mock.calls[0]?.[0] as {
+      maxSteps?: number;
+    };
+    expect(input.maxSteps).toBe(10);
   });
 
   test("defaults opts.maxTurns to TASK_DEFAULT_MAX_TURNS when omitted", async () => {
@@ -355,11 +353,10 @@ describe("startTask", () => {
 
     await startTask("org-1", "task-1");
 
-    const [, workflowArgs] = startMock.mock.calls[0] as [
-      unknown,
-      [{ maxSteps?: number }],
-    ];
-    expect(workflowArgs[0].maxSteps).toBe(TASK_DEFAULT_MAX_TURNS);
+    const input = submitChatMessageMock.mock.calls[0]?.[0] as {
+      maxSteps?: number;
+    };
+    expect(input.maxSteps).toBe(TASK_DEFAULT_MAX_TURNS);
   });
 
   test("returns {ok:false} and deletes the orphan chat when the running transition loses a race", async () => {
@@ -377,7 +374,7 @@ describe("startTask", () => {
     });
     expect(createChatMock).toHaveBeenCalledTimes(1);
     expect(deleteChatMock).toHaveBeenCalledWith("new-chat-id");
-    expect(startMock).not.toHaveBeenCalled();
+    expect(submitChatMessageMock).not.toHaveBeenCalled();
   });
 
   test("still returns {ok:false} (and cleans up) for a non-race error on the running transition", async () => {
@@ -389,8 +386,8 @@ describe("startTask", () => {
     expect(deleteChatMock).toHaveBeenCalledWith("new-chat-id");
   });
 
-  test("transitions running -> failed when starting the workflow throws", async () => {
-    startImpl = () => {
+  test("transitions running -> failed when submitChatMessage throws", async () => {
+    submitImpl = () => {
       throw new Error("workflow start blew up");
     };
 
@@ -404,23 +401,23 @@ describe("startTask", () => {
       "failed",
       { resultSummary: "workflow start blew up" },
     );
-    expect(deleteChatMock).not.toHaveBeenCalled();
   });
 
-  test("cancels the run and transitions running -> failed when claiming the active-stream slot fails", async () => {
-    claimResult = false;
+  test.each([["archived"], ["buffer-failed"], ["conflict"]] as const)(
+    "transitions running -> failed when submitChatMessage returns %s",
+    async (kind) => {
+      submitOutcome = { kind } as SubmitOutcome;
 
-    const result = await startTask("org-1", "task-1");
+      const result = await startTask("org-1", "task-1");
 
-    expect(result.ok).toBe(false);
-    expect(getRunMock).toHaveBeenCalledWith("run-1");
-    expect(cancelMock).toHaveBeenCalledTimes(1);
-    expect(transitionTaskStatusMock).toHaveBeenNthCalledWith(
-      2,
-      "org-1",
-      "task-1",
-      "failed",
-      expect.objectContaining({ resultSummary: expect.any(String) }),
-    );
-  });
+      expect(result.ok).toBe(false);
+      expect(transitionTaskStatusMock).toHaveBeenNthCalledWith(
+        2,
+        "org-1",
+        "task-1",
+        "failed",
+        expect.objectContaining({ resultSummary: expect.any(String) }),
+      );
+    },
+  );
 });

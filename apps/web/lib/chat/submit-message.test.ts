@@ -218,6 +218,33 @@ describe("submitChatMessage", () => {
     expect(startCalls).toHaveLength(0);
   });
 
+  test("passes a maxSteps override through to the workflow start call", async () => {
+    const outcome = await submitChatMessage({
+      ...BASE_INPUT,
+      messages: [userMessage("m1", "hi")],
+      sessionStatus: "running",
+      activeStreamId: null,
+      maxSteps: 42,
+    });
+
+    expect(outcome.kind).toBe("streaming");
+    expect(startCalls).toHaveLength(1);
+    const [, workflowArgs] = startCalls[0] as [unknown, [{ maxSteps: number }]];
+    expect(workflowArgs[0].maxSteps).toBe(42);
+  });
+
+  test("defaults maxSteps to 500 when the caller omits it", async () => {
+    await submitChatMessage({
+      ...BASE_INPUT,
+      messages: [userMessage("m1", "hi")],
+      sessionStatus: "running",
+      activeStreamId: null,
+    });
+
+    const [, workflowArgs] = startCalls[0] as [unknown, [{ maxSteps: number }]];
+    expect(workflowArgs[0].maxSteps).toBe(500);
+  });
+
   test("returns 'conflict' when a different run still owns the stream slot", async () => {
     claimActiveStreamDefaultResult = false;
 

@@ -21,6 +21,9 @@ import type { Session } from "@/lib/session/types";
 export type SubmitMessageUIMessageChunk =
   InferUIMessageChunk<WebAgentUIMessage>;
 
+/** The browser chat route's long-standing turn cap, used when a caller omits `maxSteps`. */
+const DEFAULT_MAX_STEPS = 500;
+
 export interface SubmitMessageInput {
   chatId: string;
   sessionId: string;
@@ -33,6 +36,13 @@ export interface SubmitMessageInput {
   sessionStatus: string;
   /** The chat row's current `activeStreamId`, as already loaded by the caller. */
   activeStreamId: string | null;
+  /**
+   * The executor turn cap passed to the CLI as `--max-turns`. Defaults to
+   * 500 — the browser chat route's own long-standing limit — so existing
+   * callers see no change; a caller starting an unattended run (e.g. the
+   * task board) can pass a tighter cap instead.
+   */
+  maxSteps?: number;
 }
 
 export type SubmitMessageOutcome =
@@ -73,6 +83,7 @@ export async function submitChatMessage(
     authSession,
     sessionStatus,
     activeStreamId,
+    maxSteps = DEFAULT_MAX_STEPS,
   } = input;
 
   if (sessionStatus === "archived") {
@@ -127,7 +138,7 @@ export async function submitChatMessage(
       requestUrl,
       authSession,
       assistantId: generateId(),
-      maxSteps: 500,
+      maxSteps,
     },
   ]);
 

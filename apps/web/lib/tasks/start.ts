@@ -2,15 +2,9 @@ import "server-only";
 
 import { generateId } from "ai";
 import { nanoid } from "nanoid";
-import { start } from "workflow/api";
-import { runAgentWorkflow } from "@/app/workflows/chat";
+import { submitChatMessage } from "@/lib/chat/submit-message";
 import type { Task } from "@/lib/db/schema";
-import {
-  claimChatActiveStreamId,
-  createChat,
-  deleteChat,
-  getSessionById,
-} from "@/lib/db/sessions";
+import { createChat, deleteChat, getSessionById } from "@/lib/db/sessions";
 import {
   getTask,
   TaskTransitionError,
@@ -73,7 +67,12 @@ export const TASK_DEFAULT_MAX_TURNS = 200;
  * anything is created. The chat is created with the exact same call the
  * UI's "new chat" route makes (`createChat` from `lib/db/sessions`, with the
  * session's default model), so this pipeline never duplicates the worktree
- * logic that materializes lazily the first time a chat's workflow runs.
+ * logic that materializes lazily the first time a chat's workflow runs. The
+ * workflow itself is kicked off through `submitChatMessage` — the same
+ * function the browser chat route and plugin message posting both go
+ * through — so starting a task's turn, claiming its active-stream slot, and
+ * cancelling a run that lost that claim all stay one implementation instead
+ * of three drifting copies.
  *
  * Two things can go wrong after the chat exists, and they are handled
  * differently because the task is in a different state for each:
@@ -84,12 +83,12 @@ export const TASK_DEFAULT_MAX_TURNS = 200;
  *   the chat we just created, so that chat is deleted again (it never got
  *   far enough to acquire a worktree) rather than left as an orphan row.
  * - Once the task *is* running under this chat, starting the workflow
- *   itself can fail (the `start()` call throws, or claiming the chat's
- *   active-stream slot fails). Here the task is transitioned on to `failed`
- *   with the error recorded as `resultSummary`, rather than left stuck in
- *   `running` with no executor behind it. A claim failure also cancels the
- *   run it lost the race to keep, so a workflow never keeps executing after
- *   its task has been marked failed.
+ *   itself can fail (`submitChatMessage` throws, or returns any outcome
+ *   other than `"streaming"` — a freshly created chat has no active stream
+ *   of its own, so `"archived"`/`"buffer-failed"`/`"conflict"` all mean the
+ *   turn never actually started). Here the task is transitioned on to
+ *   `failed` with the error recorded as `resultSummary`, rather than left
+ *   stuck in `running` with no executor behind it.
  */
 export async function startTask(
   organizationId: string,
@@ -144,45 +143,33 @@ export async function startTask(
   }
 
   try {
-    const run = await start(runAgentWorkflow, [
-      {
-        messages: [
-          {
-            id: generateId(),
-            role: "user" as const,
-            parts: [
-              { type: "text" as const, text: buildTaskPrompt(node, parent) },
-            ],
-          },
-        ],
-        chatId: chat.id,
-        sessionId: node.sessionId,
-        userId: session.userId,
-        requestUrl: "internal://tasks/start",
-        authSession: null,
-        assistantId: generateId(),
-        maxSteps: opts?.maxTurns ?? TASK_DEFAULT_MAX_TURNS,
-      },
-    ]);
+    const outcome = await submitChatMessage({
+      chatId: chat.id,
+      sessionId: node.sessionId,
+      userId: session.userId,
+      messages: [
+        {
+          id: generateId(),
+          role: "user" as const,
+          parts: [
+            { type: "text" as const, text: buildTaskPrompt(node, parent) },
+          ],
+        },
+      ],
+      requestUrl: "internal://tasks/start",
+      authSession: null,
+      sessionStatus: session.status,
+      activeStreamId: chat.activeStreamId ?? null,
+      maxSteps: opts?.maxTurns ?? TASK_DEFAULT_MAX_TURNS,
+    });
 
-    const claimed = await claimChatActiveStreamId(chat.id, run.runId);
-    if (!claimed) {
-      await cancelRun(run.runId);
-      throw new Error(`Chat "${chat.id}" already has an active run`);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    try {
-      await transitionTaskStatus(organizationId, node.id, "failed", {
-        resultSummary: message,
-      });
-    } catch (transitionError) {
-      console.error(
-        `Failed to transition task "${node.id}" to "failed":`,
-        transitionError,
+    if (outcome.kind !== "streaming") {
+      throw new Error(
+        `Failed to start task workflow: chat submission returned "${outcome.kind}"`,
       );
     }
-    return { ok: false, error: message };
+  } catch (error) {
+    return await failTask(organizationId, node.id, error);
   }
 
   return { ok: true, chatId: chat.id };
@@ -205,15 +192,26 @@ async function deleteOrphanChat(chatId: string): Promise<void> {
 }
 
 /**
- * Best-effort cancellation of a run that lost the active-stream claim —
- * mirrors `submitChatMessage`'s identical cleanup so a workflow never keeps
- * executing after `startTask` has already decided to fail its task.
+ * Moves a task from `running` to `failed` after its workflow failed to
+ * start, recording the error as `resultSummary`. The transition itself is
+ * best-effort: if it fails too, the caller still gets a definite `{ok:
+ * false}` rather than an unhandled rejection on top of the original error.
  */
-async function cancelRun(runId: string): Promise<void> {
+async function failTask(
+  organizationId: string,
+  taskId: string,
+  error: unknown,
+): Promise<StartTaskResult> {
+  const message = error instanceof Error ? error.message : String(error);
   try {
-    const { getRun } = await import("workflow/api");
-    getRun(runId).cancel();
-  } catch (error) {
-    console.error(`Failed to cancel run "${runId}":`, error);
+    await transitionTaskStatus(organizationId, taskId, "failed", {
+      resultSummary: message,
+    });
+  } catch (transitionError) {
+    console.error(
+      `Failed to transition task "${taskId}" to "failed":`,
+      transitionError,
+    );
   }
+  return { ok: false, error: message };
 }
