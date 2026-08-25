@@ -66,6 +66,8 @@ export class SteeringUnsupportedError extends Error {
  *   RESOLVES with `steered: { text }` and `isError: false`. With steering
  *   "none": `steer` rejects with SteeringUnsupportedError and the turn
  *   continues unaffected.
+ * - Abandoning `chunks` before the turn ends is equivalent to `interrupt()`:
+ *   `result` rejects with an AbortError.
  */
 export interface TurnHandle {
   chunks: AsyncIterable<UIMessageChunk>;

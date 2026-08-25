@@ -83,4 +83,39 @@ describe("FakeBackend", () => {
     await collect(handle.chunks);
     await expect(handle.result).rejects.toMatchObject({ name: "AbortError" });
   });
+
+  test("abandoning chunks rejects result", async () => {
+    const backend = new FakeBackend({
+      script: [
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "hello" },
+      ],
+      holdOpen: true,
+    });
+    const handle = backend.startTurn({ cwd: "/tmp", prompt: "hi" });
+    // Consume exactly one chunk, then abandon iteration early (the
+    // async-iterator equivalent of `for await (...) { break; }`).
+    const iterator = handle.chunks[Symbol.asyncIterator]();
+    await iterator.next();
+    await iterator.return?.();
+    await expect(handle.result).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test("pre-aborted signal wins in the non-holdOpen path", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const backend = new FakeBackend({
+      script: [
+        { type: "text-start", id: "t1" },
+        { type: "text-end", id: "t1" },
+      ],
+    });
+    const handle = backend.startTurn({
+      cwd: "/tmp",
+      prompt: "hi",
+      abortSignal: controller.signal,
+    });
+    await collect(handle.chunks);
+    await expect(handle.result).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
