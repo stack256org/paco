@@ -121,19 +121,28 @@ describe("ConsentForm", () => {
     expect(html).not.toContain("read and write only inside");
   });
 
-  test("names the channels a plugin verifies itself, and says what that means", () => {
+  test("names the self-verified channels, and frames verification as a claim, not a guarantee", () => {
     // Granting channels:ingress to a plugin with a self-verified channel is
     // materially different from granting it to one without: requests to that
     // channel reach the plugin with Paco checking nothing. The consent screen
     // is the only place an operator ever sees that.
+    //
+    // The wording matters as much as the disclosure. `self-verified` is a
+    // manifest flag, not a mechanism — nothing makes a plugin that declares
+    // it actually verify anything, and Paco cannot tell the difference. Copy
+    // that asserts "the plugin's own signature check stands in the way"
+    // promises a defence that may not exist, so it is pinned as a claim.
     const html = renderForm({
       requested: ["channels:ingress"],
       selfVerifiedChannels: ["events"],
     });
 
     expect(html).toContain("events");
-    expect(html).toContain("verifies itself");
-    expect(html).toContain("without Paco checking anything");
+    expect(html).toContain("claims to verify itself");
+    expect(html).toContain("which may be nothing");
+    expect(html).toContain("only to a plugin you trust");
+    // Must never assert a signature check exists.
+    expect(html).not.toContain("signature check stands in the way");
   });
 
   test("says a channel plugin's requests need the secret when none are self-verified", () => {
@@ -143,7 +152,7 @@ describe("ConsentForm", () => {
     });
 
     expect(html).toContain("per-plugin secret");
-    expect(html).not.toContain("verifies itself");
+    expect(html).not.toContain("claims to verify itself");
   });
 
   test("never promises the secret gates every channel", () => {
