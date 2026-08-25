@@ -186,20 +186,32 @@ function buildCandidateCustomInstructions(params: {
  * directory (and branch) it is told is the one its edits actually land on.
  *
  * `sandboxDetails` here is the chat's own already-built environment string
- * (`agentOptions.sandbox.environmentDetails`), which itself already carries
- * a working-directory line and a branch line for the CHAT — both filtered
- * out below, the same way `buildChatEnvironmentDetails` filters the
- * session-level sandbox's own lines before adding the chat's.
+ * (`agentOptions.sandbox.environmentDetails` — the OUTPUT of
+ * `buildChatEnvironmentDetails`, not the raw session-level text that
+ * function itself takes), which already carries a working-directory line, a
+ * container-path line, and a branch line for the CHAT — all three filtered
+ * out below before this function's own versions of the same three lines are
+ * appended. The filtered text has to match what `buildChatEnvironmentDetails`
+ * actually EMITS, not what it filters on its own input — those are two
+ * different strings, and copying its filter list verbatim here once left the
+ * container-path line unfiltered (present in both `sandboxDetails` and this
+ * function's own `lines`, so it appeared twice). The constants below back
+ * both the emitted line and the filter, so the two cannot drift apart again.
  */
+const CONTAINER_PATH_LINE =
+  "- The container sees this at the same path, so it is the directory to use there too.";
+const WORKING_DIRECTORY_LINE_PREFIX = "- Your working directory";
+const BRANCH_LINE_PREFIX = "- Branch:";
+
 function buildCandidateEnvironmentDetails(params: {
   sandboxDetails?: string;
   worktreePath: string;
   branch: string;
 }): string {
   const lines = [
-    `- Your working directory (you run here): ${params.worktreePath}`,
-    "- The container sees this at the same path, so it is the directory to use there too.",
-    `- Branch: \`${params.branch}\` — this design candidate has its own git worktree, so your changes here do not touch the chat's branch or the other candidates.`,
+    `${WORKING_DIRECTORY_LINE_PREFIX} (you run here): ${params.worktreePath}`,
+    CONTAINER_PATH_LINE,
+    `${BRANCH_LINE_PREFIX} \`${params.branch}\` — this design candidate has its own git worktree, so your changes here do not touch the chat's branch or the other candidates.`,
   ];
 
   const inheritedLines = (params.sandboxDetails ?? "")
@@ -207,9 +219,9 @@ function buildCandidateEnvironmentDetails(params: {
     .filter(
       (line) =>
         !(
-          line.startsWith("- Your working directory") ||
-          line.startsWith("- The same files inside the container") ||
-          line.startsWith("- Branch:")
+          line.startsWith(WORKING_DIRECTORY_LINE_PREFIX) ||
+          line === CONTAINER_PATH_LINE ||
+          line.startsWith(BRANCH_LINE_PREFIX)
         ),
     );
 

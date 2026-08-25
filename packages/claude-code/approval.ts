@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -75,8 +76,22 @@ export function installHookAt(target: string): void {
   if (current !== HOOK_SOURCE) {
     const dir = dirname(target);
     const tempTarget = join(dir, `.pre-tool-use.mjs.${randomUUID()}.tmp`);
-    writeFileSync(tempTarget, HOOK_SOURCE, "utf-8");
-    renameSync(tempTarget, target);
+    try {
+      writeFileSync(tempTarget, HOOK_SOURCE, "utf-8");
+      renameSync(tempTarget, target);
+    } catch (error) {
+      // The rename is what makes this atomic, so a failure before it leaves
+      // the real hook untouched — but it can leave the temp file behind, and
+      // every call mints a fresh UUID, so nothing would ever reclaim it.
+      // Best-effort: never let cleanup replace the error that actually
+      // matters (a full disk, a permission problem) with its own.
+      try {
+        rmSync(tempTarget, { force: true });
+      } catch {
+        // Ignored on purpose — see above.
+      }
+      throw error;
+    }
   }
   chmodSync(target, 0o755);
 }

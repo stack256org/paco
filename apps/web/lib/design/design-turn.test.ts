@@ -190,6 +190,43 @@ describe("runDesignTurn", () => {
     }
   });
 
+  test("no line appears twice in a candidate's environment details", async () => {
+    // A candidate's details are the chat's, minus the lines this function
+    // replaces, plus its own. The filter therefore has to match what the
+    // chat's builder EMITS, not what that builder itself filters on its own
+    // (differently-worded) input — copying its filter list verbatim once let
+    // the container-path line through, so it appeared both inherited and
+    // freshly added. Asserted over the whole block rather than that one
+    // sentence, so any future line that drifts the same way fails here.
+    const candidates = [candidate(1, "/d/1")];
+    const seenEnvironmentDetails: Array<string | undefined> = [];
+    const runTurn: RunCandidateTurn = (params) => {
+      seenEnvironmentDetails.push(params.options.sandbox.environmentDetails);
+      return Promise.resolve({ isError: false, finishReason: "stop" });
+    };
+
+    await runDesignTurn({
+      candidates,
+      prompt: "Build a landing page",
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      runTurn,
+      commitCandidate: noopCommit,
+    });
+
+    const lines = (seenEnvironmentDetails[0] ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(new Set(lines).size).toBe(lines.length);
+    // And the inherited-but-still-relevant lines survive: filtering must not
+    // have become "drop everything the chat said".
+    expect(lines).toContain("- Container: paco-sbx-session-1");
+  });
+
   test("one candidate failing does not stop the others from succeeding", async () => {
     const candidates = [
       candidate(1, "/d/1"),

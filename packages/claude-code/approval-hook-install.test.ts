@@ -1,4 +1,6 @@
 import {
+  chmodSync,
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -89,5 +91,57 @@ describe("installHookAt", () => {
     installHookAt(target);
 
     expect(readdirSync(tempDir)).toEqual(["pre-tool-use.mjs"]);
+  });
+});
+
+describe("installHookAt cleanup", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "paco-approval-hook-fail-"));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  test("leaves no temp file behind when the install fails", () => {
+    // A target inside a directory that does not exist: the write to the
+    // sibling temp path fails, which is the failure mode that used to strand
+    // a `.pre-tool-use.mjs.<uuid>.tmp` nothing would ever reclaim (each call
+    // mints a fresh UUID, so they accumulate).
+    const missingDir = join(tempDir, "nope");
+    expect(() => installHookAt(join(missingDir, "pre-tool-use.mjs"))).toThrow();
+    expect(existsSync(missingDir)).toBe(false);
+  });
+
+  test("a failure to install over an existing hook leaves the original intact", () => {
+    const target = join(tempDir, "pre-tool-use.mjs");
+    writeFileSync(target, "// an older hook\n", "utf-8");
+
+    // Make the containing directory read-only so the temp write fails. Root
+    // ignores the mode bits, so skip rather than assert something untrue.
+    chmodSync(tempDir, 0o500);
+    let threw = false;
+    try {
+      installHookAt(target);
+    } catch {
+      threw = true;
+    } finally {
+      chmodSync(tempDir, 0o700);
+    }
+
+    if (!threw) {
+      // Running as root (or a filesystem that ignores the mode): the write
+      // succeeded, so there is nothing to assert about a failure path.
+      expect(readFileSync(target, "utf-8")).toBe(HOOK_SOURCE);
+      return;
+    }
+
+    // The rename never happened, so the original is untouched...
+    expect(readFileSync(target, "utf-8")).toBe("// an older hook\n");
+    // ...and no temp file was stranded next to it.
+    const strays = readdirSync(tempDir).filter((name) => name.endsWith(".tmp"));
+    expect(strays).toEqual([]);
   });
 });
