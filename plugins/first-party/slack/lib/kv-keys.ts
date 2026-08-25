@@ -7,12 +7,23 @@ import { isRecord } from "./guards.ts";
  * exact spelling.
  */
 
-/** Set once by `tools/slack-setup.ts`; read by `channels/events.ts` to
- * verify Slack's v0 request signature. */
+/**
+ * Set once by `tools/slack-setup.ts`; read by `channels/events.ts` to verify
+ * Slack's v0 request signature.
+ *
+ * Written with `kv.setSecret`, not `kv.set` — `plugin_kv` is a plaintext
+ * `jsonb` column, and this is the secret that authenticates every inbound
+ * webhook. `kv.get` unseals it transparently.
+ */
 export const KV_SIGNING_SECRET = "slack:signing-secret";
 
-/** Set once by `tools/slack-setup.ts`; read whenever this plugin calls the
- * Slack Web API. */
+/**
+ * Set once by `tools/slack-setup.ts`; read whenever this plugin calls the
+ * Slack Web API.
+ *
+ * Written with `kv.setSecret` for the same reason as the signing secret: in
+ * the clear, a `select *` on `plugin_kv` yields a live Slack workspace token.
+ */
 export const KV_BOT_TOKEN = "slack:bot-token";
 
 /**

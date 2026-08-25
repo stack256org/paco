@@ -133,9 +133,22 @@ async function execute(
     };
   }
 
+  // The bot token and the signing secret are credentials, so they go through
+  // `setSecret` and are sealed at rest with the same application secret every
+  // other stored secret in Paco uses (`githubTokens.sealedToken`,
+  // `plugins.ingressSecret`, `instanceSettings.smtpPasswordSealed`). `plugin_kv`
+  // is a plaintext `jsonb` column: written with the ordinary `set`, a `select *`
+  // on it — or a database dump, or a backup — hands over a live Slack workspace
+  // token and the secret that authenticates every inbound webhook. Both read
+  // back through the ordinary `get`, which unseals transparently, so nothing
+  // else in this plugin has to know.
+  //
+  // The workspace id and the channel routing below stay in the clear
+  // deliberately: they are bookkeeping an operator should be able to read while
+  // debugging, and sealing them would protect nothing.
   await Promise.all([
-    api.kv.set(KV_BOT_TOKEN, parsed.botToken),
-    api.kv.set(KV_SIGNING_SECRET, parsed.signingSecret),
+    api.kv.setSecret(KV_BOT_TOKEN, parsed.botToken),
+    api.kv.setSecret(KV_SIGNING_SECRET, parsed.signingSecret),
     api.kv.set(KV_TEAM_ID, authTest.teamId),
     api.kv.set(KV_ALLOWED_USERS, parsed.allowedUserIds ?? []),
     ...Object.entries(parsed.channelMap).map(([slackChannelId, sessionId]) =>

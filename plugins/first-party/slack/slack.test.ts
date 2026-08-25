@@ -66,6 +66,8 @@ interface FakeApiOptions {
 interface FakeApi {
   api: PluginApi;
   kvStore: Map<string, unknown>;
+  /** Keys written through `kv.setSecret` rather than `kv.set`. */
+  sealedKeys: Set<string>;
   fetchCalls: PluginFetchRequest[];
   postMessageCalls: Array<{ chatId: string; text: string }>;
   /** Set by the hook tests, which replace `api.events.subscribe` to capture
@@ -75,23 +77,41 @@ interface FakeApi {
 
 function makeFakeApi(options: FakeApiOptions = {}): FakeApi {
   const kvStore = new Map<string, unknown>(Object.entries(options.kv ?? {}));
+  const sealedKeys = new Set<string>();
   const fetchCalls: PluginFetchRequest[] = [];
   const postMessageCalls: Array<{ chatId: string; text: string }> = [];
 
   const kv: PluginKvApi = {
     get: (key) => Promise.resolve(kvStore.has(key) ? kvStore.get(key) : null),
     set: (key, value) => {
+      sealedKeys.delete(key);
+      kvStore.set(key, value);
+      return Promise.resolve();
+    },
+    // The real host seals the value and `get` unseals it transparently
+    // (`PluginKvApi.setSecret`), so the fake stores the plaintext and only
+    // records that this key took the sealed path.
+    setSecret: (key, value) => {
+      sealedKeys.add(key);
       kvStore.set(key, value);
       return Promise.resolve();
     },
     delete: (key) => {
+      sealedKeys.delete(key);
       kvStore.delete(key);
       return Promise.resolve();
     },
-    list: (prefix) =>
-      Promise.resolve(
-        [...kvStore.keys()].filter((key) => !prefix || key.startsWith(prefix)),
-      ),
+    list: (afterKey) =>
+      Promise.resolve({
+        items: [...kvStore.entries()]
+          .filter(([key]) => afterKey === undefined || key > afterKey)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, value]) =>
+            sealedKeys.has(key)
+              ? { key, value: null, secret: true }
+              : { key, value },
+          ),
+      }),
   };
 
   const api: PluginApi = {
@@ -128,7 +148,7 @@ function makeFakeApi(options: FakeApiOptions = {}): FakeApi {
     },
   };
 
-  return { api, kvStore, fetchCalls, postMessageCalls };
+  return { api, kvStore, sealedKeys, fetchCalls, postMessageCalls };
 }
 
 function findFetch(
@@ -675,6 +695,51 @@ describe("tools/slack-setup.ts", () => {
     expect(kvStore.get("slack:allowed-users")).toEqual(["UALICE"]);
   });
 
+  test("seals the bot token and signing secret at rest, and only those", async () => {
+    const { api, kvStore, sealedKeys } = makeFakeApi({
+      fetchImpl: () => ({
+        status: 200,
+        headers: {},
+        body: JSON.stringify({
+          ok: true,
+          team: "Acme",
+          team_id: "T0WORKSPACE",
+          user_id: "U0BOT",
+        }),
+      }),
+    });
+
+    await slackSetupTool.execute(
+      {
+        botToken: "xoxb-real",
+        signingSecret: "shh",
+        appUrl: "https://paco.example.com",
+        channelMap: { C1: "session-2" },
+      },
+      api,
+      new AbortController().signal,
+    );
+
+    // A live Slack workspace token and the secret that authenticates every
+    // inbound webhook must not be readable from a `select *` on `plugin_kv`,
+    // which is a plaintext jsonb column. Every sibling secret on this branch
+    // seals; these two are the same class of thing.
+    expect([...sealedKeys].sort()).toEqual([
+      "slack:bot-token",
+      "slack:signing-secret",
+    ]);
+
+    // Routing is ordinary bookkeeping an operator should be able to read
+    // while debugging, so it stays in the clear.
+    expect(sealedKeys.has("slack:team-id")).toBe(false);
+    expect(sealedKeys.has("slack:channel-map:C1")).toBe(false);
+
+    // And both still read back through the ordinary `get` the rest of the
+    // plugin uses, with no knowledge that they were sealed.
+    expect(await api.kv.get("slack:bot-token")).toBe("xoxb-real");
+    expect(kvStore.get("slack:signing-secret")).toBe("shh");
+  });
+
   test("refuses to store anything when Slack does not name a workspace", async () => {
     const { api, kvStore } = makeFakeApi({
       fetchImpl: () => ({
@@ -981,6 +1046,12 @@ describe("integration: real PluginHost", () => {
       case "get":
         return store.has(op.key as string) ? store.get(op.key as string) : null;
       case "set":
+        store.set(op.key as string, op.value);
+        return { ok: true };
+      case "setSecret":
+        // The real handler seals `value` before it lands in `plugin_kv` and
+        // unseals it on `get`; round-tripping the plaintext here is the same
+        // observable behaviour for the plugin.
         store.set(op.key as string, op.value);
         return { ok: true };
       case "delete":
