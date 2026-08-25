@@ -35,10 +35,31 @@ chat's worktree, which is mounted into the container. So:
 A session is one git repository. A chat is one worktree of it.
 
 ```text
-~/.paco/workspaces/session_<id>/     mounted at /workspace *and* at this path
-  repo/                              the clone, or `git init`, on its default branch
-  chats/<chatId>/                    a worktree, on branch chat/<chatId>
+~/.paco/                             Paco's data dir (PACO_HOME, else ~/.paco)
+  plugins/<pluginId>/                installed plugin trees (PACO_PLUGINS_DIR)
+  memory/users/<userId>/             user-scope memory, as markdown files
+  memory/orgs/<orgId>/               org-scope memory, written only by promotion
+  workspaces/session_<id>/           mounted at /workspace *and* at this path
+    repo/                            the clone, or `git init`, on its default branch
+      .paco/memory/                  project-scope memory — see the warning below
+    chats/<chatId>/                  a worktree, on branch chat/<chatId>
+    designs/<chatId>/<n>/            a design candidate's worktree, on design/<chatId>/<n>
 ```
+
+**Project memory is not versioned.** It is written into a real git repository,
+which is what makes the path misleading: nothing in this codebase ever stages
+or commits `.paco/memory`, `.paco/` is not in the baseline `.gitignore`, and it
+sits in `repo/` rather than in any chat's worktree — so it never appears in a
+chat's diff or its pull request either. It is untracked files in one
+server-side checkout, and it dies with the workspace. That is deliberate rather
+than an oversight — the session repo is checked out on the default branch,
+which Paco never pushes, and committing from a chat's worktree instead would
+put distilled notes into the diff a human reviews on every turn. Commit
+`.paco/memory` yourself if you want it shared; nothing will do it for you.
+
+Design-candidate worktrees are siblings of `chats/` for the same reason chat
+worktrees are: a worktree's `.git` points back into `repo/.git/worktrees/<id>`,
+so every worktree has to live under the same mount as `repo/`.
 
 Two details are load-bearing:
 
