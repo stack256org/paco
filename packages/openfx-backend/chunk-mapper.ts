@@ -152,11 +152,23 @@ function extractToolCallContentText(
   return parts.join("\n");
 }
 
-/** `tool-output-available`'s `output`, folding in `command_result` when present. */
-function buildToolOutput(update: ToolCallStatusUpdate): unknown {
+/**
+ * `tool-output-available`'s `output` — always a plain string (there is no UI
+ * consumer for a `{text, commandResult}` object form). When `command_result`
+ * carries a numeric `exit_code` (the structured exec result documented on
+ * `ToolCallStatusUpdate`), a trailing `[exit code N]` line is appended so the
+ * exit status survives even though the object itself is dropped. No separate
+ * stderr text field was found on `command_result` (only a `stderr_bytes`
+ * count — `openfx/src/acp/types.zig` test) — stderr is already folded into
+ * `content`'s `<stderr>...</stderr>` envelope upstream
+ * (`openfx/src/core/execution/command_contract.zig`), so there is nothing
+ * separate left to append here.
+ */
+function buildToolOutput(update: ToolCallStatusUpdate): string {
   const text = extractToolCallContentText(update.content);
-  if (update.command_result !== undefined) {
-    return { text, commandResult: update.command_result };
+  const commandResult = update.command_result;
+  if (isRecord(commandResult) && typeof commandResult.exit_code === "number") {
+    return `${text}\n[exit code ${commandResult.exit_code}]`;
   }
   return text;
 }
@@ -252,9 +264,30 @@ export class AcpChunkMapper {
           },
         ];
       }
-      // "pending" is only expected via `tool_call`, not `tool_call_update`.
-      // "in_progress" has no corresponding AI SDK tool-part state beyond the
-      // input-available one already emitted at `tool_call` time.
+      case "in_progress":
+      case "pending": {
+        // Live progress, not the final result: `onCommandOutputChunk` (Bash
+        // output) and `onMcpProgress` (MCP progress) both stream through
+        // `sendToolCallProgressText`, which always writes status
+        // `in_progress` with `content` (`openfx/src/acp/prompt.zig:1957,1962`
+        // -> `sendToolCallProgressText` at `prompt.zig:160`). `pending` with
+        // content is not observed from that call site — `tool_call` is the
+        // only place `pending` is used on the wire — but is handled the same
+        // way defensively (PROTOCOL.md §8.4: no stability guarantee). No
+        // content means just a bare status transition with nothing to show.
+        const text = extractToolCallContentText(update.content);
+        if (!text) {
+          return [];
+        }
+        return [
+          {
+            type: "tool-output-available",
+            toolCallId: update.toolCallId,
+            output: text,
+            preliminary: true,
+          },
+        ];
+      }
       default:
         return [];
     }
@@ -277,58 +310,70 @@ export class AcpChunkMapper {
    * parse-at-the-boundary, not a formality. `AcpSessionUpdate` is exported
    * for callers that want to construct well-typed fixtures.
    *
-   * `kind` is read out separately, rather than narrowing `update` itself to
-   * a record, so the casts below start from `unknown` — matching how
-   * `acp-client.ts` casts `params as PermissionRequestParams` at its own
-   * JSON-RPC boundary — instead of an object-to-object cast TypeScript can't
-   * verify overlaps.
+   * `update` is narrowed only far enough to read `sessionUpdate` (a
+   * `Record<string, unknown>`); the per-kind casts below go through `as
+   * unknown as X` because TypeScript won't let a `Record<string, unknown>`
+   * cast straight to a more specific interface it can't prove overlaps —
+   * the same trust-the-wire boundary `acp-client.ts` takes with `params as
+   * PermissionRequestParams`, just starting one step further from `unknown`.
+   *
+   * Only `tool_call`, `tool_call_update`, and `user_message_chunk` close an
+   * open text run (plus `finish()`, for whatever is still open at turn end).
+   * `session_info_update` (model-recovery notices) and
+   * `available_commands_update` are control-plane and can arrive mid-stream
+   * without meaning the assistant's text run ended — closing text for them
+   * would fragment one message into several for no reason on the wire. An
+   * unrecognized kind is treated the same way: PROTOCOL.md §8.4 promises no
+   * stability, so a future kind this mapper doesn't understand yet shouldn't
+   * be assumed to be a turn boundary either.
    */
   map(update: unknown): UIMessageChunk[] {
-    const kind =
-      isRecord(update) && typeof update.sessionUpdate === "string"
-        ? update.sessionUpdate
-        : undefined;
-
-    if (kind === undefined) {
-      this.#warnUnknown(typeof update);
+    if (!isRecord(update)) {
+      this.#warnUnknown(`malformed:${typeof update}`);
       return [];
     }
-
-    if (kind === "agent_message_chunk") {
-      return this.#mapAgentMessageChunk(update as AgentMessageChunkUpdate);
+    if (typeof update.sessionUpdate !== "string") {
+      this.#warnUnknown("missing-sessionUpdate");
+      return [];
     }
-
-    // Every other kind ends any text run in progress: ACP gives no explicit
-    // text block boundary, so the arrival of anything else is the signal.
-    const closing = this.#closeOpenText();
+    const kind = update.sessionUpdate;
 
     switch (kind) {
+      case "agent_message_chunk":
+        return this.#mapAgentMessageChunk(
+          update as unknown as AgentMessageChunkUpdate,
+        );
+
       case "user_message_chunk":
         // Only seen replaying history on session/load; it is the user's own
-        // prior turn, not assistant output, so nothing is emitted for it.
-        return closing;
+        // prior turn, not assistant output, so nothing is emitted for it —
+        // but it does end any open assistant text run.
+        return this.#closeOpenText();
 
       case "tool_call":
         return [
-          ...closing,
-          ...this.#mapToolCallCreated(update as ToolCallCreatedUpdate),
+          ...this.#closeOpenText(),
+          ...this.#mapToolCallCreated(
+            update as unknown as ToolCallCreatedUpdate,
+          ),
         ];
 
       case "tool_call_update":
         return [
-          ...closing,
-          ...this.#mapToolCallStatus(update as ToolCallStatusUpdate),
+          ...this.#closeOpenText(),
+          ...this.#mapToolCallStatus(update as unknown as ToolCallStatusUpdate),
         ];
 
       case "available_commands_update":
       case "session_info_update":
         // Slash-command catalog / provider-outage recovery state — control
-        // plane, not message content; nothing maps to a UIMessageChunk.
-        return closing;
+        // plane, not message content, and not a turn boundary: leaves any
+        // open text run untouched.
+        return [];
 
       default:
         this.#warnUnknown(kind);
-        return closing;
+        return [];
     }
   }
 

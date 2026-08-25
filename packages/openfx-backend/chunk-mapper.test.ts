@@ -60,7 +60,7 @@ describe("AcpChunkMapper", () => {
         [{ type: "tool-output-available", toolCallId: "t1", output: "ok" }],
       ],
       [
-        "tool_call_update completed with command_result -> output folds it in",
+        "tool_call_update completed with command_result -> output is a string with a trailing exit-code line",
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "t1",
@@ -74,10 +74,7 @@ describe("AcpChunkMapper", () => {
           {
             type: "tool-output-available",
             toolCallId: "t1",
-            output: {
-              text: "exit_code=0",
-              commandResult: { kind: "foreground", exit_code: 0 },
-            },
+            output: "exit_code=0\n[exit code 0]",
           },
         ],
       ],
@@ -118,13 +115,54 @@ describe("AcpChunkMapper", () => {
         ],
       ],
       [
-        "tool_call_update in_progress -> [] (no AI SDK tool-part state for it)",
+        "tool_call_update in_progress with no content -> [] (bare status transition, nothing to show)",
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "t1",
           status: "in_progress",
         },
         [],
+      ],
+      [
+        "tool_call_update in_progress with content -> preliminary tool-output-available (live Bash/MCP progress, prompt.zig:1957/1962)",
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status: "in_progress",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: "partial output" },
+            },
+          ],
+        },
+        [
+          {
+            type: "tool-output-available",
+            toolCallId: "t1",
+            output: "partial output",
+            preliminary: true,
+          },
+        ],
+      ],
+      [
+        "tool_call_update pending with content -> preliminary tool-output-available too (defensive, not observed on the wire)",
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status: "pending",
+          content: [
+            { type: "content", content: { type: "text", text: "starting" } },
+          ],
+        },
+        [
+          {
+            type: "tool-output-available",
+            toolCallId: "t1",
+            output: "starting",
+            preliminary: true,
+          },
+        ],
       ],
       [
         "available_commands_update -> [] (slash-command catalog, not message content)",
@@ -189,6 +227,24 @@ describe("AcpChunkMapper", () => {
       expect(mapper.map(42)).toEqual([]);
 
       expect(warnSpy).toHaveBeenCalled();
+    });
+
+    test("malformed inputs and missing-discriminant objects warn under distinct, deduped keys", () => {
+      // Fix: a non-object's dedup key is "malformed:<typeof>", an object
+      // lacking `sessionUpdate` dedupes under "missing-sessionUpdate", and an
+      // unrecognized-but-present `sessionUpdate` dedupes under its own kind
+      // name — three different buckets, each deduped independently.
+      const mapper = new AcpChunkMapper();
+
+      mapper.map("not an update"); // malformed:string
+      mapper.map("also not an update"); // malformed:string (same bucket)
+      mapper.map(42); // malformed:number (different bucket)
+      mapper.map({ foo: "bar" }); // missing-sessionUpdate
+      mapper.map({ baz: "qux" }); // missing-sessionUpdate (same bucket)
+      mapper.map({ sessionUpdate: "future_kind" }); // its own bucket
+
+      // malformed:string, malformed:number, missing-sessionUpdate, future_kind
+      expect(warnSpy).toHaveBeenCalledTimes(4);
     });
   });
 
@@ -308,6 +364,86 @@ describe("AcpChunkMapper", () => {
       expect(result).toEqual([
         { type: "tool-output-available", toolCallId: "orphan", output: "done" },
       ]);
+    });
+
+    test("session_info_update mid-stream does not fragment an open text run", () => {
+      const mapper = new AcpChunkMapper();
+
+      const first = mapper.map({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "before" },
+      });
+      const info = mapper.map({
+        sessionUpdate: "session_info_update",
+        _meta: { fx: { modelResponseRecovery: { state: "active" } } },
+      });
+      const second = mapper.map({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "after" },
+      });
+
+      expect(first).toEqual([
+        { type: "text-start", id: "text-1" },
+        { type: "text-delta", id: "text-1", delta: "before" },
+      ]);
+      // No text-end in between: the recovery notice is control-plane, not a
+      // turn boundary.
+      expect(info).toEqual([]);
+      expect(second).toEqual([
+        { type: "text-delta", id: "text-1", delta: "after" },
+      ]);
+
+      // The run is still open until something that actually ends it arrives.
+      expect(mapper.finish()).toEqual([{ type: "text-end", id: "text-1" }]);
+    });
+
+    test("available_commands_update mid-stream also does not fragment an open text run", () => {
+      const mapper = new AcpChunkMapper();
+
+      mapper.map({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "x" },
+      });
+      const commands = mapper.map({
+        sessionUpdate: "available_commands_update",
+        availableCommands: [],
+      });
+      const resumed = mapper.map({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "y" },
+      });
+
+      expect(commands).toEqual([]);
+      expect(resumed).toEqual([
+        { type: "text-delta", id: "text-1", delta: "y" },
+      ]);
+    });
+
+    test("an unknown sessionUpdate kind mid-stream also does not fragment an open text run", () => {
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {
+        // silence output during the test
+      });
+
+      try {
+        const mapper = new AcpChunkMapper();
+
+        mapper.map({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "x" },
+        });
+        const unknown = mapper.map({ sessionUpdate: "some_future_kind" });
+        const resumed = mapper.map({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "y" },
+        });
+
+        expect(unknown).toEqual([]);
+        expect(resumed).toEqual([
+          { type: "text-delta", id: "text-1", delta: "y" },
+        ]);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     test("finish() closes an open text run", () => {
