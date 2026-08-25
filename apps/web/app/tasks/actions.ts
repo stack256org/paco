@@ -71,7 +71,8 @@ export type TaskBoardItem = {
   title: string;
   goal: string;
   status: TaskStatus;
-  sessionId: string;
+  /** Null for a proposal/reflection task that belongs to no session. */
+  sessionId: string | null;
   sessionTitle: string;
   chatId: string | null;
   assignedAgent: string | null;
@@ -101,7 +102,13 @@ export async function listOrgTasksAction(): Promise<TaskBoardItem[]> {
     }
   }
 
-  const sessionIds = Array.from(new Set(rows.map((row) => row.sessionId)));
+  const sessionIds = Array.from(
+    new Set(
+      rows
+        .map((row) => row.sessionId)
+        .filter((sessionId): sessionId is string => sessionId !== null),
+    ),
+  );
   const sessionTitles = new Map<string, string>();
   await Promise.all(
     sessionIds.map(async (sessionId) => {
@@ -116,7 +123,9 @@ export async function listOrgTasksAction(): Promise<TaskBoardItem[]> {
     goal: row.goal,
     status: row.status,
     sessionId: row.sessionId,
-    sessionTitle: sessionTitles.get(row.sessionId) ?? "Unknown session",
+    sessionTitle: row.sessionId
+      ? (sessionTitles.get(row.sessionId) ?? "Unknown session")
+      : "No session",
     chatId: row.chatId,
     assignedAgent: row.assignedAgent,
     origin: row.origin,
@@ -309,15 +318,19 @@ export async function unblockTaskAction(
     return { ok: false, error: `Task "${taskId}" has no chat to resume` };
   }
   const chatId = updated.chatId;
+  if (!updated.sessionId) {
+    return { ok: false, error: `Task "${taskId}" has no session to resume` };
+  }
+  const sessionId = updated.sessionId;
 
-  const session = await getSessionById(updated.sessionId);
+  const session = await getSessionById(sessionId);
   if (!session) {
-    return { ok: false, error: `Session "${updated.sessionId}" not found` };
+    return { ok: false, error: `Session "${sessionId}" not found` };
   }
 
   try {
     await kickExecutorFixTurn({
-      sessionId: updated.sessionId,
+      sessionId,
       chatId,
       userId: session.userId,
       problems: ["A human unblocked this task. Continue the work."],

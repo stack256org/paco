@@ -366,6 +366,17 @@ export async function runReviewerGate(
     return await passWithoutReviewer(task);
   }
 
+  if (!task.sessionId) {
+    await applyTransition(task.organizationId, task.id, "blocked", {
+      resultSummary:
+        "This task has no session; cannot review or resume it.".slice(
+          0,
+          RESULT_SUMMARY_MAX_LENGTH,
+        ),
+    });
+    return "fail";
+  }
+
   const session = await getSessionById(task.sessionId);
   if (!session) {
     await applyTransition(task.organizationId, task.id, "blocked", {

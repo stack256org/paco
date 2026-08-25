@@ -235,6 +235,7 @@ function pluginRow(overrides: Partial<PluginRow> = {}): PluginRow {
     contentHash: "sha256:abc",
     manifest: manifest(),
     grantedCapabilities: ["storage:kv", "net:fetch", "messages:post"],
+    consentedNetDomains: ["api.linear.app"],
     enabled: true,
     installedAt: now,
     updatedAt: now,

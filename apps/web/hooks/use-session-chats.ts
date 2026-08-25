@@ -503,6 +503,9 @@ export function useSessionChats(
       modelId: data?.defaultModelId ?? null,
       effort: null,
       turnPolicy: "steer",
+      // Mirrors the schema default: a new chat always starts on the
+      // default backend, matching what the server will actually return.
+      backend: "claude-code",
       activeStreamId: null,
       claudeSessionId: null,
       lastAssistantMessageAt: null,
@@ -607,6 +610,7 @@ export function useSessionChats(
       modelId: sourceChat.modelId,
       effort: sourceChat.effort,
       turnPolicy: sourceChat.turnPolicy,
+      backend: sourceChat.backend,
       activeStreamId: null,
       claudeSessionId: null,
       lastAssistantMessageAt: null,

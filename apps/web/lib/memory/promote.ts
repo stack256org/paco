@@ -1,9 +1,6 @@
 "use server";
 
-import { desc, eq } from "drizzle-orm";
 import { isAdmin } from "@/lib/admin/require-admin";
-import { db } from "@/lib/db/client";
-import { sessions } from "@/lib/db/schema";
 import { createTask } from "@/lib/db/tasks";
 import { SIGNED_OUT } from "@/lib/error-copy";
 import { getMemberRole } from "@/lib/org/membership";
@@ -65,16 +62,10 @@ export type PromoteMemoryResult =
  * - anyone who is neither an admin nor a member: rejected before any task
  *   or write is attempted.
  *
- * Every task also needs a `sessionId` (a task always runs in some session's
- * repo), which this settings-page action has no session to offer — the
- * proposer's own most recently created session stands in for one. A member
- * with no session at all cannot file a proposal; that is reported back as
- * an error rather than attempted with a fabricated id.
- *
- * TODO(section-4-task-5-fix-2): sessionId becomes nullable for proposal
- * tasks — a schema change blocked on another agent's migration slot at the
- * time this fallback was written. Once it lands, a proposal task should not
- * need to borrow a session at all.
+ * A proposal task belongs to no session — `tasks.sessionId` is nullable
+ * exactly so a proposal names work to consider rather than a repo to act in
+ * yet (see the column comment in `lib/db/schema.ts`). A member with no
+ * sessions at all can still file a proposal.
  */
 export async function promoteMemoryAction(params: {
   title: string;
@@ -106,27 +97,9 @@ export async function promoteMemoryAction(params: {
     return { ok: false, error: "You must be a member of this organisation." };
   }
 
-  const [recentSession] = await db
-    .select({ id: sessions.id })
-    .from(sessions)
-    .where(eq(sessions.userId, userId))
-    .orderBy(desc(sessions.createdAt))
-    .limit(1);
-
-  if (!recentSession) {
-    // Not the brief's "Section 3 absent" branch (that one really does return
-    // `{ ok: false, error: "admin only" }`) — this is a narrower gap the
-    // brief doesn't name: a task needs a session to run in, and a member
-    // who has never started one has nothing to attach the proposal to.
-    return {
-      ok: false,
-      error: "Start a session before proposing an org memory entry.",
-    };
-  }
-
   const created = await createTask({
     organizationId: organization.id,
-    sessionId: recentSession.id,
+    sessionId: null,
     title: `Org memory proposal: ${params.title}`,
     goal: params.body,
     origin: "user",

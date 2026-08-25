@@ -392,6 +392,18 @@ describe("runReviewerGate", () => {
     expect(submitChatMessageSpy).not.toHaveBeenCalled();
   });
 
+  test("a null sessionId blocks the task instead of crashing", async () => {
+    const task = makeTask({ sessionId: null });
+
+    const outcome = await runReviewerGate(task, "chat-1");
+
+    expect(outcome).toBe("fail");
+    expect(transitionTargets()).toEqual(["blocked"]);
+    expect(getSessionByIdSpy).not.toHaveBeenCalled();
+    expect(runAgentTurnSpy).not.toHaveBeenCalled();
+    expect(submitChatMessageSpy).not.toHaveBeenCalled();
+  });
+
   test("computes a diff summary and feeds task content, delimited, to the reviewer turn", async () => {
     const task = makeTask({ goal: "Add the missing empty state." });
 

@@ -313,6 +313,19 @@ export const chats = pgTable(
     turnPolicy: text("turn_policy", { enum: ["steer", "queue"] })
       .notNull()
       .default("steer"),
+    /**
+     * Which agent backend runs this chat's turns.
+     *
+     * A per-chat choice rather than instance-wide config: `"claude-code"` is
+     * today's only backend and stays the default so every existing chat and
+     * insert keeps working unchanged; `"openfx"` is the alternative Section 7
+     * Task 5 wires up to actually run turns through. Recording it on the
+     * chat, not just at submit time, is what lets a chat's turn history stay
+     * attributable to the backend that actually produced it.
+     */
+    backend: text("backend", { enum: ["claude-code", "openfx"] })
+      .notNull()
+      .default("claude-code"),
     activeStreamId: text("active_stream_id"),
     /**
      * Claude Code session id backing this chat.
@@ -668,6 +681,23 @@ export const plugins = pgTable("plugins", {
   grantedCapabilities: jsonb("granted_capabilities")
     .$type<Capability[]>()
     .notNull(),
+  /**
+   * The operator-consented outbound domains, snapshotted from the manifest
+   * at the moment grants are given.
+   *
+   * The plugin host reads THIS column, never the on-disk manifest, when
+   * deciding what `net:fetch` may reach — so a plugin that widens its own
+   * manifest after install (or after being granted `net:fetch`) cannot
+   * widen its own network access that way. `setPluginGrants`
+   * (`lib/db/plugins.ts`) snapshots `manifest.netDomains` here whenever
+   * grants are written; `upsertPlugin` only ever intersects this with the
+   * new manifest's `netDomains` on re-install, the same "never widens" rule
+   * `grantedCapabilities` already follows.
+   */
+  consentedNetDomains: jsonb("consented_net_domains")
+    .$type<string[]>()
+    .notNull()
+    .default([]),
   enabled: boolean("enabled").notNull().default(false),
   installedAt: timestamp("installed_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -723,8 +753,18 @@ export const TASK_STATUSES = [
 ] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-/** Who created a task: a person, the planner, a schedule, or a channel integration. */
-export const TASK_ORIGINS = ["user", "planner", "schedule", "channel"] as const;
+/**
+ * Who created a task: a person, the planner, a schedule, a channel
+ * integration, or the reflection job (Section 4 Task 6) proposing follow-up
+ * work off of session activity.
+ */
+export const TASK_ORIGINS = [
+  "user",
+  "planner",
+  "schedule",
+  "channel",
+  "reflection",
+] as const;
 export type TaskOrigin = (typeof TASK_ORIGINS)[number];
 
 /**
@@ -744,10 +784,19 @@ export const tasks = pgTable(
     organizationId: text("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    /** The session whose repo the task works in. */
-    sessionId: text("session_id")
-      .notNull()
-      .references(() => sessions.id, { onDelete: "cascade" }),
+    /**
+     * The session whose repo the task works in.
+     *
+     * Nullable: a proposal or reflection task (e.g. an org-memory promotion
+     * a non-admin filed, or a follow-up the reflection job proposes) can
+     * belong to no session at all — it names work to consider, not a repo
+     * to act in yet. `startTask` (`lib/tasks/start.ts`) refuses to start a
+     * session-less task, since starting one always means running an
+     * executor turn in some session's worktree.
+     */
+    sessionId: text("session_id").references(() => sessions.id, {
+      onDelete: "cascade",
+    }),
     /** The chat executing it, created when the task is started. */
     chatId: text("chat_id").references(() => chats.id, {
       onDelete: "set null",

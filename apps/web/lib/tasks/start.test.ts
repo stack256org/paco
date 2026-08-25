@@ -273,6 +273,18 @@ describe("startTask", () => {
     expect(createChatMock).not.toHaveBeenCalled();
   });
 
+  test("refuses to start a session-less task", async () => {
+    taskTreeNode = makeNode({ sessionId: null });
+
+    const result = await startTask("org-1", "task-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'Task "task-1" has no session and cannot be started',
+    });
+    expect(createChatMock).not.toHaveBeenCalled();
+  });
+
   test("creates the chat, transitions to running, and submits through the shared message path", async () => {
     const result = await startTask("org-1", "task-1");
 

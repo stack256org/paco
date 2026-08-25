@@ -13,6 +13,7 @@ type Row = {
   contentHash: string;
   manifest: unknown;
   grantedCapabilities: unknown;
+  consentedNetDomains: unknown;
   enabled: boolean;
   installedAt: Date;
   updatedAt: Date;
@@ -57,6 +58,7 @@ function makeRow(partial: Partial<Row>): Row {
     contentHash: partial.contentHash ?? "hash",
     manifest: partial.manifest,
     grantedCapabilities: partial.grantedCapabilities ?? [],
+    consentedNetDomains: partial.consentedNetDomains ?? [],
     enabled: partial.enabled ?? false,
     installedAt: partial.installedAt ?? now,
     updatedAt: partial.updatedAt ?? now,
@@ -416,5 +418,127 @@ describe("removePlugin", () => {
 
     expect(await getPlugin("my-plugin")).toBeUndefined();
     expect(await listPlugins()).toHaveLength(0);
+  });
+});
+
+describe("consentedNetDomains", () => {
+  test("setPluginGrants snapshots manifest.netDomains into consentedNetDomains", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["net:fetch"]),
+      grantedCapabilities: [],
+    });
+
+    // Fresh install: no consent given yet.
+    expect((await getPlugin("my-plugin"))?.consentedNetDomains).toEqual([]);
+
+    await setPluginGrants("my-plugin", ["net:fetch"]);
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.consentedNetDomains).toEqual(["api.example.com"]);
+  });
+
+  test("setPluginGrants snapshots netDomains even when net:fetch is not among the requested grants", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["net:fetch", "events:subscribe"]),
+      grantedCapabilities: [],
+    });
+
+    await setPluginGrants("my-plugin", ["events:subscribe"]);
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.consentedNetDomains).toEqual(["api.example.com"]);
+  });
+
+  test("upsertPlugin on re-install intersects existing consentedNetDomains with the new manifest's netDomains, never widening", async () => {
+    store = [];
+    const manifestV1 = {
+      ...manifestWithCapabilities(["net:fetch"]),
+      netDomains: ["api.example.com", "cdn.example.com"],
+    };
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestV1,
+      grantedCapabilities: [],
+    });
+    await setPluginGrants("my-plugin", ["net:fetch"]);
+
+    const before = await getPlugin("my-plugin");
+    expect(before?.consentedNetDomains).toEqual([
+      "api.example.com",
+      "cdn.example.com",
+    ]);
+
+    // Re-install with a manifest that widens netDomains further: the
+    // widened domain must NOT appear in consentedNetDomains — only
+    // `setPluginGrants` (an explicit operator act) can add to it.
+    const manifestV2 = {
+      ...manifestWithCapabilities(["net:fetch"]),
+      netDomains: ["api.example.com", "cdn.example.com", "new-domain.com"],
+    };
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "2.0.0",
+      contentHash: "hash2",
+      manifest: manifestV2,
+      grantedCapabilities: [],
+    });
+
+    const afterWiden = await getPlugin("my-plugin");
+    expect(afterWiden?.consentedNetDomains).toEqual([
+      "api.example.com",
+      "cdn.example.com",
+    ]);
+
+    // Re-install with a manifest that drops a previously consented domain:
+    // the drop must be reflected (intersection, not carry-forward).
+    const manifestV3 = {
+      ...manifestWithCapabilities(["net:fetch"]),
+      netDomains: ["api.example.com"],
+    };
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "3.0.0",
+      contentHash: "hash3",
+      manifest: manifestV3,
+      grantedCapabilities: [],
+    });
+
+    const afterShrink = await getPlugin("my-plugin");
+    expect(afterShrink?.consentedNetDomains).toEqual(["api.example.com"]);
+  });
+
+  test("an invalid consentedNetDomains value excludes the row from getPlugin/listPlugins", async () => {
+    store = [
+      makeRow({
+        id: "my-plugin",
+        manifest: manifestWithCapabilities(["net:fetch"]),
+        grantedCapabilities: [],
+        consentedNetDomains: [42, "not-a-string"],
+      }),
+    ];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {
+      // silence expected log during the test
+    });
+
+    expect(await getPlugin("my-plugin")).toBeUndefined();
+    expect(await listPlugins()).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 });

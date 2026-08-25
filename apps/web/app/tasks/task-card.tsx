@@ -18,6 +18,7 @@ const ORIGIN_LABEL: Record<TaskOrigin, string> = {
   planner: "Planner",
   schedule: "Schedule",
   channel: "Channel",
+  reflection: "Reflection",
 };
 
 type PendingAction = "start" | "retry" | "unblock" | null;
@@ -77,7 +78,7 @@ export function TaskCard({
         </div>
 
         <div className="flex items-center justify-between gap-2">
-          {task.chatId ? (
+          {task.chatId && task.sessionId ? (
             <Link
               className="link link-hover inline-flex items-center gap-1 text-base-content/60 text-xs"
               href={`/sessions/${task.sessionId}/chats/${task.chatId}`}

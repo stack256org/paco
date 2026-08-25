@@ -73,10 +73,22 @@ function validatePluginRow(row: PluginRow): PluginRow | undefined {
     return;
   }
 
+  const consentedNetDomainsResult = z
+    .array(z.string())
+    .safeParse(row.consentedNetDomains);
+  if (!consentedNetDomainsResult.success) {
+    console.error("plugins: invalid consentedNetDomains, excluding row", {
+      id: row.id,
+      error: consentedNetDomainsResult.error.message,
+    });
+    return;
+  }
+
   return {
     ...row,
     manifest: manifestResult.data,
     grantedCapabilities: grantsResult.data,
+    consentedNetDomains: consentedNetDomainsResult.data,
   };
 }
 
@@ -148,14 +160,30 @@ export async function upsertPlugin(row: NewPluginRow): Promise<void> {
     ]),
   );
 
+  // Same "never widens" rule as `grantedCapabilities`: a re-install can only
+  // ever narrow the consented domain list down to what the new manifest
+  // still declares, never grant a newly-added domain just because the
+  // manifest now asks for it. A fresh install has no prior consent to carry
+  // forward, so it starts empty regardless of what the manifest declares —
+  // only `setPluginGrants` (an explicit operator act) can add to it.
+  const manifestNetDomains = parsedManifest.data.netDomains ?? [];
+  const previousConsentedNetDomains = existing
+    ? (z.array(z.string()).safeParse(existing.consentedNetDomains).data ?? [])
+    : [];
+  const consentedNetDomains = previousConsentedNetDomains.filter((domain) =>
+    manifestNetDomains.includes(domain),
+  );
+
   const updatedAt = new Date();
   if (existing) {
     await db
       .update(plugins)
-      .set({ ...row, grantedCapabilities, updatedAt })
+      .set({ ...row, grantedCapabilities, consentedNetDomains, updatedAt })
       .where(eq(plugins.id, row.id));
   } else {
-    await db.insert(plugins).values({ ...row, grantedCapabilities, updatedAt });
+    await db
+      .insert(plugins)
+      .values({ ...row, grantedCapabilities, consentedNetDomains, updatedAt });
   }
 }
 
@@ -179,6 +207,13 @@ export async function setPluginEnabled(
  * request against anything, so every call throws — including a request for
  * zero grants — rather than treating an unverifiable manifest as declaring
  * nothing and letting an empty request through by vacuous truth.
+ *
+ * Also snapshots `manifest.netDomains` into `consentedNetDomains` on every
+ * call, whether or not `net:fetch` is among the requested grants — this is
+ * the one place operator consent is actually given, so it is the one place
+ * that column is allowed to grow. The plugin host reads `consentedNetDomains`
+ * rather than the manifest at fetch time, so a plugin cannot widen its own
+ * network access by editing its manifest after this snapshot is taken.
  */
 export async function setPluginGrants(
   id: string,
@@ -204,9 +239,15 @@ export async function setPluginGrants(
     throw new PluginGrantEscalationError(id, grants, declared);
   }
 
+  const consentedNetDomains = parsedManifest.data.netDomains ?? [];
+
   await db
     .update(plugins)
-    .set({ grantedCapabilities: grants, updatedAt: new Date() })
+    .set({
+      grantedCapabilities: grants,
+      consentedNetDomains,
+      updatedAt: new Date(),
+    })
     .where(eq(plugins.id, id));
 }
 

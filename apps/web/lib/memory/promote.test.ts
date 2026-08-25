@@ -57,21 +57,11 @@ mock.module("@/lib/org/membership", () => ({
  * both `promote.ts` and the real `createTask` sit on — `@/lib/db/client` —
  * is faked, matching what every other test file in this codebase mocks.
  */
-let recentSessionRows: Array<{ id: string }> = [{ id: "session-1" }];
 type InsertedTaskRow = { id: string } & Record<string, unknown>;
 const insertedTasks: InsertedTaskRow[] = [];
 
 mock.module("@/lib/db/client", () => ({
   db: {
-    select: () => ({
-      from: () => ({
-        where: () => ({
-          orderBy: () => ({
-            limit: () => Promise.resolve(recentSessionRows),
-          }),
-        }),
-      }),
-    }),
     insert: (_table: unknown) => ({
       values: (value: InsertedTaskRow) => ({
         returning: () => {
@@ -100,7 +90,6 @@ beforeEach(async () => {
   organization = { id: "org-1" };
   isAdminFlag = false;
   memberRole = "member";
-  recentSessionRows = [{ id: "session-1" }];
   insertedTasks.length = 0;
 });
 
@@ -192,7 +181,7 @@ describe("promoteMemoryAction", () => {
     const [task] = insertedTasks;
     expect(task).toMatchObject({
       organizationId: "org-1",
-      sessionId: "session-1",
+      sessionId: null,
       title: "Org memory proposal: Deploy convention",
       goal: "Always deploy from main.",
       origin: "user",
@@ -230,14 +219,14 @@ describe("promoteMemoryAction", () => {
     expect(result.ok).toBe(false);
   });
 
-  test("a non-admin member with no session at all cannot file a proposal", async () => {
+  test("a non-admin member with no sessions at all can still propose: the task is filed with no session", async () => {
     isAdminFlag = false;
     memberRole = "member";
-    recentSessionRows = [];
 
     const result = await promoteMemoryAction({ title: "T", body: "B" });
 
-    expect(result.ok).toBe(false);
-    expect(insertedTasks).toHaveLength(0);
+    expect(result.ok).toBe(true);
+    expect(insertedTasks).toHaveLength(1);
+    expect(insertedTasks[0]).toMatchObject({ sessionId: null });
   });
 });

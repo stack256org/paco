@@ -20,6 +20,7 @@ function createChat(
     modelId: "anthropic/claude-haiku-4.5",
     effort: null,
     turnPolicy: "steer",
+    backend: "claude-code",
     activeStreamId: null,
     claudeSessionId: null,
     lastAssistantMessageAt: null,

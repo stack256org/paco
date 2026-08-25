@@ -111,6 +111,12 @@ export async function startTask(
       error: `Task "${taskId}" is not "todo" (currently "${node.status}")`,
     };
   }
+  if (!node.sessionId) {
+    return {
+      ok: false,
+      error: `Task "${taskId}" has no session and cannot be started`,
+    };
+  }
 
   const session = await getSessionById(node.sessionId);
   if (!session) {

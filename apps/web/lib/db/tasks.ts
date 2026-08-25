@@ -42,7 +42,12 @@ const CREATABLE_STATUSES: ReadonlySet<TaskStatus> = new Set([
 
 export type CreateTaskInput = {
   organizationId: string;
-  sessionId: string;
+  /**
+   * Null for a proposal/reflection task that names work to consider rather
+   * than a repo to act in yet — see the column comment on `tasks.sessionId`
+   * (`lib/db/schema.ts`). `startTask` refuses to start such a task.
+   */
+  sessionId: string | null;
   title: string;
   goal: string;
   parentTaskId?: string | null;
