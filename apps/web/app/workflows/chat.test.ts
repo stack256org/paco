@@ -632,6 +632,13 @@ const runDesignTurnSpy = mock(
       status: string;
       error?: string;
     }) => Promise<void>;
+    onChunk: (
+      candidateIndex: number,
+      chunk: Record<string, unknown>,
+    ) => Promise<void>;
+    approval?: { url: string; token: string };
+    chatId?: string;
+    chatBackend?: string;
   }) => {
     const outcomes: TestDesignOutcome[] =
       designTurnOutcomesOverride ??
@@ -654,6 +661,22 @@ const runDesignTurnSpy = mock(
       await params.onProgress({
         candidate: candidate.index,
         status: "running",
+      });
+      // A real candidate turn streams its model output back through
+      // `onChunk`, tagged with its own index — the workflow has to record
+      // that, so the mock has to produce it.
+      await params.onChunk(candidate.index, {
+        type: "text-start",
+        id: `c${candidate.index}`,
+      });
+      await params.onChunk(candidate.index, {
+        type: "text-delta",
+        id: `c${candidate.index}`,
+        delta: `Candidate ${candidate.index} output`,
+      });
+      await params.onChunk(candidate.index, {
+        type: "text-end",
+        id: `c${candidate.index}`,
       });
       await params.onProgress({
         candidate: candidate.index,
@@ -741,6 +764,34 @@ function makeOptions(overrides?: Record<string, unknown>) {
  */
 function disableAutoSave() {
   testPreferences.autoCommitLocal = false;
+}
+
+/** Every session event the workflow appended, flattened into append order. */
+function loggedEvents(): Array<Record<string, unknown>> {
+  return appendSessionEventsSpy.mock.calls.flatMap(
+    ([, events]) => events as Array<Record<string, unknown>>,
+  );
+}
+
+/**
+ * A single-user-message option set whose message id is distinguishable from
+ * everything else in these tests.
+ *
+ * `makeOptions`'s default uses `"user-1"` for BOTH the message id and the
+ * userId, which is exactly the ambiguity the `user/message.messageId` tests
+ * below have to rule out.
+ */
+function makeOptionsWithUserMessage(overrides?: Record<string, unknown>) {
+  return makeOptions({
+    messages: [
+      {
+        id: "user-msg-1",
+        role: "user" as const,
+        parts: [{ type: "text", text: "Hello" }],
+      },
+    ],
+    ...overrides,
+  });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -893,6 +944,88 @@ describe("runAgentWorkflow", () => {
     expect(agentTurnCalls[0]?.options?.memorySection).toBe(
       "## Memory\n\nThe user prefers pnpm.",
     );
+  });
+
+  test("logs the memory section and the roster/skills/mcp servers it injected into the turn", async () => {
+    // Everything below reaches the model — memory through the system prompt,
+    // the rest through the CLI's own flags — and none of it is
+    // reconstructable from `turn/start`, so a replay that doesn't see it
+    // rebuilds a turn the model never had.
+    memorySectionToReturn = "## Memory\n\nThe user prefers pnpm.";
+    resolveChatAgentsResult = {
+      designer: { description: "d", prompt: "p" },
+      reviewer: { description: "r", prompt: "p" },
+    };
+    resolveChatSkillsResult = [
+      {
+        name: "deploy",
+        description: "Ship it",
+        path: "/skills/deploy",
+        filename: "SKILL.md",
+        options: {},
+      },
+    ];
+    resolveChatMcpServersResult = {
+      "plugin-a": { command: "node", args: ["bridge.mjs"], env: {} },
+    };
+
+    await runAgentWorkflow(makeOptions());
+
+    const events = loggedEvents();
+    const turnStart = events.find((event) => event.type === "turn/start");
+    const context = events.find((event) => event.type === "turn/context");
+    expect(context).toBeDefined();
+    expect(context?.turnId).toBe(turnStart?.turnId);
+    expect(context?.memorySection).toBe("## Memory\n\nThe user prefers pnpm.");
+    // Names only: a skill's body is already on disk, and the question the log
+    // has to answer is which ones were attached.
+    expect(context?.agents).toEqual(["designer", "reviewer"]);
+    expect(context?.skills).toEqual(["deploy"]);
+    expect(context?.mcpServers).toEqual(["plugin-a"]);
+  });
+
+  test("logs no turn/context when nothing extra was injected into the turn", async () => {
+    memorySectionToReturn = undefined;
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(loggedEvents().some((event) => event.type === "turn/context")).toBe(
+      false,
+    );
+  });
+
+  test("logs the user's row id on turn/start and user/message, not the assistant's", async () => {
+    await runAgentWorkflow(makeOptionsWithUserMessage());
+
+    const events = loggedEvents();
+    const turnStart = events.find((event) => event.type === "turn/start");
+    const userMessage = events.find((event) => event.type === "user/message");
+
+    expect(userMessage).toMatchObject({
+      messageId: "user-msg-1",
+      text: "Hello",
+    });
+    // "gen-id-1" is the assistant row this turn writes. Naming it here points
+    // anything correlating the logged user message back to `chatMessages` at
+    // the wrong row.
+    expect(userMessage?.messageId).not.toBe("gen-id-1");
+    expect(turnStart?.messageId).toBe("user-msg-1");
+  });
+
+  test("a continuation turn logs the buffered user row, not its own assistant row", async () => {
+    disableAutoSave();
+    testChatRecord.turnPolicy = "queue";
+    bufferSteerMessage("buffered-2", "Follow-up instruction");
+
+    await runAgentWorkflow(makeOptionsWithUserMessage());
+
+    const userMessageIds = loggedEvents()
+      .filter((event) => event.type === "user/message")
+      .map((event) => event.messageId);
+    // The continuation's assistant row does not even exist yet when its
+    // `turn/start` is logged, which is the second reason the assistant id is
+    // the wrong thing to put here.
+    expect(userMessageIds).toEqual(["user-msg-1", "buffered-2"]);
   });
 
   test("omits memorySection from the turn's options when retrieval finds nothing", async () => {
@@ -2196,6 +2329,95 @@ describe("design mode", () => {
     // them to pick a winner from (Task 1's `acceptCandidate` cleans up once
     // one is actually accepted).
     expect(removeCandidatesSpy).not.toHaveBeenCalled();
+  });
+
+  test("logs the design turn to session_events like any other turn", async () => {
+    await runAgentWorkflow(makeOptionsWithUserMessage({ mode: "design" }));
+
+    const events = loggedEvents();
+    const turnStart = events.find((event) => event.type === "turn/start");
+    expect(turnStart).toBeDefined();
+    expect(turnStart).toMatchObject({
+      messageId: "user-msg-1",
+      prompt: "Hello",
+      policy: "steer",
+    });
+    const turnId = turnStart?.turnId;
+    expect(typeof turnId).toBe("string");
+
+    expect(events.find((event) => event.type === "user/message")).toMatchObject(
+      { turnId, messageId: "user-msg-1", text: "Hello" },
+    );
+
+    // One assistant message per candidate, attributable to its index the same
+    // way the `data-design-progress` part ids already are. `assistant/chunk`
+    // carries no discriminator, so N interleaved candidate streams under one
+    // turnId would replay as one garbled message.
+    const candidateMessages = events.filter(
+      (event) => event.type === "assistant/message",
+    );
+    expect(candidateMessages.map((event) => event.messageId)).toEqual([
+      "design-candidate-1",
+      "design-candidate-2",
+      "design-candidate-3",
+    ]);
+    expect(candidateMessages.every((event) => event.turnId === turnId)).toBe(
+      true,
+    );
+    const firstCandidate = candidateMessages[0]?.message as {
+      parts: Array<{ type: string; text?: string }>;
+    };
+    expect(
+      firstCandidate.parts.some(
+        (part) => part.type === "text" && part.text === "Candidate 1 output",
+      ),
+    ).toBe(true);
+
+    expect(events.find((event) => event.type === "turn/end")).toMatchObject({
+      turnId,
+      isError: false,
+      finishReason: "stop",
+    });
+  });
+
+  test("logs a turn that ended with every candidate failed as an errored turn", async () => {
+    designTurnShouldFailAll = true;
+
+    await runAgentWorkflow(makeOptionsWithUserMessage({ mode: "design" }));
+
+    const events = loggedEvents();
+    expect(events.some((event) => event.type === "turn/start")).toBe(true);
+    // The candidates still ran and still produced output; losing the log
+    // because the turn failed is exactly what makes replay lie.
+    expect(
+      events.filter((event) => event.type === "assistant/message"),
+    ).toHaveLength(3);
+    expect(events.find((event) => event.type === "turn/end")).toMatchObject({
+      isError: true,
+      finishReason: "error",
+    });
+  });
+
+  test("gates candidate turns with the approval hook and runs them on the chat's backend", async () => {
+    // A candidate runs with `permissionMode: "bypassPermissions"` and is
+    // driven by arbitrary prompt text, so the PreToolUse gate is the only
+    // thing between it and Write/Edit/Bash. Without a chatId AND an approval
+    // url+token, `run-step.ts` installs no hook at all.
+    testChatRecord.backend = "openfx";
+
+    await runAgentWorkflow(makeOptions({ mode: "design" }));
+
+    const runCall = runDesignTurnSpy.mock.calls[0][0] as {
+      approval?: { url: string; token: string };
+      chatId?: string;
+      chatBackend?: string;
+    };
+    expect(runCall.approval?.url).toContain("/api/internal/approvals");
+    expect(runCall.approval?.token).toBeTruthy();
+    expect(runCall.chatId).toBe("chat-1");
+    // Without this a chat explicitly set to OpenFX silently ran its design
+    // turn on Claude Code.
+    expect(runCall.chatBackend).toBe("openfx");
   });
 
   test("iterating refines the existing candidate instead of recreating them", async () => {

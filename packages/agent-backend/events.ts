@@ -112,6 +112,31 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
     messageId: z.string(),
     text: z.string(),
   }),
+  /*
+   * What this turn's model request carried BEYOND the prompt: the retrieved
+   * memory section (`system-prompt.ts` pushes it straight into the system
+   * prompt) and the subagents, skills and MCP servers actually attached to
+   * the run. Every one of those is model-visible and none of it is
+   * reconstructable from `turn/start`, so without this event a replay
+   * rebuilds a turn the model never actually saw.
+   *
+   * A separate event rather than a field on `turn/start` because the context
+   * is only resolved AFTER the turn has been logged as started — moving
+   * `turn/start` late enough to carry it would mean a turn aborted while its
+   * memory was still loading had no `turn/start` at all.
+   *
+   * `agents`/`skills`/`mcpServers` are NAMES only. A skill's body is tens of
+   * kilobytes and already on disk; what the log has to answer is which ones
+   * were attached, not what they said.
+   */
+  z.object({
+    type: z.literal("turn/context"),
+    turnId: z.string(),
+    memorySection: z.string().optional(),
+    agents: z.array(z.string()).optional(),
+    skills: z.array(z.string()).optional(),
+    mcpServers: z.array(z.string()).optional(),
+  }),
   z.object({
     type: z.literal("assistant/chunk"),
     turnId: z.string(),

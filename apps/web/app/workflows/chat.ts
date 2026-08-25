@@ -9,7 +9,7 @@ import {
   type UIMessageChunk,
 } from "ai";
 import type { ClaudeAgentDefinition, ClaudeRunUsage } from "@paco/claude-code";
-import type { TurnPolicy } from "@paco/agent-backend";
+import type { SessionEvent, TurnPolicy } from "@paco/agent-backend";
 import type { SkillMetadata } from "@paco/sandbox";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
@@ -59,6 +59,7 @@ import {
   sendFinish,
 } from "./chat-post-finish";
 import { dedupeMessageReasoning } from "@/lib/chat/dedupe-message-reasoning";
+import { deriveAssistantMessage } from "@/lib/chat/derive-from-events";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
@@ -497,6 +498,29 @@ async function sendDataPart(
 }
 
 /**
+ * The tool-approval hook's callback URL.
+ *
+ * The hook posts back to this server. It runs on the same machine, so
+ * localhost is right even when the app is reached through another origin.
+ *
+ * The port comes from APP_URL, the one place the port is configured. It used
+ * to be `process.env.PORT ?? "3000"`, which happened to work only because
+ * Next assigns PORT internally after binding — and the default of 3000 was
+ * wrong for this app, which serves 3066. That matters more than it looks: the
+ * approval hook fails *open* on a transport error by design, so a callback
+ * aimed at a closed port would not error loudly. It would silently approve
+ * every tool call.
+ *
+ * One function rather than an expression at each call site because BOTH turn
+ * paths need it: an ordinary turn and a design turn's candidates have to be
+ * gated by the same hook at the same address, or the candidates — which run
+ * `bypassPermissions` on arbitrary prompt text — are gated by nothing.
+ */
+function approvalHookUrl(): string {
+  return `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
+}
+
+/**
  * Run a design turn's N parallel candidate variants, as a workflow step.
  *
  * Everything this needs — the org's roster (for the designer persona), the
@@ -516,10 +540,22 @@ async function sendDataPart(
  * rather than left to propagate: the outer workflow's generic error handler
  * reports "workspace setup failed" style messages meant for provisioning
  * failures, not a design turn's own per-candidate reasons.
+ *
+ * This step also OWNS the design turn's session-event log. It has to: a
+ * design turn returns from the workflow body before `runAgentStep` ever
+ * runs, so nothing else in this file would ever construct a
+ * `TurnEventRecorder` for it — and the workflow body itself runs in a VM
+ * with no database at all, so the recording cannot live there either. Every
+ * append below is inside this `"use step"` body for that reason.
  */
 async function runDesignTurnStep(params: {
   sandboxState: AgentCallOptions["sandbox"]["state"];
   chatId: string;
+  /**
+   * The user's `chatMessages` row for this design request — what
+   * `turn/start`/`user/message` name. See `TurnEventRecorder.start`.
+   */
+  userMessageId: string;
   baseBranch: string;
   count: 2 | 3;
   prompt: string;
@@ -559,6 +595,92 @@ async function runDesignTurnStep(params: {
   const sessionWorkspace = hostWorkspaceFor(params.sandboxState);
 
   /*
+   * Read fresh here rather than threaded in from the workflow body, exactly
+   * as `runAgentStep` does: this step can replay independently under the
+   * durable workflow runtime, and both things taken off the row decide how
+   * the turn actually runs — the policy that is logged with it, and the
+   * BACKEND its candidates run on. Leaving `chatBackend` unset silently ran
+   * a chat explicitly set to OpenFX on Claude Code, because
+   * `normalizeBackendId(undefined)` falls back to claude-code.
+   */
+  const chat = await getChatById(params.chatId);
+  const turnPolicy: TurnPolicy = chat?.turnPolicy ?? "steer";
+
+  const recorder = new TurnEventRecorder(params.chatId, crypto.randomUUID());
+  await recorder.start({
+    messageId: params.userMessageId,
+    prompt: params.prompt,
+    policy: turnPolicy,
+  });
+
+  /*
+   * One candidate's streamed model output, held until that candidate's turn
+   * is over and then logged as a single `assistant/message`.
+   *
+   * The per-chunk route the ordinary turn path uses (`recorder.chunk`) is
+   * not available here: `assistant/chunk` carries no discriminator beyond
+   * `turnId`, and a design turn runs N candidates in parallel under ONE
+   * turn — interleaving their chunks into one turnId would replay as a
+   * single garbled message. `assistant/message.messageId` is the
+   * discriminator instead, set to `design-candidate-<index>` to match the
+   * `data-design-progress` part ids the same candidates already stream to
+   * the client.
+   *
+   * Buffered per candidate and flushed the moment that candidate reaches a
+   * terminal status, so at most the candidates still running are held in
+   * memory rather than all N until the whole turn ends.
+   */
+  const candidateChunks = new Map<number, UIMessageChunk[]>();
+
+  const logCandidateOutput = async (index: number): Promise<void> => {
+    const chunks = candidateChunks.get(index);
+    candidateChunks.delete(index);
+    if (!chunks || chunks.length === 0) {
+      return;
+    }
+    const turnId = recorder.getTurnId();
+    // Projected through the same "chunks → message" machinery replay uses,
+    // so what is logged for a candidate is what a reader would rebuild.
+    const message = await deriveAssistantMessage(
+      chunks.map((chunk): SessionEvent => ({
+        type: "assistant/chunk",
+        turnId,
+        chunk,
+      })),
+      turnId,
+      `design-candidate-${index}`,
+    );
+    if (message) {
+      await recorder.assistantMessage({
+        messageId: `design-candidate-${index}`,
+        message,
+      });
+    }
+  };
+
+  /**
+   * Close the turn's log.
+   *
+   * Called on every exit — success, every-candidate-failed, and the throwing
+   * paths — so a design turn never leaves a `turn/start` with no `turn/end`.
+   * The remaining flush is a backstop for candidates whose terminal progress
+   * never arrived because something threw first: their model output already
+   * happened, so dropping it would make replay lie about the turn.
+   */
+  const endTurn = async (isError: boolean): Promise<void> => {
+    // `logCandidateOutput` deletes the key it just flushed. Map iterators
+    // are live and tolerate that: an entry removed after it has been visited
+    // is simply gone, and nothing is skipped.
+    for (const index of candidateChunks.keys()) {
+      await logCandidateOutput(index);
+    }
+    await recorder.finish({
+      finishReason: isError ? "error" : "stop",
+      isError,
+    });
+  };
+
+  /*
    * `removeCandidates` (Task 1) is otherwise only ever reached from
    * `acceptCandidate` — the "user picked a winner" path. None of the plan's
    * three cleanup paths (accept, cancel, chat deletion) covers a design turn
@@ -588,33 +710,6 @@ async function runDesignTurnStep(params: {
     }
   };
 
-  let candidates: Awaited<ReturnType<typeof createCandidates>>;
-  if (params.iterateCandidate) {
-    const existing = await resolveCandidate({
-      sessionWorkspace,
-      chatId: params.chatId,
-      index: params.iterateCandidate,
-    });
-    if (!existing) {
-      throw new Error(
-        `Design candidate ${params.iterateCandidate} is no longer there to refine. Its worktree has been removed — start a new design turn.`,
-      );
-    }
-    candidates = [existing];
-  } else {
-    try {
-      candidates = await createCandidates({
-        sessionWorkspace,
-        chatId: params.chatId,
-        baseBranch: params.baseBranch,
-        count: params.count,
-      });
-    } catch (error) {
-      await cleanupOrphanedCandidates();
-      throw error;
-    }
-  }
-
   const onProgress = async (progress: DesignProgress) => {
     const writer = params.writable.getWriter();
     try {
@@ -626,24 +721,84 @@ async function runDesignTurnStep(params: {
     } finally {
       writer.releaseLock();
     }
+    // A terminal status means that candidate's turn is over and nothing more
+    // will be streamed for it, so its output can be logged and released.
+    if (progress.status === "completed" || progress.status === "failed") {
+      await logCandidateOutput(progress.candidate);
+    }
   };
 
   try {
-    const { outcomes } = await runDesignTurn({
-      candidates,
-      prompt: params.prompt,
-      agentOptions: params.agentOptions,
-      designerAgent,
-      framing: params.iterateCandidate ? "iteration" : "initial",
-      onProgress,
-      onChunk: () => Promise.resolve(),
-    });
-    return { outcomes, allFailed: false };
-  } catch (error) {
-    await cleanupOrphanedCandidates();
-    if (error instanceof DesignTurnAllFailedError) {
-      return { outcomes: error.outcomes, allFailed: true };
+    let candidates: Awaited<ReturnType<typeof createCandidates>>;
+    if (params.iterateCandidate) {
+      const existing = await resolveCandidate({
+        sessionWorkspace,
+        chatId: params.chatId,
+        index: params.iterateCandidate,
+      });
+      if (!existing) {
+        throw new Error(
+          `Design candidate ${params.iterateCandidate} is no longer there to refine. Its worktree has been removed — start a new design turn.`,
+        );
+      }
+      candidates = [existing];
+    } else {
+      try {
+        candidates = await createCandidates({
+          sessionWorkspace,
+          chatId: params.chatId,
+          baseBranch: params.baseBranch,
+          count: params.count,
+        });
+      } catch (error) {
+        await cleanupOrphanedCandidates();
+        throw error;
+      }
     }
+
+    try {
+      const { outcomes } = await runDesignTurn({
+        candidates,
+        prompt: params.prompt,
+        agentOptions: params.agentOptions,
+        designerAgent,
+        framing: params.iterateCandidate ? "iteration" : "initial",
+        onProgress,
+        onChunk: (candidateIndex, chunk) => {
+          const existing = candidateChunks.get(candidateIndex);
+          if (existing) {
+            existing.push(chunk);
+          } else {
+            candidateChunks.set(candidateIndex, [chunk]);
+          }
+          return Promise.resolve();
+        },
+        /*
+         * A candidate runs with `permissionMode: "bypassPermissions"` and is
+         * driven by arbitrary user prompt text, so the `PreToolUse` hook is
+         * the only thing standing between it and Write/Edit/Bash.
+         * `run-step.ts` installs that hook only when BOTH `approval` and
+         * `chatId` reach it — passing neither, as this call used to, left a
+         * design candidate with no tool gate at all. These are the identical
+         * values the ordinary turn path passes, so a candidate is gated
+         * exactly like any other turn.
+         */
+        approval: { url: approvalHookUrl(), token: approvalToken() },
+        chatId: params.chatId,
+        chatBackend: chat?.backend,
+      });
+      await endTurn(false);
+      return { outcomes, allFailed: false };
+    } catch (error) {
+      await cleanupOrphanedCandidates();
+      if (error instanceof DesignTurnAllFailedError) {
+        await endTurn(true);
+        return { outcomes: error.outcomes, allFailed: true };
+      }
+      throw error;
+    }
+  } catch (error) {
+    await endTurn(true);
     throw error;
   }
 }
@@ -872,6 +1027,8 @@ export async function runAgentWorkflow(options: Options) {
       const designResult = await runDesignTurnStep({
         sandboxState: runtime.sandboxState,
         chatId: options.chatId,
+        userMessageId:
+          extractLatestUserMessageId(options.messages) ?? assistantId,
         baseBranch: runtime.currentBranch,
         count: requestedCandidateCount,
         prompt: extractLatestUserText(options.messages),
@@ -948,6 +1105,7 @@ export async function runAgentWorkflow(options: Options) {
       prompt: string,
       stepNumber: number,
       turnAssistantId: string,
+      turnUserMessageId: string | undefined,
       turnOriginalMessages: WebAgentUIMessage[],
       turnCheckpoint: { sha: string; dirty: boolean } | null,
     ) => {
@@ -959,6 +1117,7 @@ export async function runAgentWorkflow(options: Options) {
           prompt,
           turnOriginalMessages,
           turnAssistantId,
+          turnUserMessageId,
           writable,
           workflowRunId,
           options.chatId,
@@ -1028,6 +1187,7 @@ export async function runAgentWorkflow(options: Options) {
       extractLatestUserText(options.messages),
       1,
       assistantId,
+      extractLatestUserMessageId(options.messages),
       originalMessagesForStep,
       checkpoint,
     );
@@ -1100,6 +1260,7 @@ export async function runAgentWorkflow(options: Options) {
         next.text,
         nextStepNumber,
         continuationAssistantId,
+        next.messageId,
         continuationOriginalMessages,
         continuationCheckpoint,
       );
@@ -1375,6 +1536,20 @@ export async function runAgentWorkflow(options: Options) {
  *
  * Claude Code holds the rest of the history itself, so only this text is sent.
  */
+/**
+ * The `chatMessages` row id of the newest user turn.
+ *
+ * The counterpart to `extractLatestUserText`, and read off the same message:
+ * `turn/start`/`user/message` name the USER's row (see
+ * `TurnEventRecorder.start`), which is a different id from the assistant row
+ * the turn goes on to write.
+ */
+function extractLatestUserMessageId(
+  messages: WebAgentUIMessage[],
+): string | undefined {
+  return messages.findLast((message) => message.role === "user")?.id;
+}
+
 function extractLatestUserText(messages: WebAgentUIMessage[]): string {
   const lastUser = messages.findLast((message) => message.role === "user");
   if (!lastUser) {
@@ -1415,6 +1590,12 @@ const runAgentStep = async (
   prompt: string,
   originalMessages: WebAgentUIMessage[],
   messageId: string,
+  /**
+   * The `chatMessages` row this turn's `prompt` came from — the USER's row,
+   * not `messageId` (the assistant row this turn will write). `turn/start`
+   * and `user/message` both name it; see `TurnEventRecorder.start`.
+   */
+  userMessageId: string | undefined,
   writable: Writable,
   workflowRunId: string,
   chatId: string,
@@ -1521,22 +1702,15 @@ const runAgentStep = async (
     // column exists to keep it out of.
     const githubToken = await getGithubToken(userId);
 
-    /*
-     * The hook posts back to this server. It runs on the same machine, so
-     * localhost is right even when the app is reached through another origin.
-     *
-     * The port comes from APP_URL, the one place the port is
-     * configured. It used to be `process.env.PORT ?? "3000"`, which happened to
-     * work only because Next assigns PORT internally after binding — and the
-     * default of 3000 was wrong for this app, which serves 3066. That matters
-     * more than it looks: the approval hook fails *open* on a transport error
-     * by design, so a callback aimed at a closed port would not error loudly.
-     * It would silently approve every tool call.
-     */
-    const approvalUrl = `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
-
     recorder = new TurnEventRecorder(chatId, crypto.randomUUID());
-    await recorder.start({ messageId, prompt, policy: turnPolicy });
+    // Falls back to the assistant row only in the degenerate case of a run
+    // whose message list holds no user message at all — where `prompt` is
+    // empty too, so there is nothing to correlate either way.
+    await recorder.start({
+      messageId: userMessageId ?? messageId,
+      prompt,
+      policy: turnPolicy,
+    });
     recorder.assertPromptLogged(prompt);
 
     /*
@@ -1634,6 +1808,30 @@ const runAgentStep = async (
       );
     }
 
+    /*
+     * Everything resolved above is model-visible and none of it is
+     * reconstructable from `turn/start`: `memorySection` goes straight into
+     * the system prompt (`system-prompt.ts`), and the agents/skills/MCP
+     * servers reach the CLI as its own flags. Logged here, after resolution
+     * and before dispatch, so replaying the log rebuilds the turn the model
+     * actually saw rather than one missing its retrieved memory.
+     *
+     * Proportionate on purpose: the memory section is stored verbatim
+     * because it IS what the model read, while the other three are recorded
+     * as names — a skill's body is already on disk, and what the log has to
+     * answer is which ones were attached.
+     */
+    await recorder.context({
+      ...(memorySection !== undefined ? { memorySection } : {}),
+      ...(resolvedAgents ? { agents: Object.keys(resolvedAgents) } : {}),
+      ...(resolvedSkills
+        ? { skills: resolvedSkills.map((skill) => skill.name) }
+        : {}),
+      ...(resolvedMcpServers
+        ? { mcpServers: Object.keys(resolvedMcpServers) }
+        : {}),
+    });
+
     const step = await runAgentTurn<WebAgentUIMessage>({
       prompt,
       options: {
@@ -1656,7 +1854,7 @@ const runAgentStep = async (
       // means this turn runs on whichever backend the chat is actually set
       // to, resolved via `resolveBackend` (`backend-factory.ts`).
       chatBackend: chat?.backend,
-      approval: { url: approvalUrl, token: approvalToken() },
+      approval: { url: approvalHookUrl(), token: approvalToken() },
       abortSignal: abortController.signal,
       ...(steerController ? { steerController } : {}),
       onChunk: async (chunk) => {

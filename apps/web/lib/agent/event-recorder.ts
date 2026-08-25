@@ -80,6 +80,22 @@ export class TurnEventRecorder {
     return this.appendChain;
   }
 
+  /**
+   * Log the turn's opening pair: `turn/start` and `user/message`.
+   *
+   * `messageId` is the USER's `chatMessages` row — the row that holds
+   * `prompt` — for BOTH events, not the assistant row the turn will
+   * eventually write. `turn/start` carries the prompt, so the id beside it
+   * names the message that IS that prompt; `lib/evals/runner.ts` already
+   * correlates `turn/start.messageId` against the user message id it
+   * submitted. The assistant row is the wrong answer for a second reason:
+   * on the continuation path it does not exist yet when this runs, so the
+   * event would name a row that is not there.
+   *
+   * The assistant side is not lost by this: a turn's assistant output is
+   * keyed by `turnId` (`assistant/chunk`, `usage/reported`, `turn/end`) and
+   * `deriveAssistantMessage` stamps whichever message id its caller wants.
+   */
   async start(params: {
     messageId: string;
     prompt: string;
@@ -113,6 +129,67 @@ export class TurnEventRecorder {
         "session-events invariant violated: the dispatched prompt differs from the logged user/message",
       );
     }
+  }
+
+  /**
+   * Log the model-visible context this turn was dispatched with beyond its
+   * prompt — see `turn/context` in `packages/agent-backend/events.ts`.
+   *
+   * A no-op when nothing was injected, so a turn that retrieved no memory
+   * and attached no agents/skills/MCP servers doesn't add an empty row.
+   */
+  async context(params: {
+    memorySection?: string;
+    agents?: string[];
+    skills?: string[];
+    mcpServers?: string[];
+  }): Promise<void> {
+    const hasAny =
+      params.memorySection !== undefined ||
+      (params.agents?.length ?? 0) > 0 ||
+      (params.skills?.length ?? 0) > 0 ||
+      (params.mcpServers?.length ?? 0) > 0;
+    if (!hasAny) {
+      return;
+    }
+    await this.enqueue([
+      {
+        type: "turn/context",
+        turnId: this.turnId,
+        ...(params.memorySection !== undefined
+          ? { memorySection: params.memorySection }
+          : {}),
+        ...(params.agents?.length ? { agents: params.agents } : {}),
+        ...(params.skills?.length ? { skills: params.skills } : {}),
+        ...(params.mcpServers?.length ? { mcpServers: params.mcpServers } : {}),
+      },
+    ]);
+  }
+
+  /**
+   * Log one complete assistant message for this turn.
+   *
+   * The chunk route (`chunk()`) is what a single streaming turn uses, and
+   * the projection prefers it. This exists for a turn that fans out into
+   * SEVERAL model runs at once — a design turn's N parallel candidates —
+   * where `assistant/chunk` cannot be used: it carries no discriminator, so
+   * N interleaved streams under one `turnId` would replay as one garbled
+   * message. `messageId` is the discriminator instead, and design turns set
+   * it to `design-candidate-<index>` to match the `data-design-progress`
+   * part ids the same candidates stream to the client.
+   */
+  async assistantMessage(params: {
+    messageId: string;
+    message: unknown;
+  }): Promise<void> {
+    await this.enqueue([
+      {
+        type: "assistant/message",
+        turnId: this.turnId,
+        messageId: params.messageId,
+        message: params.message,
+      },
+    ]);
   }
 
   chunk(chunk: unknown): void {
