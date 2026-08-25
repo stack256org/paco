@@ -45,10 +45,14 @@ const CORRECT_SECRET = "correct-secret-value";
 function makeRequest(options: {
   secret?: string | null;
   body?: string;
+  ip?: string;
 }): Request {
   const headers = new Headers({ "content-type": "application/json" });
   if (options.secret !== null) {
     headers.set("x-paco-channel-secret", options.secret ?? CORRECT_SECRET);
+  }
+  if (options.ip) {
+    headers.set("x-forwarded-for", options.ip);
   }
   // The route reads pluginId/channel exclusively from `params`, never from
   // the URL, so every test can share one URL and vary only what matters.
@@ -287,11 +291,83 @@ describe("POST /api/channels/[pluginId]/[channel]", () => {
     let last: Response | undefined;
     for (let i = 0; i < 61; i++) {
       last = await POST(
-        makeRequest({}),
+        makeRequest({ ip: "203.0.113.10" }),
         paramsFor("rate-limited-plugin", "events"),
       );
     }
 
     expect(last?.status).toBe(429);
+  });
+
+  test("two different source IPs hammering the same plugin+channel do not starve each other", async () => {
+    pluginRow = undefined;
+    registry = new Map();
+
+    // An attacker at one IP burns the (plugin, channel) bucket...
+    let attackerLast: Response | undefined;
+    for (let i = 0; i < 61; i++) {
+      attackerLast = await POST(
+        makeRequest({ ip: "203.0.113.20" }),
+        paramsFor("shared-plugin", "events"),
+      );
+    }
+    expect(attackerLast?.status).toBe(429);
+
+    // ...but a different source IP hitting the exact same plugin+channel is
+    // unaffected — it still reaches the (mocked) unknown-plugin 404, not a
+    // 429 inherited from the attacker's bucket.
+    const legitimate = await POST(
+      makeRequest({ ip: "203.0.113.21" }),
+      paramsFor("shared-plugin", "events"),
+    );
+    expect(legitimate.status).not.toBe(429);
+  });
+
+  test("one source IP is bounded in aggregate across many enumerated plugin ids", async () => {
+    pluginRow = undefined;
+    registry = new Map();
+    const ip = "203.0.113.30";
+
+    let last: Response | undefined;
+    for (let i = 0; i < 301; i++) {
+      // A distinct plugin id on every call, so the per-(plugin, channel, IP)
+      // bucket (limit 60) never trips — only the per-IP bucket (limit 300),
+      // across every id this source has tried, can explain a 429 here.
+      last = await POST(
+        makeRequest({ ip }),
+        paramsFor(`enumerated-plugin-${i}`, "events"),
+      );
+    }
+
+    expect(last?.status).toBe(429);
+  });
+
+  test("413s a body larger than the cap, without reaching the worker", async () => {
+    pluginRow = {
+      id: "big-body-plugin",
+      ingressSecret: seal(CORRECT_SECRET),
+    };
+    let deliverCalled = false;
+    registry = new Map([
+      [
+        "big-body-plugin",
+        {
+          state: "running",
+          deliverIngress: () => {
+            deliverCalled = true;
+            return Promise.resolve({ ok: true, status: 200, body: {} });
+          },
+        },
+      ],
+    ]);
+
+    const oversizedBody = "x".repeat(1_048_577);
+    const response = await POST(
+      makeRequest({ body: oversizedBody, ip: "203.0.113.40" }),
+      paramsFor("big-body-plugin", "events"),
+    );
+
+    expect(response.status).toBe(413);
+    expect(deliverCalled).toBe(false);
   });
 });
