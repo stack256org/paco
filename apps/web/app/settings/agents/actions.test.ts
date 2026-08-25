@@ -475,6 +475,52 @@ describe("listRosterAgents", () => {
     expect(rows[0]?.valid).toBe(false);
   });
 
+  /*
+   * A chat turn's roster read (`getRoster`) seeds `DEFAULT_ROSTER` lazily
+   * when an organisation has no rows at all, so a fresh org's chats already
+   * run explorer/executor/reviewer/designer. This list did not, so the
+   * Agents page showed "no agents" for a roster that demonstrably existed —
+   * and the first edit made from that empty page would have been the seed.
+   */
+  test("seeds the default roster for an organisation that has no rows yet", async () => {
+    store = [];
+
+    const rows = await listRosterAgents();
+
+    expect(rows.map((row) => row.name)).toEqual([
+      "designer",
+      "executor",
+      "explorer",
+      "reviewer",
+    ]);
+    expect(rows.every((row) => row.builtin)).toBe(true);
+    expect(rows.every((row) => row.enabled)).toBe(true);
+  });
+
+  test("does not re-seed an organisation that already has a row", async () => {
+    store = [makeRow({ name: "custom-agent", definition: VALID_DEFINITION })];
+
+    const rows = await listRosterAgents();
+
+    expect(rows.map((row) => row.name)).toEqual(["custom-agent"]);
+  });
+
+  test("seeds only the empty organisation, not one that has rows elsewhere", async () => {
+    // Another org's rows must not count as "this org is already seeded".
+    store = [
+      makeRow({
+        organizationId: "org-2",
+        name: "not-mine",
+        definition: VALID_DEFINITION,
+      }),
+    ];
+
+    const rows = await listRosterAgents();
+
+    expect(rows).toHaveLength(4);
+    expect(rows.every((row) => row.name !== "not-mine")).toBe(true);
+  });
+
   test("scopes to the current organisation only", async () => {
     store = [
       makeRow({

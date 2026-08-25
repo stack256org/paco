@@ -57,6 +57,44 @@ export const DEFAULT_ROSTER: Record<string, ClaudeAgentDefinition> = {
 };
 
 /**
+ * Every roster row for one organisation, seeding `DEFAULT_ROSTER` first if
+ * the organisation has none at all.
+ *
+ * The single lazy-seeding read, shared by both readers, because the two used
+ * to disagree: a chat turn's `getRoster` seeded, while the Agents settings
+ * page ran its own bare `select` and did not — so a fresh organisation was
+ * shown an empty roster on the page while its chats were already running the
+ * four seeded defaults. Two read paths with one seeding rule between them is
+ * the arrangement that keeps them agreeing.
+ *
+ * "None at all" is scoped to this organisation: another org's rows never
+ * count as this one already being seeded.
+ *
+ * Safe under concurrent callers: two reads racing on an empty org both call
+ * `seedDefaultRoster`, which resolves the collision through the database's
+ * unique index rather than throwing (see there), so both re-reads see the
+ * seeded rows.
+ */
+export async function listRosterRows(
+  organizationId: string,
+): Promise<(typeof rosterAgents.$inferSelect)[]> {
+  const rows = await db
+    .select()
+    .from(rosterAgents)
+    .where(eq(rosterAgents.organizationId, organizationId));
+
+  if (rows.length > 0) {
+    return rows;
+  }
+
+  await seedDefaultRoster(organizationId);
+  return await db
+    .select()
+    .from(rosterAgents)
+    .where(eq(rosterAgents.organizationId, organizationId));
+}
+
+/**
  * An organisation's enabled, valid roster, ready to pass as `--agents`.
  *
  * Every row is re-validated on read, not just on write — the column is
@@ -66,28 +104,14 @@ export const DEFAULT_ROSTER: Record<string, ClaudeAgentDefinition> = {
  * never turn into a fatal error for every turn in the organisation (roster
  * safety invariant).
  *
- * Seeds lazily when the organisation has zero rows, so an existing dev
- * database — created before this table existed — gets a working roster on
- * first read instead of an empty one. Safe under concurrent callers: two
- * `getRoster` calls racing on an empty org both call `seedDefaultRoster`,
- * which resolves the collision through the database's unique index rather
- * than throwing (see there), so both re-reads see the seeded rows.
+ * Seeds lazily through `listRosterRows`, so an existing dev database —
+ * created before this table existed — gets a working roster on first read
+ * instead of an empty one.
  */
 export async function getRoster(
   organizationId: string,
 ): Promise<Record<string, ClaudeAgentDefinition>> {
-  let rows = await db
-    .select()
-    .from(rosterAgents)
-    .where(eq(rosterAgents.organizationId, organizationId));
-
-  if (rows.length === 0) {
-    await seedDefaultRoster(organizationId);
-    rows = await db
-      .select()
-      .from(rosterAgents)
-      .where(eq(rosterAgents.organizationId, organizationId));
-  }
+  const rows = await listRosterRows(organizationId);
 
   const roster: Record<string, ClaudeAgentDefinition> = {};
   for (const row of rows) {

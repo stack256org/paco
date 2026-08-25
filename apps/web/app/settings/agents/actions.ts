@@ -1,6 +1,5 @@
 "use server";
 
-import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import {
   agentDefinitionSchema,
@@ -10,6 +9,7 @@ import { requireAdmin } from "@/lib/admin/require-admin";
 import { db } from "@/lib/db/client";
 import {
   deleteRosterAgent,
+  listRosterRows,
   renameRosterAgent,
   setRosterAgentEnabled,
   upsertRosterAgent,
@@ -76,15 +76,17 @@ async function requireOrganization() {
  * Unlike `getRoster` (the read path a chat turn uses), this never filters
  * out a disabled row or an invalid one: the whole point of this list is for
  * an admin to see and fix what a running turn would otherwise silently skip.
+ *
+ * It does share `getRoster`'s lazy seed, via `listRosterRows`, and it has to:
+ * this ran its own bare `select` before, so a fresh organisation saw an empty
+ * Agents page while its chats were already running the four seeded defaults —
+ * the roster looked unconfigured and was not.
  */
 export async function listRosterAgents(): Promise<RosterAgentRow[]> {
   await requireAdmin();
   const organization = await requireOrganization();
 
-  const rows = await db
-    .select()
-    .from(rosterAgents)
-    .where(eq(rosterAgents.organizationId, organization.id));
+  const rows = await listRosterRows(organization.id);
 
   return rows.map(toRow).sort((a, b) => a.name.localeCompare(b.name));
 }
