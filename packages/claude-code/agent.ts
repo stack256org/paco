@@ -71,6 +71,13 @@ export function streamClaudeAgent(
       isResultMessage(first.value) &&
       isMissingSessionResult(first.value)
     ) {
+      // Close the failed run's iterator before abandoning it for the retry.
+      // Without this it stays suspended forever: nothing else will ever call
+      // `.next()` on it, so run.ts's own `finally` (closing `rl`, removing
+      // its `onAbort` listener from the shared `signal`) never runs, and that
+      // stale listener lives on for the rest of the turn. A no-op once the
+      // run has already finished on its own.
+      await iterator.return?.();
       const { resume: _dropped, ...withoutResume } = options;
       run = runClaudeCode(prompt, withoutResume, signal);
       iterator = run.messages[Symbol.asyncIterator]();
