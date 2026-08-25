@@ -104,6 +104,29 @@ export async function getTask(
   return row;
 }
 
+/**
+ * Finds the `running` task that owns a chat, if any.
+ *
+ * Not organization-scoped: the caller here is a post-turn workflow step that
+ * only has the chat id in hand (see `runTaskCompletionStep` in
+ * `app/workflows/chat-post-finish.ts`) — a chat id is not attacker-supplied
+ * the way a task id from a request body would be, and a task's `chatId` is
+ * only ever set to a chat that task itself created (`startTask`), so there is
+ * no cross-organization ambiguity to guard against. Scoped to `running`
+ * because that is the only status a chat's own turn should ever be able to
+ * move on: a chat whose task already finished (`done`/`blocked`/`failed`)
+ * must not have a stray later turn re-drive the task board.
+ */
+export async function getTaskByChatId(
+  chatId: string,
+): Promise<Task | undefined> {
+  const [row] = await db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.chatId, chatId), eq(tasks.status, "running")));
+  return row;
+}
+
 export type ListTasksOptions = {
   status?: TaskStatus;
   sessionId?: string;

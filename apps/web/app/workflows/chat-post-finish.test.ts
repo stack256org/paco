@@ -109,6 +109,27 @@ mock.module("@/lib/memory/distill", () => ({
   distillTurn: distillTurnSpy,
 }));
 
+let taskByChatIdResult: unknown;
+const getTaskByChatIdSpy = mock(() => Promise.resolve(taskByChatIdResult));
+const transitionTaskStatusSpy = mock(() => Promise.resolve({}));
+
+mock.module("@/lib/db/tasks", () => ({
+  getTaskByChatId: getTaskByChatIdSpy,
+  transitionTaskStatus: transitionTaskStatusSpy,
+}));
+
+let reviewerGateResult: Promise<string> | Error = Promise.resolve("pass");
+const runReviewerGateSpy = mock(() => {
+  if (reviewerGateResult instanceof Error) {
+    return Promise.reject(reviewerGateResult);
+  }
+  return reviewerGateResult;
+});
+
+mock.module("@/lib/tasks/reviewer-gate", () => ({
+  runReviewerGate: runReviewerGateSpy,
+}));
+
 const {
   persistUserMessage,
   persistAssistantMessage,
@@ -120,6 +141,7 @@ const {
   runAutoCommitStep,
   runAutoCreatePrStep,
   distillTurnMemoryStep,
+  runTaskCompletionStep,
 } = await import("./chat-post-finish");
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -159,6 +181,11 @@ beforeEach(() => {
   upsertChatMessageScopedResult = { status: "inserted" };
   distillTurnSpy.mockClear();
   distillTurnResult = Promise.resolve();
+  getTaskByChatIdSpy.mockClear();
+  transitionTaskStatusSpy.mockClear();
+  runReviewerGateSpy.mockClear();
+  taskByChatIdResult = undefined;
+  reviewerGateResult = Promise.resolve("pass");
 });
 
 // ─── persistUserMessage ────────────────────────────────────────────
@@ -615,5 +642,94 @@ describe("distillTurnMemoryStep", () => {
     }
 
     expect(fakeSetTimeout).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── runTaskCompletionStep ─────────────────────────────────────────
+
+describe("runTaskCompletionStep", () => {
+  test("leaves a chat with no task untouched", async () => {
+    taskByChatIdResult = undefined;
+
+    await runTaskCompletionStep({
+      chatId: "chat-1",
+      isError: false,
+      finishReason: "stop",
+    });
+
+    expect(getTaskByChatIdSpy).toHaveBeenCalledWith("chat-1");
+    expect(transitionTaskStatusSpy).not.toHaveBeenCalled();
+    expect(runReviewerGateSpy).not.toHaveBeenCalled();
+  });
+
+  test("fails the task outright when the turn errored", async () => {
+    taskByChatIdResult = {
+      id: "task-1",
+      organizationId: "org-1",
+      status: "running",
+    };
+
+    await runTaskCompletionStep({
+      chatId: "chat-1",
+      isError: true,
+      finishReason: "error: the model refused",
+    });
+
+    expect(transitionTaskStatusSpy).toHaveBeenCalledWith(
+      "org-1",
+      "task-1",
+      "failed",
+      { resultSummary: "error: the model refused" },
+    );
+    expect(runReviewerGateSpy).not.toHaveBeenCalled();
+  });
+
+  test("routes a clean finish through the reviewer gate", async () => {
+    const task = {
+      id: "task-1",
+      organizationId: "org-1",
+      status: "running",
+    };
+    taskByChatIdResult = task;
+
+    await runTaskCompletionStep({
+      chatId: "chat-1",
+      isError: false,
+      finishReason: "stop",
+    });
+
+    expect(runReviewerGateSpy).toHaveBeenCalledWith(task, "chat-1");
+    expect(transitionTaskStatusSpy).not.toHaveBeenCalled();
+  });
+
+  test("does not throw when the reviewer gate rejects", async () => {
+    taskByChatIdResult = {
+      id: "task-1",
+      organizationId: "org-1",
+      status: "running",
+    };
+    reviewerGateResult = new Error("reviewer gate exploded");
+
+    await expect(
+      runTaskCompletionStep({
+        chatId: "chat-1",
+        isError: false,
+        finishReason: "stop",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("does not throw when the lookup itself fails", async () => {
+    getTaskByChatIdSpy.mockImplementationOnce(() =>
+      Promise.reject(new Error("DB down")),
+    );
+
+    await expect(
+      runTaskCompletionStep({
+        chatId: "chat-1",
+        isError: false,
+        finishReason: "stop",
+      }),
+    ).resolves.toBeUndefined();
   });
 });

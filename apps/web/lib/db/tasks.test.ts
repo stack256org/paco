@@ -141,6 +141,7 @@ const {
   TaskTransitionError,
   createTask,
   getTask,
+  getTaskByChatId,
   listTasks,
   taskTree,
   transitionTaskStatus,
@@ -229,6 +230,47 @@ describe("getTask", () => {
 
     expect(await getTask("org-1", task.id)).toBeDefined();
     expect(await getTask("org-2", task.id)).toBeUndefined();
+  });
+});
+
+describe("getTaskByChatId", () => {
+  test("finds the running task that owns a chat", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+    await transitionTaskStatus("org-1", task.id, "running", {
+      chatId: "chat-1",
+    });
+
+    const found = await getTaskByChatId("chat-1");
+    expect(found?.id).toBe(task.id);
+    expect(found?.status).toBe("running");
+  });
+
+  test("returns undefined for a chat with no running task", async () => {
+    store = [];
+    expect(await getTaskByChatId("chat-missing")).toBeUndefined();
+  });
+
+  test("ignores a chat whose task already finished", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+    await transitionTaskStatus("org-1", task.id, "running", {
+      chatId: "chat-2",
+    });
+    await transitionTaskStatus("org-1", task.id, "review");
+    await transitionTaskStatus("org-1", task.id, "done");
+
+    expect(await getTaskByChatId("chat-2")).toBeUndefined();
   });
 });
 

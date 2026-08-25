@@ -681,6 +681,49 @@ const DISTILL_TIMEOUT_MS = 90_000;
  * awaits a callee must not depend on that callee's contract holding forever,
  * and a hung CLI process would otherwise wedge this step indefinitely.
  */
+/**
+ * Task completion + the reviewer gate.
+ *
+ * Runs after a turn finishes for whichever chat it belongs to. Most chats
+ * belong to no task at all — `getTaskByChatId` returns nothing and this is a
+ * no-op — so ordinary chat usage is unaffected. For a chat that does own a
+ * `running` task: an errored turn fails the task outright (there is nothing
+ * to review); a clean turn hands off to `runReviewerGate`, which applies the
+ * reviewer's verdict (or auto-approves when no reviewer is configured) and
+ * moves the task on the state machine in `lib/tasks/state.ts`.
+ *
+ * Never throws: a task-board bookkeeping failure must not take down the
+ * chat turn that triggered it, the same invariant every other step in this
+ * file follows for its own side effect.
+ */
+export async function runTaskCompletionStep(params: {
+  chatId: string;
+  isError: boolean;
+  finishReason: string;
+}): Promise<void> {
+  "use step";
+  try {
+    const { getTaskByChatId, transitionTaskStatus } =
+      await import("@/lib/db/tasks");
+    const task = await getTaskByChatId(params.chatId);
+    if (!task) {
+      return;
+    }
+
+    if (params.isError) {
+      await transitionTaskStatus(task.organizationId, task.id, "failed", {
+        resultSummary: params.finishReason,
+      });
+      return;
+    }
+
+    const { runReviewerGate } = await import("@/lib/tasks/reviewer-gate");
+    await runReviewerGate(task, params.chatId);
+  } catch (error) {
+    console.error("[workflow] Task completion step failed:", error);
+  }
+}
+
 export async function distillTurnMemoryStep(params: {
   chatId: string;
   sessionRepoDir: string;
