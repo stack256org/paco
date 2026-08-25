@@ -30,7 +30,7 @@ const CAPABILITY_COPY: Record<Capability, string> = {
     "Make outbound HTTP requests — restricted to exactly the domains listed below, and nowhere else.",
   "storage:kv": "Store and read its own private data on this server.",
   "ui:panel": "Show a sandboxed panel it controls inside the app.",
-  "tasks:create": "Create a task on the board from an inbound message.",
+  "tasks:create": "Create a task on the board.",
   "channels:ingress":
     "Receive inbound webhook requests sent to its own /api/channels URL, authenticated with a per-plugin secret.",
 };
@@ -47,14 +47,21 @@ function withToggled(
 
 /**
  * The consent screen's actual content: an honest isolation summary, drawn
- * from `packages/plugin-host/SECURITY.md`'s "What is NOT enforced" section,
- * plus one checkbox per REQUESTED capability with `CAPABILITY_COPY`'s line.
+ * from `packages/plugin-host/SECURITY.md`'s "What IS enforced" and "What is
+ * NOT enforced" sections, plus one checkbox per REQUESTED capability with
+ * `CAPABILITY_COPY`'s line.
  *
- * Deliberately never says "sandboxed" or "fully isolated" — this plugin
- * process is not a container, has no CPU/memory limit, can force-kill the
- * host, and leaves `process.platform`/`arch`/`pid` readable, all per
- * SECURITY.md. Overclaiming here would be worse than saying nothing: an
- * operator granting capabilities is trusting this text to be complete.
+ * Deliberately never says "sandboxed" or "fully isolated" for the process
+ * boundary — that word is reserved for `ui:panel`'s line, where it is
+ * literally true (`sandbox="allow-scripts"` on an iframe). The process
+ * itself is not a container, has no CPU/memory limit, can force-kill the
+ * host, is confined on disk to an explicit path allowlist (not "no file
+ * access"), requires Node >= 24 to be isolated at all, and leaves
+ * `process.platform`/`arch`/`version`/`pid`/`cwd()` readable — all per
+ * SECURITY.md's "What IS enforced" (the filesystem allowlist, the Node
+ * floor) and "What is NOT enforced" (everything else here) sections.
+ * Overclaiming here would be worse than saying nothing: an operator
+ * granting capabilities is trusting this text to be complete.
  *
  * Split out of `ConsentDialog` (which owns the `Dialog`/`Portal` chrome) so
  * it renders with `renderToStaticMarkup` in tests — Base UI's `Dialog` does
@@ -78,12 +85,24 @@ export function ConsentForm({
           approve below.
         </p>
         <p>
+          On disk, it can read and write only inside a small, explicit set of
+          paths — its own plugin directory and its own scratch directory —
+          enforced by Node&apos;s permission model. That is not the whole disk,
+          and it is not nothing: paths outside that set are refused.
+        </p>
+        <p>
           It is <strong>not a container</strong> — there is no OS-level sandbox,
           and a bug in Node&apos;s own permission model would be an escape from
           all of this. It has no CPU or memory limit and can force-kill this
           server outright, since it runs as this server&apos;s child process. It
           can also read a few harmless facts about this machine — its platform,
-          architecture, and process id.
+          architecture, version, process id, and working directory.
+        </p>
+        <p>
+          This isolation depends on the runtime: plugins refuse to run at all on
+          Node &lt; 24, because that is the version where the network
+          restriction above is backed by the runtime itself rather than by this
+          process alone.
         </p>
       </div>
 

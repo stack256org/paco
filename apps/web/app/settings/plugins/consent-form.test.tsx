@@ -92,4 +92,30 @@ describe("ConsentForm", () => {
     expect(html.toLowerCase()).not.toContain("fully sandboxed");
     expect(html.toLowerCase()).not.toContain("fully isolated");
   });
+
+  test("does not understate tasks:create's actual scope to an inbound message", () => {
+    // handleTasksCreate (lib/plugins/capability-handlers.ts) has no check
+    // tying the call to a channel event — a plugin holding the grant can
+    // call it from a net:fetch handler or a timer just as well.
+    const html = renderForm({ requested: ["tasks:create"] });
+
+    expect(html).not.toContain("from an inbound message");
+  });
+
+  test("says what the plugin can reach on disk, without claiming no file access", () => {
+    const html = renderForm();
+
+    expect(html).toContain(
+      "its own plugin directory and its own scratch directory",
+    );
+    expect(html.toLowerCase()).not.toContain("cannot touch your files");
+    expect(html.toLowerCase()).not.toContain("no file access");
+  });
+
+  test("states the Node >= 24 floor the isolation depends on", () => {
+    const html = renderForm();
+
+    expect(html).toContain("Node");
+    expect(html).toContain("24");
+  });
 });
