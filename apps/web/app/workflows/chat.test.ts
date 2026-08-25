@@ -470,6 +470,7 @@ const loadMemorySectionForTurnSpy = mock(
 /** Lets a test simulate the repo directory failing to resolve. */
 let resolveWorkCwdShouldThrow = false;
 mock.module("@/lib/agent/workspace-paths", () => ({
+  hostWorkspaceFor: () => "/workspaces/session-1",
   resolveWorkCwd: () => {
     if (resolveWorkCwdShouldThrow) {
       throw new Error("Could not resolve the session repo dir");
@@ -504,6 +505,123 @@ mock.module("@/lib/agent/chat-environment", () => ({
   resolveChatAgents: resolveChatAgentsSpy,
   resolveChatSkills: resolveChatSkillsSpy,
   buildChatEnvironmentDetails: () => "",
+}));
+
+/**
+ * The design-mode branch (Section 5 Task 2) dynamically imports
+ * `@/lib/design/candidates` and `@/lib/design/design-turn` from inside its
+ * own `"use step"` function — mocked wholesale here the same way
+ * `./chat-post-finish` is above: the fan-out/auto-commit semantics those
+ * modules implement are `design-turn.test.ts`'s job, not this file's. What
+ * this file checks is that the workflow branches into them correctly and
+ * turns their result into a persisted message and a "completed"/"failed"
+ * workflow run.
+ */
+type TestDesignCandidate = {
+  index: number;
+  branch: string;
+  worktreeDir: string;
+};
+type TestDesignOutcome = TestDesignCandidate & {
+  status: "completed" | "failed";
+  committed: boolean;
+  error?: string;
+};
+
+class TestDesignTurnAllFailedError extends Error {
+  outcomes: TestDesignOutcome[];
+  constructor(outcomes: TestDesignOutcome[]) {
+    super("Every design candidate failed");
+    this.name = "TestDesignTurnAllFailedError";
+    this.outcomes = outcomes;
+  }
+}
+
+const TEST_FALLBACK_DESIGNER_AGENT = {
+  description: "test designer",
+  prompt: "You are a test designer agent.",
+  model: "sonnet" as const,
+};
+
+/** Set by a test to control what `runDesignTurn` resolves/throws. */
+let designTurnOutcomesOverride: TestDesignOutcome[] | undefined;
+let designTurnShouldFailAll = false;
+const createCandidatesSpy = mock(
+  (params: {
+    chatId: string;
+    baseBranch: string;
+    count: number;
+    sessionWorkspace: string;
+  }) =>
+    Promise.resolve(
+      Array.from({ length: params.count }, (_, i): TestDesignCandidate => ({
+        index: i + 1,
+        branch: `design/${params.chatId}/${i + 1}`,
+        worktreeDir: `${params.sessionWorkspace}/designs/${params.chatId}/${i + 1}`,
+      })),
+    ),
+);
+const runDesignTurnSpy = mock(
+  async (params: {
+    candidates: TestDesignCandidate[];
+    prompt: string;
+    designerAgent: unknown;
+    onProgress: (progress: {
+      candidate: number;
+      status: string;
+      error?: string;
+    }) => Promise<void>;
+  }) => {
+    const outcomes: TestDesignOutcome[] =
+      designTurnOutcomesOverride ??
+      params.candidates.map((candidate) =>
+        designTurnShouldFailAll
+          ? {
+              ...candidate,
+              status: "failed" as const,
+              committed: false,
+              error: "boom",
+            }
+          : {
+              ...candidate,
+              status: "completed" as const,
+              committed: true,
+            },
+      );
+
+    for (const candidate of params.candidates) {
+      await params.onProgress({
+        candidate: candidate.index,
+        status: "running",
+      });
+      await params.onProgress({
+        candidate: candidate.index,
+        status: "committing",
+      });
+    }
+    for (const outcome of outcomes) {
+      await params.onProgress({
+        candidate: outcome.index,
+        status: outcome.status,
+        ...(outcome.error ? { error: outcome.error } : {}),
+      });
+    }
+
+    if (designTurnShouldFailAll) {
+      throw new TestDesignTurnAllFailedError(outcomes);
+    }
+
+    return { outcomes };
+  },
+);
+
+mock.module("@/lib/design/candidates", () => ({
+  createCandidates: createCandidatesSpy,
+}));
+mock.module("@/lib/design/design-turn", () => ({
+  runDesignTurn: runDesignTurnSpy,
+  DesignTurnAllFailedError: TestDesignTurnAllFailedError,
+  FALLBACK_DESIGNER_AGENT: TEST_FALLBACK_DESIGNER_AGENT,
 }));
 
 const { runAgentWorkflow } = await import("./chat");
@@ -595,12 +713,16 @@ beforeEach(() => {
   resolveChatAgentsResult = undefined;
   resolveChatSkillsResult = undefined;
   completionSequenceCallOrder = [];
+  designTurnOutcomesOverride = undefined;
+  designTurnShouldFailAll = false;
   appendSessionEventsSpy.mockClear();
   listUnconsumedSteerEventsSpy.mockClear();
   setChatClaudeSessionIdSpy.mockClear();
   loadMemorySectionForTurnSpy.mockClear();
   resolveChatAgentsSpy.mockClear();
   resolveChatSkillsSpy.mockClear();
+  createCandidatesSpy.mockClear();
+  runDesignTurnSpy.mockClear();
   Object.values(spies).forEach((s) => s.mockClear());
 });
 
@@ -1833,6 +1955,152 @@ describe("turn steering", () => {
     expect(pendingSteerEvents).toEqual([
       { id: 1, messageId: "buffered-3", text: "Should not run" },
     ]);
+  });
+});
+
+describe("design mode", () => {
+  test("creates candidates, fans out a design turn, and persists a summary message", async () => {
+    await runAgentWorkflow(makeOptions({ mode: "design" }));
+
+    expect(createCandidatesSpy).toHaveBeenCalledTimes(1);
+    const createCall = createCandidatesSpy.mock.calls[0][0] as {
+      chatId: string;
+      baseBranch: string;
+      count: number;
+      sessionWorkspace: string;
+    };
+    expect(createCall.chatId).toBe("chat-1");
+    // The chat's own branch, not the repository's default branch — a design
+    // candidate is created from the chat's worktree, per the plan's
+    // branch-naming constraint.
+    expect(createCall.baseBranch).toBe("main");
+    expect(createCall.count).toBe(3);
+
+    expect(runDesignTurnSpy).toHaveBeenCalledTimes(1);
+    const runCall = runDesignTurnSpy.mock.calls[0][0] as {
+      prompt: string;
+      candidates: TestDesignCandidate[];
+      designerAgent: unknown;
+    };
+    expect(runCall.prompt).toBe("Hello");
+    expect(runCall.candidates).toHaveLength(3);
+    // No organisation roster override was configured for this test, so the
+    // fallback designer persona is what actually frames every candidate.
+    expect(runCall.designerAgent).toBe(TEST_FALLBACK_DESIGNER_AGENT);
+
+    // Every candidate's progress reached the client live, in order.
+    const progressChunks = writtenChunks.filter(
+      (chunk) => (chunk as { type: string }).type === "data-design-progress",
+    ) as Array<{ id: string; data: { candidate: number; status: string } }>;
+    expect(progressChunks.length).toBeGreaterThan(0);
+    const candidate1Statuses = progressChunks
+      .filter((chunk) => chunk.data.candidate === 1)
+      .map((chunk) => chunk.data.status);
+    expect(candidate1Statuses).toEqual(["running", "committing", "completed"]);
+
+    expect(spies.persistAssistantMessage).toHaveBeenCalled();
+    const persistCalls = spies.persistAssistantMessage.mock.calls as Array<
+      [string, { parts: Array<{ type: string }> }]
+    >;
+    const lastPersisted = persistCalls.at(-1)?.[1];
+    expect(lastPersisted?.parts.some((part) => part.type === "text")).toBe(
+      true,
+    );
+    expect(
+      lastPersisted?.parts.filter(
+        (part) => part.type === "data-design-progress",
+      ),
+    ).toHaveLength(3);
+
+    expect(spies.clearActiveStream).toHaveBeenCalled();
+    expect(spies.sendFinish).toHaveBeenCalled();
+
+    const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
+    const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
+    expect(workflowRun.status).toBe("completed");
+  });
+
+  test("honors designCandidateCount", async () => {
+    await runAgentWorkflow(
+      makeOptions({ mode: "design", designCandidateCount: 2 }),
+    );
+
+    const createCall = createCandidatesSpy.mock.calls[0][0] as {
+      count: number;
+    };
+    expect(createCall.count).toBe(2);
+  });
+
+  test("does not run the normal turn machinery in design mode", async () => {
+    await runAgentWorkflow(makeOptions({ mode: "design" }));
+
+    // The normal turn path (mocked `@/lib/agent/run-step`) never ran; the
+    // design turn is a fully separate step (`runDesignTurnStep`), not a call
+    // to the same per-chat `runAgentTurn`.
+    expect(agentTurnCalls).toHaveLength(0);
+    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
+    expect(spies.runTaskCompletionStep).not.toHaveBeenCalled();
+    expect(spies.distillTurnMemoryStep).not.toHaveBeenCalled();
+  });
+
+  test("marks the workflow run as failed when every candidate fails", async () => {
+    designTurnShouldFailAll = true;
+
+    await runAgentWorkflow(makeOptions({ mode: "design" }));
+
+    const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
+    const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
+    expect(workflowRun.status).toBe("failed");
+
+    // Still persists what happened — every candidate reported as failed —
+    // rather than losing the turn's outcome because it happened to fail.
+    const persistCalls = spies.persistAssistantMessage.mock.calls as Array<
+      [string, { parts: Array<{ type: string; data?: { status: string } }> }]
+    >;
+    const lastPersisted = persistCalls.at(-1)?.[1];
+    const progressParts = lastPersisted?.parts.filter(
+      (part) => part.type === "data-design-progress",
+    );
+    expect(progressParts).toHaveLength(3);
+    expect(progressParts?.every((part) => part.data?.status === "failed")).toBe(
+      true,
+    );
+
+    expect(spies.clearActiveStream).toHaveBeenCalled();
+    expect(spies.sendFinish).toHaveBeenCalled();
+  });
+
+  test("one candidate failing still marks the run completed", async () => {
+    designTurnOutcomesOverride = [
+      {
+        index: 1,
+        branch: "design/chat-1/1",
+        worktreeDir: "/workspaces/session-1/designs/chat-1/1",
+        status: "completed",
+        committed: true,
+      },
+      {
+        index: 2,
+        branch: "design/chat-1/2",
+        worktreeDir: "/workspaces/session-1/designs/chat-1/2",
+        status: "failed",
+        committed: false,
+        error: "candidate 2 crashed",
+      },
+      {
+        index: 3,
+        branch: "design/chat-1/3",
+        worktreeDir: "/workspaces/session-1/designs/chat-1/3",
+        status: "completed",
+        committed: true,
+      },
+    ];
+
+    await runAgentWorkflow(makeOptions({ mode: "design" }));
+
+    const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
+    const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
+    expect(workflowRun.status).toBe("completed");
   });
 });
 

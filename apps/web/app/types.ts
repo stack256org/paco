@@ -81,11 +81,24 @@ export type WebAgentWorkspaceStatusData = {
   message: string;
 };
 
+/**
+ * One design candidate's live progress within a design turn (Section 5 Task
+ * 2), streamed as its own `data-design-progress` part per candidate index so
+ * the design panel (Task 4) can render N independent progress indicators
+ * from the same message.
+ */
+export type WebAgentDesignProgressData = {
+  candidate: number;
+  status: "running" | "committing" | "completed" | "failed";
+  error?: string;
+};
+
 type WebAgentDataParts = {
   commit: WebAgentCommitData;
   pr: WebAgentPrData;
   snippet: WebAgentSnippetData;
   "workspace-status": WebAgentWorkspaceStatusData;
+  "design-progress": WebAgentDesignProgressData;
 };
 
 /**
@@ -176,6 +189,10 @@ export type WebAgentPrDataPart = Extract<
 export type WebAgentSnippetDataPart = Extract<
   WebAgentUIMessagePart,
   { type: "data-snippet" }
+>;
+export type WebAgentDesignProgressDataPart = Extract<
+  WebAgentUIMessagePart,
+  { type: "data-design-progress" }
 >;
 export type WebAgentUIToolPart =
   | DynamicToolUIPart

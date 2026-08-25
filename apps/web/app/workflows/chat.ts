@@ -36,6 +36,7 @@ import { addLanguageModelUsage } from "./usage-utils";
 import type {
   WebAgentCommitData,
   WebAgentCommitDataPart,
+  WebAgentDesignProgressDataPart,
   WebAgentMessageMetadata,
   WebAgentPrData,
   WebAgentPrDataPart,
@@ -71,6 +72,10 @@ import type {
 import { resolveChatModelSelection } from "../api/chat/_lib/model-selection";
 import { resolveChatSandboxRuntime } from "./chat-sandbox-runtime";
 import { takeChatCheckpoint } from "./chat-checkpoint";
+import type {
+  DesignCandidateOutcome,
+  DesignProgress,
+} from "@/lib/design/design-turn";
 
 type AuthSessionContext = Pick<AuthSession, "user"> | null;
 
@@ -90,6 +95,16 @@ type Options = {
   autoCommitEnabled?: boolean;
   autoPushEnabled?: boolean;
   autoCreatePrEnabled?: boolean;
+  /**
+   * Runs this turn as a design turn (Section 5 Task 2) instead of a normal
+   * agent turn: N parallel designer candidates, each in its own worktree,
+   * rather than one turn on the chat's own branch. Off (the send path's
+   * default) means nothing here changes — Task 4 wires the composer toggle
+   * that sets this.
+   */
+  mode?: "design";
+  /** How many design candidates to run. Defaults to `DEFAULT_DESIGN_CANDIDATE_COUNT`. */
+  designCandidateCount?: 2 | 3;
 };
 
 type ChatModelRuntime = {
@@ -406,6 +421,40 @@ function buildPrData(
   };
 }
 
+/** One `data-design-progress` part per candidate, from its final outcome. */
+function buildDesignProgressPart(
+  outcome: DesignCandidateOutcome,
+): WebAgentDesignProgressDataPart {
+  return {
+    type: "data-design-progress",
+    id: `design-candidate-${outcome.index}`,
+    data: {
+      candidate: outcome.index,
+      status: outcome.status,
+      ...(outcome.error ? { error: outcome.error } : {}),
+    },
+  };
+}
+
+/** The assistant message's own text for a finished design turn. */
+function buildDesignSummaryText(outcomes: DesignCandidateOutcome[]): string {
+  const completedCount = outcomes.filter(
+    (outcome) => outcome.status === "completed",
+  ).length;
+
+  const lines = [
+    `Generated ${completedCount} of ${outcomes.length} design candidates.`,
+  ];
+  for (const outcome of outcomes) {
+    lines.push(
+      outcome.status === "completed"
+        ? `- Candidate ${outcome.index}: ready${outcome.committed ? "" : " (nothing to commit)"}`
+        : `- Candidate ${outcome.index}: failed — ${outcome.error ?? "unknown error"}`,
+    );
+  }
+  return lines.join("\n");
+}
+
 function upsertAssistantDataPart(
   message: WebAgentUIMessage,
   part: WebAgentCommitDataPart | WebAgentPrDataPart,
@@ -438,6 +487,102 @@ async function sendDataPart(
     await writer.write(part);
   } finally {
     writer.releaseLock();
+  }
+}
+
+/**
+ * Run a design turn's N parallel candidate variants, as a workflow step.
+ *
+ * Everything this needs — the org's roster (for the designer persona), the
+ * session workspace root, `createCandidates`, and `runDesignTurn` itself
+ * (which shells out to git for the per-candidate auto-commit) — touches the
+ * filesystem or the database, so it is dynamically imported here rather than
+ * statically at the top of the file, exactly like `resolveWorkCwd` and
+ * `resolveChatAgents` are inside `runAgentStep` below: the `"use workflow"`
+ * body this feeds cannot import Node modules at all.
+ *
+ * Progress is streamed to the client as it happens — `onProgress` below
+ * writes straight to `writable`, the same way `sendDataPart` does for the
+ * commit/PR parts elsewhere in this file — so the caller only needs the
+ * final `outcomes` once every candidate has finished, succeeded or not.
+ *
+ * A `DesignTurnAllFailedError` (every candidate failed) is caught here
+ * rather than left to propagate: the outer workflow's generic error handler
+ * reports "workspace setup failed" style messages meant for provisioning
+ * failures, not a design turn's own per-candidate reasons.
+ */
+async function runDesignTurnStep(params: {
+  sandboxState: AgentCallOptions["sandbox"]["state"];
+  chatId: string;
+  baseBranch: string;
+  count: 2 | 3;
+  prompt: string;
+  agentOptions: AgentCallOptions;
+  writable: Writable;
+}): Promise<{ outcomes: DesignCandidateOutcome[]; allFailed: boolean }> {
+  "use step";
+
+  const [
+    { getOrganization },
+    { resolveChatAgents },
+    { hostWorkspaceFor },
+    { createCandidates },
+    { runDesignTurn, DesignTurnAllFailedError, FALLBACK_DESIGNER_AGENT },
+  ] = await Promise.all([
+    import("@/lib/org/organization"),
+    import("@/lib/agent/chat-environment"),
+    import("@/lib/agent/workspace-paths"),
+    import("@/lib/design/candidates"),
+    import("@/lib/design/design-turn"),
+  ]);
+
+  let designerAgent = FALLBACK_DESIGNER_AGENT;
+  try {
+    const organization = await getOrganization();
+    const roster = await resolveChatAgents(organization?.id);
+    designerAgent = roster.designer ?? FALLBACK_DESIGNER_AGENT;
+  } catch (error) {
+    console.error(
+      "[workflow] Failed to resolve the designer roster entry for a design turn; using the fallback persona:",
+      error,
+    );
+  }
+
+  const candidates = await createCandidates({
+    sessionWorkspace: hostWorkspaceFor(params.sandboxState),
+    chatId: params.chatId,
+    baseBranch: params.baseBranch,
+    count: params.count,
+  });
+
+  const onProgress = async (progress: DesignProgress) => {
+    const writer = params.writable.getWriter();
+    try {
+      await writer.write({
+        type: "data-design-progress",
+        id: `design-candidate-${progress.candidate}`,
+        data: progress,
+      } satisfies WebAgentDesignProgressDataPart);
+    } finally {
+      writer.releaseLock();
+    }
+  };
+
+  try {
+    const { outcomes } = await runDesignTurn({
+      candidates,
+      prompt: params.prompt,
+      agentOptions: params.agentOptions,
+      designerAgent,
+      onProgress,
+      onChunk: () => Promise.resolve(),
+    });
+    return { outcomes, allFailed: false };
+  } catch (error) {
+    if (error instanceof DesignTurnAllFailedError) {
+      return { outcomes: error.outcomes, allFailed: true };
+    }
+    throw error;
   }
 }
 
@@ -614,6 +759,54 @@ export async function runAgentWorkflow(options: Options) {
       ...(runtime.skills.length > 0 ? { skills: runtime.skills } : {}),
     };
     sandboxState = runtime.sandboxState;
+
+    /*
+     * A design turn runs N parallel candidate variants in their own
+     * worktrees instead of one turn on the chat's own branch — none of the
+     * machinery below (the chat's own checkpoint, the continuation loop,
+     * auto-commit/PR on the chat's branch, task completion, memory
+     * distillation) applies, since a design turn never touches the chat's
+     * worktree at all. Candidates commit themselves (`runDesignTurnStep`),
+     * and Task 1's `acceptCandidate` is what eventually lands one of them on
+     * this branch.
+     */
+    if (options.mode === "design") {
+      if (!runtime.currentBranch) {
+        throw new Error(
+          "Design mode requires the chat's worktree branch, but none was resolved.",
+        );
+      }
+
+      const designResult = await runDesignTurnStep({
+        sandboxState: runtime.sandboxState,
+        chatId: options.chatId,
+        baseBranch: runtime.currentBranch,
+        count: options.designCandidateCount ?? 3,
+        prompt: extractLatestUserText(options.messages),
+        agentOptions,
+        writable,
+      });
+
+      pendingAssistantResponse = {
+        ...pendingAssistantResponse,
+        parts: [
+          {
+            type: "text",
+            text: buildDesignSummaryText(designResult.outcomes),
+          },
+          ...designResult.outcomes.map(buildDesignProgressPart),
+        ],
+      };
+
+      await persistAssistantMessage(options.chatId, pendingAssistantResponse);
+      await Promise.all([
+        clearActiveStream(options.chatId, workflowRunId),
+        sendFinish(writable).then(() => closeStream(writable)),
+      ]);
+      streamClosed = true;
+      workflowStatus = designResult.allFailed ? "failed" : "completed";
+      return;
+    }
 
     // Before the agent touches anything, record where the worktree stands so
     // this turn can be undone. The agent edits files directly, so there is no
