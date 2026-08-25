@@ -206,6 +206,10 @@ export interface AcpClientOptions {
 const DEFAULT_GRACEFUL_CLOSE_MS = 3000;
 const DEFAULT_TERM_CLOSE_MS = 2000;
 const STDERR_LIMIT = 64_000;
+/** Caps the buffered-but-unconsumed `updates` backlog against a slow/absent consumer. */
+const MAX_QUEUED_UPDATES = 10_000;
+/** Mirrors the server's own frame cap (PROTOCOL.md §2 `frame_resource_byte_limit`). */
+const MAX_INBOUND_LINE_BYTES = 8 * 1024 * 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -243,11 +247,21 @@ interface UpdateQueue<T> extends AsyncIterable<T> {
  * A single-consumer async queue: push from the read loop, pull from
  * `for await`. A factory function, not a class, so `AcpClient` remains the
  * only class this file needs.
+ *
+ * Bounded at `MAX_QUEUED_UPDATES`: a consumer that stops reading `updates`
+ * (or falls behind) must not let this queue grow without limit. On
+ * overflow the oldest buffered update is dropped to make room for the new
+ * one, and exactly one `console.warn` fires per overflow "episode" — the
+ * warning flag resets as soon as a push lands while the queue is back
+ * under the cap, so a queue that overflows, drains, and overflows again
+ * warns once for each episode rather than either staying silent forever or
+ * warning on every single dropped item.
  */
 function createUpdateQueue<T>(): UpdateQueue<T> {
   const items: T[] = [];
   const waiting: Array<(result: IteratorResult<T>) => void> = [];
   let closed = false;
+  let overflowWarned = false;
 
   return {
     push(item: T): void {
@@ -257,9 +271,20 @@ function createUpdateQueue<T>(): UpdateQueue<T> {
       const resolve = waiting.shift();
       if (resolve) {
         resolve({ value: item, done: false });
-      } else {
-        items.push(item);
+        return;
       }
+      if (items.length >= MAX_QUEUED_UPDATES) {
+        items.shift();
+        if (!overflowWarned) {
+          overflowWarned = true;
+          console.warn(
+            `AcpClient: update queue exceeded ${MAX_QUEUED_UPDATES} entries; dropping the oldest buffered update. The consumer of \`updates\` is falling behind.`,
+          );
+        }
+      } else {
+        overflowWarned = false;
+      }
+      items.push(item);
     },
 
     close(): void {
@@ -353,8 +378,21 @@ export class AcpClient {
     this.process.on("close", (code) => this.handleExit(code));
     // Surfaces spawn failures (e.g. missing binary) the same way run.ts does.
     this.process.on("error", (error) => this.handleSpawnError(error));
+    // A write racing process teardown (e.g. cancel() right after the child
+    // dies) surfaces as an async 'error' on these streams, not a thrown
+    // exception. Node throws by default when an 'error' event has no
+    // listener, so these exist purely to route that into the same cleanup
+    // path instead of crashing the host.
+    this.process.stdin.on("error", (error) => this.handleStreamError(error));
+    this.process.stdout.on("error", (error) => this.handleStreamError(error));
 
-    this.readLoop();
+    this.readLoop().catch((error: unknown) => {
+      // A stream error the loop itself couldn't recover from: same cleanup
+      // as any other unexpected teardown, instead of an unhandled rejection.
+      this.handleStreamError(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
   }
 
   /** Last 64k of stderr the process has written, for diagnostics. */
@@ -490,7 +528,20 @@ export class AcpClient {
   }
 
   private writeLine(message: Record<string, unknown>): void {
-    this.process.stdin.write(`${JSON.stringify(message)}\n`);
+    if (this.exited) {
+      // The process is already gone (or going): a write here would either
+      // no-op against a destroyed stream or surface later as an async
+      // 'error' event, so skip it outright rather than racing teardown.
+      return;
+    }
+    try {
+      this.process.stdin.write(`${JSON.stringify(message)}\n`);
+    } catch {
+      // Node normally reports a broken pipe via the stream's 'error' event
+      // (handled in the constructor), not a synchronous throw, but guard
+      // here too so a write racing process teardown can never crash the
+      // host.
+    }
   }
 
   private async readLoop(): Promise<void> {
@@ -502,6 +553,17 @@ export class AcpClient {
       for await (const line of rl) {
         const trimmed = line.trim();
         if (!trimmed) {
+          continue;
+        }
+
+        if (Buffer.byteLength(trimmed, "utf-8") > MAX_INBOUND_LINE_BYTES) {
+          // Mirrors PROTOCOL.md §2: the real server caps a single frame at
+          // 8MB and reports oversized frames as a protocol error rather
+          // than parsing them. The client-side equivalent is simply to
+          // never attempt to parse/hold onto a line this large.
+          console.warn(
+            `AcpClient: skipped an inbound line over ${MAX_INBOUND_LINE_BYTES} bytes (PROTOCOL.md §2 frame_resource_byte_limit).`,
+          );
           continue;
         }
 
@@ -610,33 +672,42 @@ export class AcpClient {
   }
 
   private handleExit(code: number | null): void {
-    if (this.exited) {
-      return;
-    }
-    this.exited = true;
     const stderr = this.stderrTail.trim().slice(-2000);
-    const error = new AcpError(
-      `OpenFX ACP process exited before responding (code ${code})${
-        stderr ? `: ${stderr}` : ""
-      }`,
+    this.terminate(
+      new AcpError(
+        `OpenFX ACP process exited before responding (code ${code})${
+          stderr ? `: ${stderr}` : ""
+        }`,
+      ),
     );
-    for (const [requestId, pendingRequest] of this.pending) {
-      pendingRequest.reject(error);
-      this.pending.delete(requestId);
-    }
-    this.updatesQueue.close();
   }
 
   private handleSpawnError(error: Error): void {
+    this.terminate(
+      new AcpError(`Failed to spawn OpenFX ACP process: ${error.message}`),
+    );
+  }
+
+  private handleStreamError(error: Error): void {
+    this.terminate(
+      new AcpError(`OpenFX ACP process stream error: ${error.message}`),
+    );
+  }
+
+  /**
+   * Single teardown path shared by every way the process/transport can die
+   * (a clean or unclean exit, a spawn failure, an async stream error):
+   * marks the client dead, rejects every still-pending request with the
+   * given `AcpError`, and closes the `updates` queue so its consumer's
+   * `for await` ends instead of hanging forever.
+   */
+  private terminate(error: AcpError): void {
     if (this.exited) {
       return;
     }
     this.exited = true;
-    const wrapped = new AcpError(
-      `Failed to spawn OpenFX ACP process: ${error.message}`,
-    );
     for (const [requestId, pendingRequest] of this.pending) {
-      pendingRequest.reject(wrapped);
+      pendingRequest.reject(error);
       this.pending.delete(requestId);
     }
     this.updatesQueue.close();

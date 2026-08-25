@@ -85,6 +85,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Captures process-level `unhandledRejection`/`uncaughtException` while
+ * `run` executes, so a test can prove a race didn't crash the host instead
+ * of just checking its own local promises. `bun:test` doesn't currently
+ * fail a run on these by itself, which is exactly why the transport itself
+ * has to guard against producing them.
+ */
+async function withUnhandledErrorProbe(
+  run: () => Promise<void>,
+): Promise<unknown[]> {
+  const captured: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown) => captured.push(reason);
+  const onUncaughtException = (error: unknown) => captured.push(error);
+  process.on("unhandledRejection", onUnhandledRejection);
+  process.on("uncaughtException", onUncaughtException);
+  try {
+    await run();
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+    process.removeListener("uncaughtException", onUncaughtException);
+  }
+  return captured;
+}
+
 describe("AcpClient", () => {
   test("handshake completes and session/new returns a session id", async () => {
     const client = createClient({ script: {} });
@@ -352,5 +376,150 @@ describe("AcpClient", () => {
 
     expect(client.process.signalCode).toBeNull();
     expect(client.process.exitCode).toBe(0);
+  });
+
+  test("cancel() racing process teardown does not crash the host", async () => {
+    const client = createClient({ script: {} });
+    const sessionId = await handshake(client);
+
+    const captured = await withUnhandledErrorProbe(async () => {
+      client.process.kill("SIGKILL");
+      // The race: call cancel() immediately, before this client has
+      // necessarily observed the process's own death — a write against a
+      // dying/dead stdin must be a no-op, never a crash.
+      expect(() => client.cancel(sessionId)).not.toThrow();
+      await new Promise((resolve) => client.process.once("close", resolve));
+      await sleep(20);
+    });
+
+    expect(captured).toEqual([]);
+  });
+
+  test("a stream error during the read loop rejects pending requests, not an unhandled rejection", async () => {
+    const client = createClient({ script: {} });
+    const sessionId = await handshake(client);
+
+    const pending = client.prompt({
+      sessionId,
+      prompt: [{ type: "text", text: "hi" }],
+    });
+    // Attached synchronously, right after the promise is created, so this
+    // test's own bookkeeping can never manufacture an unhandled rejection
+    // during the probe window below — the thing under test is whether
+    // AcpClient itself produces one, not whether this assertion is late.
+    const settled = pending.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+    const captured = await withUnhandledErrorProbe(async () => {
+      // Forces the read loop's `for await` to throw, simulating a stream
+      // failure the process itself didn't cause.
+      client.process.stdout.emit(
+        "error",
+        new Error("simulated stream failure"),
+      );
+      await sleep(20);
+    });
+
+    const outcome = await settled;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toBeInstanceOf(AcpError);
+    }
+    expect(captured).toEqual([]);
+  });
+
+  test("the update queue drops the oldest entry and warns once per overflow episode", async () => {
+    const steps = Array.from({ length: 10_005 }, (_, index) => ({
+      kind: "update" as const,
+      update: {
+        kind: "agent_message_chunk",
+        content: { type: "text", text: `${index}` },
+      },
+    }));
+    const client = createClient({ script: { steps, stopReason: "end_turn" } });
+    const sessionId = await handshake(client);
+
+    // No background drain: every update piles up in the queue, forcing the
+    // 10,000-entry cap to kick in before the test reads any of them.
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    let result: { stopReason: string };
+    try {
+      result = await client.prompt({
+        sessionId,
+        prompt: [{ type: "text", text: "hi" }],
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(result.stopReason).toBe("end_turn");
+    expect(warnings.length).toBe(1);
+
+    const collected: unknown[] = [];
+    for await (const envelope of client.updates) {
+      collected.push(envelope.update);
+      if (collected.length >= 10_000) {
+        break;
+      }
+    }
+    // The available_commands_update from session/new plus 10,005 scripted
+    // updates is 10,006 total; capped at 10,000, so the oldest 6 (the
+    // available_commands_update and the first five scripted ones) were
+    // dropped — the surviving oldest entry is scripted update index 5.
+    expect(kindOf(collected[0])).toBe("agent_message_chunk");
+    expect(
+      isRecord(collected[0]) && isRecord(collected[0].content)
+        ? collected[0].content.text
+        : undefined,
+    ).toBe("5");
+  });
+
+  test("an oversized inbound line (over the 8MB frame limit) is skipped, not fatal", async () => {
+    const client = createClient({
+      script: {
+        steps: [
+          { kind: "raw-oversized", bytes: 9 * 1024 * 1024 },
+          {
+            kind: "update",
+            update: {
+              kind: "agent_message_chunk",
+              content: { type: "text", text: "ok" },
+            },
+          },
+        ],
+        stopReason: "end_turn",
+      },
+    });
+
+    const updates: unknown[] = [];
+    const sessionId = await handshake(client);
+    drainUpdatesInBackground(client, updates);
+
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    let result: { stopReason: string };
+    try {
+      result = await client.prompt({
+        sessionId,
+        prompt: [{ type: "text", text: "hi" }],
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(result.stopReason).toBe("end_turn");
+    expect(warnings.length).toBeGreaterThanOrEqual(1);
+    await sleep(50);
+    expect(
+      updates.some((update) => kindOf(update) === "agent_message_chunk"),
+    ).toBe(true);
   });
 });

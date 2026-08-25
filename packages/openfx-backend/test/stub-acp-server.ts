@@ -41,7 +41,13 @@ type ScriptedStep =
   | { kind: "permission"; permission: ScriptedPermission }
   // Writes a raw, non-JSON line verbatim — used to test that AcpClient
   // skips malformed lines instead of failing the whole session.
-  | { kind: "raw"; line: string };
+  | { kind: "raw"; line: string }
+  // Writes a single line of exactly `bytes` bytes (generated here, not
+  // carried through ACP_STUB_SCRIPT, since an env var that large risks
+  // hitting OS argument/environment size limits) — used to test that
+  // AcpClient skips a line over PROTOCOL.md §2's 8MB frame limit instead
+  // of trying to parse or buffer it.
+  | { kind: "raw-oversized"; bytes: number };
 
 interface StubScript {
   steps?: ScriptedStep[];
@@ -178,8 +184,10 @@ async function runScriptedPrompt(sessionId: string): Promise<string> {
       // Echoed back as an update so a test can assert the round trip
       // end-to-end, not just that the handler was invoked.
       sendUpdate(sessionId, { kind: "permission_echo", decision });
-    } else {
+    } else if (step.kind === "raw") {
       process.stdout.write(`${step.line}\n`);
+    } else {
+      process.stdout.write(`${"x".repeat(step.bytes)}\n`);
     }
   }
 
