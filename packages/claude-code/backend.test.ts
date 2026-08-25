@@ -24,6 +24,8 @@ interface StubRun {
 
 let stubRuns: StubRun[] = [];
 let stubCalls: ClaudeCodeOptions[] = [];
+/** One entry per `runClaudeCode` call: did its eager abort listener fire? */
+let killedCalls: boolean[] = [];
 
 function abortError(): Error {
   const error = new Error("Claude Code run was aborted");
@@ -54,7 +56,8 @@ mock.module("./run.ts", () => ({
     signal?: AbortSignal,
   ) => {
     stubCalls.push(options);
-    const scripted = stubRuns[stubCalls.length - 1];
+    const callIndex = stubCalls.length - 1;
+    const scripted = stubRuns[callIndex];
     if (!scripted) {
       throw new Error("backend.test.ts: no stub run configured for this call");
     }
@@ -66,6 +69,27 @@ mock.module("./run.ts", () => ({
     const resultDeferred = Promise.withResolvers<ClaudeResultMessage>();
     const sessionDeferred = Promise.withResolvers<string>();
 
+    // Registered eagerly, at "spawn" time — exactly like run.ts's own
+    // `runClaudeCode`, which wires its SIGTERM listener immediately rather
+    // than waiting for the message stream to be read. This is what makes
+    // `killedCalls` a real proof that abandonment reaches the transport's
+    // abort handling, instead of only exercising backend.ts's bookkeeping:
+    // a listener installed lazily inside `iterate()` below would never fire
+    // for a run that's abandoned before that code executes.
+    killedCalls[callIndex] = false;
+    const aborted = Promise.withResolvers<undefined>();
+    const onAbort = () => {
+      killedCalls[callIndex] = true;
+      aborted.resolve(undefined);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
     async function* iterate(): AsyncGenerator<ClaudeMessage> {
       yield initMessage(config.sessionId);
       sessionDeferred.resolve(config.sessionId);
@@ -75,23 +99,15 @@ mock.module("./run.ts", () => ({
       }
 
       const delayMs = config.delayMs ?? 0;
-      const aborted = new Promise<boolean>((resolve) => {
-        if (signal?.aborted) {
-          resolve(true);
-        } else {
-          signal?.addEventListener("abort", () => resolve(true), {
-            once: true,
-          });
-        }
+      const timedOut = new Promise<void>((resolve) => {
+        setTimeout(resolve, delayMs);
       });
-      const timedOut = new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(false), delayMs);
-      });
-      const wasAborted = signal
-        ? await Promise.race([aborted, timedOut])
-        : await timedOut;
+      const outcome = await Promise.race([
+        aborted.promise.then(() => "aborted" as const),
+        timedOut.then(() => "timedOut" as const),
+      ]);
 
-      if (wasAborted) {
+      if (outcome === "aborted") {
         const error = abortError();
         resultDeferred.reject(error);
         throw error;
@@ -125,6 +141,7 @@ const { ClaudeCodeBackend } = await import("./backend.ts");
 /** Reset the recorder and queue one scripted CLI run per `startTurn` call. */
 function script(...runs: StubRun[]) {
   stubCalls.length = 0;
+  killedCalls.length = 0;
   stubRuns = runs;
 }
 
@@ -244,6 +261,9 @@ describe("ClaudeCodeBackend", () => {
     await iterator.return?.();
 
     await expect(handle.result).rejects.toMatchObject({ name: "AbortError" });
+    // Proves abandonment reached the transport's abort handling (the thing
+    // that would send SIGTERM), not just backend.ts's own bookkeeping.
+    expect(killedCalls[0]).toBe(true);
   });
 
   test("steer() then abandoning chunks still RESOLVES steered", async () => {
@@ -266,6 +286,9 @@ describe("ClaudeCodeBackend", () => {
     const result = await handle.result;
     expect(result.steered).toEqual({ text: "steered text" });
     expect(result.isError).toBe(false);
+    // Same proof as above: the kill path was reached even though the
+    // outcome here is a successful steer, not a rejection.
+    expect(killedCalls[0]).toBe(true);
   });
 });
 

@@ -10,7 +10,7 @@ const spawns: ClaudeCodeOptions[] = [];
 let scripted: ClaudeMessage[][] = [];
 
 /** Set to drive a run that stays open until the test releases it. */
-let hangingRun: { messages: AsyncGenerator<ClaudeMessage> } | null = null;
+let hangingRun: { messages: AsyncIterable<ClaudeMessage> } | null = null;
 
 mock.module("./run.ts", () => ({
   runClaudeCode: (_prompt: string, options: ClaudeCodeOptions) => {
@@ -86,6 +86,31 @@ const MISSING_SESSION = terminal({
 function script(...runs: ClaudeMessage[][]) {
   spawns.length = 0;
   scripted = runs;
+}
+
+/**
+ * Wraps an async generator so a test can observe whether its `.return()` was
+ * invoked, without mutating the generator itself.
+ */
+function trackReturn<T>(source: AsyncGenerator<T>): {
+  messages: AsyncIterable<T>;
+  returnCalled: () => boolean;
+} {
+  let called = false;
+  return {
+    messages: {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => source.next(),
+          return: (value?: unknown) => {
+            called = true;
+            return source.return(value as never);
+          },
+        };
+      },
+    },
+    returnCalled: () => called,
+  };
 }
 
 async function drain(options: ClaudeCodeOptions) {
@@ -180,6 +205,32 @@ describe("streamClaudeAgent", () => {
     expect(first.done).toBe(false);
 
     finishTurn.resolve(undefined);
+    hangingRun = null;
+  });
+
+  test("abandoning run.chunks cascades to close the inner run.messages iterator", async () => {
+    // A caller that stops draining `chunks` before the turn ends (a bare
+    // `break`) must not orphan the CLI's own message generator — its
+    // `finally` is what closes `rl` and sends SIGTERM in run.ts.
+    scripted = [];
+    spawns.length = 0;
+    const tracked = trackReturn(
+      (async function* () {
+        yield init("s");
+        yield assistantText("partial");
+        // Never yields a terminal result on its own; only closing the
+        // iterator should end this turn.
+      })(),
+    );
+    hangingRun = tracked;
+
+    const run = streamClaudeAgent("hello", { cwd: "/ws" });
+    const iterator = run.chunks[Symbol.asyncIterator]();
+
+    await iterator.next(); // one UI chunk, from the assistant text message
+    await iterator.return?.();
+
+    expect(tracked.returnCalled()).toBe(true);
     hangingRun = null;
   });
 });

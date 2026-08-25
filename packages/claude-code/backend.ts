@@ -120,6 +120,15 @@ export class ClaudeCodeBackend implements AgentBackend {
     // The workflow may consume chunks and result independently; an interrupt
     // rejection must not become an unhandled rejection before it is awaited.
     result.catch(() => undefined);
+    // Also remove the outer-abort forwarder once `result` settles: a caller
+    // that never touches `chunks` at all (only awaits `result`) would
+    // otherwise leave it attached to `ctx.abortSignal` forever. Idempotent
+    // with the same removal in `chunks()`'s `finally` below.
+    result
+      .finally(() => {
+        ctx.abortSignal?.removeEventListener("abort", onOuterAbort);
+      })
+      .catch(() => undefined);
 
     async function* chunks(): AsyncGenerator<UIMessageChunk> {
       let completed = false;

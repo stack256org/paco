@@ -83,10 +83,23 @@ export function streamClaudeAgent(
     run.sessionId.then(sessionDeferred.resolve).catch(sessionDeferred.reject);
 
     const mapper = new ClaudeUIStreamMapper({ workspaceRoot: options.cwd });
-    for (let step = first; !step.done; step = await iterator.next()) {
-      for (const chunk of mapper.map(step.value)) {
-        yield chunk;
+    try {
+      for (let step = first; !step.done; step = await iterator.next()) {
+        for (const chunk of mapper.map(step.value)) {
+          yield chunk;
+        }
       }
+    } finally {
+      // A caller that abandons `chunks` before the turn ends (an external
+      // `.return()`, e.g. from a `for await` loop's `break`) resumes this
+      // generator right here, since the loop above is the only thing
+      // suspended at a `yield`. Without this, the manual `for` loop's own
+      // `iterator` — run.ts's process-management generator — is simply
+      // orphaned mid-iteration: nothing ever calls `.next()` on it again, so
+      // its `finally` (closing `rl`, sending SIGTERM) never runs. Closing it
+      // explicitly here cascades the teardown. A no-op once the loop has
+      // already run to completion or thrown.
+      await iterator.return?.();
     }
   }
 
