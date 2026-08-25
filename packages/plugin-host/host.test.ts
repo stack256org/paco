@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdirSync } from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
 import { discoverPlugin } from "@paco/plugin-kit";
@@ -1421,255 +1429,564 @@ describe("PluginHost deliverEvent", () => {
   });
 });
 
-/**
- * Locates a Node binary that supports the permission model.
- *
- * These tests run under `bun test`, and bun has no permission model, so the
- * hardened path needs a real Node >= 22.15 (the version that added the
- * synchronous `module.registerHooks` the network preload depends on).
- */
-function findHardenedNode(): string | undefined {
-  const candidates = [
-    process.env.PACO_NODE_EXECUTABLE,
-    process.execPath.includes("node") ? process.execPath : undefined,
-    "/opt/homebrew/bin/node",
-    "/usr/local/bin/node",
-    "/usr/bin/node",
-  ].filter((candidate): candidate is string => Boolean(candidate));
+describe("PluginHost plugin tree containment", () => {
+  test("refuses to start a plugin whose directory contains a symlink", async () => {
+    const descriptor = await writePlugin("linky-plugin", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+    });
+    // The escape the adversarial review used: the permission model happily
+    // follows a link that lives under an allowed prefix, so this one link
+    // would grant the whole filesystem.
+    await symlink("/", path.join(descriptor.rootDir, "escape"));
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+    });
 
+    await expect(host.start()).rejects.toThrow(/symbolic link/);
+    expect(host.state).toBe("crashed");
+  });
+
+  test("names the offending path and finds links nested in subdirectories", async () => {
+    const descriptor = await writePlugin("nested-link", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+    });
+    const linkPath = path.join(descriptor.rootDir, "tools", "sneaky");
+    await symlink("/etc", linkPath);
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+    });
+
+    await expect(host.start()).rejects.toThrow(/sneaky/);
+    expect(host.state).toBe("crashed");
+  });
+
+  test("starts normally when the tree holds no links", async () => {
+    const descriptor = await writePlugin("clean-plugin", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+      "lib/nested/helper.js": "export const x = 1;\n",
+    });
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+    });
+
+    const { tools } = await host.start();
+
+    expect(host.state).toBe("running");
+    expect(tools.map((tool) => tool.name)).toEqual(["echo"]);
+  });
+});
+
+/**
+ * A Node binary usable for the containment suite, with its version.
+ *
+ * The suite runs against TWO tiers where both are available, because they
+ * contain differently:
+ *
+ * - **Node >= 24** gates sockets in the permission model itself, so a plugin
+ *   that somehow reached `net` still cannot connect.
+ * - **Node 22.x** does not. There, the JS-level denial in `worker-preload.ts`
+ *   is the ONLY barrier — which is exactly why it has to be tested there.
+ */
+interface NodeCandidate {
+  path: string;
+  version: string;
+  major: number;
+  minor: number;
+}
+
+function probeNode(candidate: string): NodeCandidate | undefined {
   try {
-    const fromPath = execFileSync("/usr/bin/env", ["which", "node"], {
-      encoding: "utf-8",
-    }).trim();
-    if (fromPath) {
-      candidates.push(fromPath);
+    const version = execFileSync(
+      candidate,
+      ["--permission", "-e", "process.stdout.write(process.versions.node)"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const [major = 0, minor = 0] = version.split(".").map(Number);
+    // 22.15 is the floor for the synchronous `module.registerHooks` the
+    // network preload depends on.
+    if (major > 22 || (major === 22 && minor >= 15)) {
+      return { path: candidate, version, major, minor };
     }
   } catch {
-    // No `node` on PATH; the explicit candidates may still work.
-  }
-
-  for (const candidate of candidates) {
-    try {
-      const version = execFileSync(
-        candidate,
-        ["--permission", "-e", "process.stdout.write(process.versions.node)"],
-        { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
-      ).trim();
-      const [major = 0, minor = 0] = version.split(".").map(Number);
-      if (major > 22 || (major === 22 && minor >= 15)) {
-        return candidate;
-      }
-    } catch {
-      // Not a usable Node: no --permission, or not a Node at all.
-    }
+    // Not a usable Node: no --permission, or not a Node at all.
   }
   return undefined;
 }
 
-const hardenedNode = findHardenedNode();
-if (!hardenedNode) {
+/** Every Node binary worth probing: explicit, on PATH, or version-managed. */
+function nodeCandidatePaths(): string[] {
+  const candidates = new Set<string>();
+  if (process.env.PACO_NODE_EXECUTABLE) {
+    candidates.add(process.env.PACO_NODE_EXECUTABLE);
+  }
+  for (const fixed of [
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+  ]) {
+    candidates.add(fixed);
+  }
+  try {
+    const onPath = execFileSync("/usr/bin/env", ["which", "node"], {
+      encoding: "utf-8",
+    }).trim();
+    if (onPath) {
+      candidates.add(onPath);
+    }
+  } catch {
+    // No node on PATH.
+  }
+
+  const home = homedir();
+  const versionManagerRoots = [
+    path.join(home, ".nvm/versions/node"),
+    path.join(
+      home,
+      "Library/Application Support/Herd/config/nvm/versions/node",
+    ),
+    path.join(home, ".local/share/fnm/node-versions"),
+    path.join(home, ".volta/tools/image/node"),
+    path.join(home, ".asdf/installs/nodejs"),
+  ];
+  for (const root of versionManagerRoots) {
+    try {
+      for (const entry of readdirSync(root)) {
+        candidates.add(path.join(root, entry, "bin", "node"));
+        candidates.add(path.join(root, entry, "installation", "bin", "node"));
+      }
+    } catch {
+      // This version manager is not installed.
+    }
+  }
+  return [...candidates];
+}
+
+function newest(candidates: NodeCandidate[]): NodeCandidate | undefined {
+  return candidates.sort((a, b) => b.major - a.major || b.minor - a.minor)[0];
+}
+
+const probedNodes = nodeCandidatePaths()
+  .map(probeNode)
+  .filter((candidate): candidate is NodeCandidate => candidate !== undefined);
+
+const legacyNode = newest(probedNodes.filter((node) => node.major === 22));
+const modernNode = newest(probedNodes.filter((node) => node.major >= 24));
+
+function warnMissingTier(label: string): void {
   console.warn(
-    "\n!!! SKIPPING the plugin worker containment suite: no Node >= 22.15 with --permission was found.\n" +
-      "!!! The permission model, filesystem allowlist and network denial are therefore UNVERIFIED in this run.\n" +
-      "!!! Set PACO_NODE_EXECUTABLE to a suitable Node binary to run them.\n",
+    `\n!!! SKIPPING the plugin worker containment suite for ${label}: no such Node was found.\n` +
+      "!!! The permission model, filesystem allowlist and network denial are UNVERIFIED on that tier in this run.\n" +
+      "!!! Set PACO_NODE_EXECUTABLE, or install that Node, to run them.\n",
   );
 }
-const describeHardened = hardenedNode ? describe : describe.skip;
 
-describeHardened("worker containment (hardened, real Node)", () => {
-  const PROBE_TOOLS = {
-    "tools/read-outside.js": `import { readFile } from "node:fs/promises";
-    export default {
-      name: "read-outside",
-      description: "Tries to read a file outside the plugin directory.",
-      inputSchema: {},
-      async execute() {
-        try {
-          const text = await readFile("/etc/hosts", "utf-8");
-          return { read: true, length: text.length };
-        } catch (error) {
-          return { read: false, code: error.code ?? String(error.message) };
-        }
-      },
+console.info(
+  `[plugin-host tests] containment tiers: ` +
+    `Node 22.x = ${legacyNode?.version ?? "NOT FOUND"} (${legacyNode?.path ?? "-"}), ` +
+    `Node >= 24 = ${modernNode?.version ?? "NOT FOUND"} (${modernNode?.path ?? "-"})`,
+);
+
+/**
+ * The containment suite, run once per available Node tier.
+ *
+ * Every test here spawns a real hardened worker: `--permission`, the fs
+ * allowlist, and the network preload, exactly as production would.
+ */
+function describeContainment(label: string, node: NodeCandidate): void {
+  describe(`worker containment (${label}, Node ${node.version})`, () => {
+    const PROBE_TOOLS = {
+      "tools/read-outside.js": `import { readFile } from "node:fs/promises";
+      export default {
+        name: "read-outside",
+        description: "Tries to read a file outside the plugin directory.",
+        inputSchema: {},
+        async execute() {
+          try {
+            const text = await readFile("/etc/hosts", "utf-8");
+            return { read: true, length: text.length };
+          } catch (error) {
+            return { read: false, code: error.code ?? String(error.message) };
+          }
+        },
+      };
+      `,
+      "tools/read-own.js": `import { readFile } from "node:fs/promises";
+      import * as path from "node:path";
+      export default {
+        name: "read-own",
+        description: "Reads the plugin's own manifest.",
+        inputSchema: {},
+        async execute() {
+          const text = await readFile(path.join(process.cwd(), "plugin.json"), "utf-8");
+          return { name: JSON.parse(text).name };
+        },
+      };
+      `,
+      "tools/write-state.js": `import { readFile, writeFile } from "node:fs/promises";
+      import * as path from "node:path";
+      export default {
+        name: "write-state",
+        description: "Writes and reads back a file in the state directory.",
+        inputSchema: {},
+        async execute(input, api) {
+          const file = path.join(api.stateDir, "scratch.txt");
+          await writeFile(file, "persisted");
+          return { readBack: await readFile(file, "utf-8"), stateDir: api.stateDir };
+        },
+      };
+      `,
+      "tools/write-outside.js": `import { writeFile } from "node:fs/promises";
+      export default {
+        name: "write-outside",
+        description: "Tries to write outside the state directory.",
+        inputSchema: {},
+        async execute() {
+          try {
+            await writeFile("/tmp/paco-plugin-escape.txt", "escaped");
+            return { wrote: true };
+          } catch (error) {
+            return { wrote: false, code: error.code ?? String(error.message) };
+          }
+        },
+      };
+      `,
+      "tools/import-module.js": `export default {
+        name: "import-module",
+        description: "Tries to import a denied builtin.",
+        inputSchema: {},
+        async execute(input) {
+          try {
+            await import(input.specifier);
+            return { imported: true };
+          } catch (error) {
+            return { imported: false, message: String(error.message) };
+          }
+        },
+      };
+      `,
+      "tools/builtin.js": `export default {
+        name: "builtin",
+        description: "Tries process.getBuiltinModule, which skips module resolution.",
+        inputSchema: {},
+        execute(input) {
+          try {
+            const mod = process.getBuiltinModule(input.specifier);
+            return { obtained: mod !== undefined && mod !== null };
+          } catch (error) {
+            return { obtained: false, message: String(error.message) };
+          }
+        },
+      };
+      `,
+      "tools/native-binding.js": `export default {
+        name: "native-binding",
+        description: "Tries the deprecated native binding back doors.",
+        inputSchema: {},
+        execute() {
+          const result = {};
+          for (const name of ["binding", "_linkedBinding"]) {
+            try {
+              process[name]("tcp_wrap");
+              result[name] = "OBTAINED";
+            } catch (error) {
+              result[name] = "denied: " + String(error.message);
+            }
+          }
+          return result;
+        },
+      };
+      `,
+      "tools/relock.js": `export default {
+        name: "relock",
+        description: "Tries to put the original getBuiltinModule back.",
+        inputSchema: {},
+        execute() {
+          const result = {};
+          try {
+            Object.defineProperty(process, "getBuiltinModule", {
+              value: () => "pwned",
+            });
+            result.redefined = String(process.getBuiltinModule("node:net"));
+          } catch (error) {
+            result.redefined = "locked";
+          }
+          try {
+            process.getBuiltinModule = () => "pwned";
+            result.reassigned = String(process.getBuiltinModule("node:net"));
+          } catch (error) {
+            result.reassigned = "locked";
+          }
+          return result;
+        },
+      };
+      `,
+      "tools/connect.js": `export default {
+        name: "connect",
+        description: "Tries every route to a TCP socket, then tries to use it.",
+        inputSchema: {},
+        async execute() {
+          let net;
+          try {
+            net = process.getBuiltinModule("node:net");
+          } catch (error) {
+            try {
+              net = await import("node:net");
+            } catch (importError) {
+              return { connected: false, stage: "module", message: String(error.message) };
+            }
+          }
+          if (!net || typeof net.connect !== "function") {
+            return { connected: false, stage: "module", message: "no net module" };
+          }
+          return await new Promise((resolve) => {
+            try {
+              const socket = net.connect({ host: "1.1.1.1", port: 80 });
+              const done = (r) => {
+                try { socket.destroy(); } catch {}
+                resolve(r);
+              };
+              socket.on("connect", () => done({ connected: true, stage: "socket" }));
+              socket.on("error", (e) => done({ connected: false, stage: "socket", code: e.code }));
+              setTimeout(() => done({ connected: false, stage: "timeout" }), 3000);
+            } catch (error) {
+              resolve({ connected: false, stage: "throw", message: String(error.message) });
+            }
+          });
+        },
+      };
+      `,
+      "tools/globals.js": `export default {
+        name: "globals",
+        description: "Reports which network globals survive.",
+        inputSchema: {},
+        execute() {
+          return {
+            fetch: typeof globalThis.fetch,
+            WebSocket: typeof globalThis.WebSocket,
+            XMLHttpRequest: typeof globalThis.XMLHttpRequest,
+            EventSource: typeof globalThis.EventSource,
+          };
+        },
+      };
+      `,
     };
-    `,
-    "tools/read-own.js": `import { readFile } from "node:fs/promises";
-    import * as path from "node:path";
-    export default {
-      name: "read-own",
-      description: "Reads the plugin's own manifest.",
-      inputSchema: {},
-      async execute() {
-        const text = await readFile(path.join(process.cwd(), "plugin.json"), "utf-8");
-        return { name: JSON.parse(text).name };
-      },
-    };
-    `,
-    "tools/write-state.js": `import { readFile, writeFile } from "node:fs/promises";
-    import * as path from "node:path";
-    export default {
-      name: "write-state",
-      description: "Writes and reads back a file in the state directory.",
-      inputSchema: {},
-      async execute(input, api) {
-        const file = path.join(api.stateDir, "scratch.txt");
-        await writeFile(file, "persisted");
-        return { readBack: await readFile(file, "utf-8"), stateDir: api.stateDir };
-      },
-    };
-    `,
-    "tools/write-outside.js": `import { writeFile } from "node:fs/promises";
-    export default {
-      name: "write-outside",
-      description: "Tries to write outside the state directory.",
-      inputSchema: {},
-      async execute() {
-        try {
-          await writeFile("/tmp/paco-plugin-escape.txt", "escaped");
-          return { wrote: true };
-        } catch (error) {
-          return { wrote: false, code: error.code ?? String(error.message) };
-        }
-      },
-    };
-    `,
-    "tools/import-module.js": `export default {
-      name: "import-module",
-      description: "Tries to import a denied builtin.",
-      inputSchema: {},
-      async execute(input) {
-        try {
-          await import(input.specifier);
-          return { imported: true };
-        } catch (error) {
-          return { imported: false, message: String(error.message) };
-        }
-      },
-    };
-    `,
-    "tools/globals.js": `export default {
-      name: "globals",
-      description: "Reports which network globals survive.",
-      inputSchema: {},
-      execute() {
-        return {
-          fetch: typeof globalThis.fetch,
-          WebSocket: typeof globalThis.WebSocket,
-          XMLHttpRequest: typeof globalThis.XMLHttpRequest,
-          EventSource: typeof globalThis.EventSource,
-        };
-      },
-    };
-    `,
-  };
 
-  async function hardenedHost(): Promise<PluginHost> {
-    const descriptor = await writePlugin(
-      "contained-plugin",
-      ["tools:register"],
-      PROBE_TOOLS,
-    );
-    const host = new PluginHost({
-      descriptor,
-      grantedCapabilities: ["tools:register"],
-      netDomains: [],
-      handlers: {},
-      hardened: true,
-      nodeExecutable: hardenedNode,
-    });
-    running.push(host);
-    await host.start();
-    return host;
-  }
-
-  function output(outcome: { ok: boolean }): Record<string, unknown> {
-    if (!("output" in outcome)) {
-      throw new Error("tool call failed");
-    }
-    return (outcome as { output: Record<string, unknown> }).output;
-  }
-
-  test("starts under the permission model and registers its tools", async () => {
-    const host = await hardenedHost();
-    expect(host.state).toBe("running");
-  });
-
-  test("cannot read a file outside the plugin directory", async () => {
-    const host = await hardenedHost();
-
-    const result = output(await host.invokeTool("read-outside", {}));
-
-    expect(result.read).toBe(false);
-    expect(result.code).toBe("ERR_ACCESS_DENIED");
-    // Emphatically: no file contents came back as data.
-    expect(result.length).toBeUndefined();
-  });
-
-  test("can read its own files", async () => {
-    const host = await hardenedHost();
-
-    const result = output(await host.invokeTool("read-own", {}));
-
-    expect(result.name).toBe("contained-plugin");
-  });
-
-  test("can write inside its state directory", async () => {
-    const host = await hardenedHost();
-
-    const result = output(await host.invokeTool("write-state", {}));
-
-    expect(result.readBack).toBe("persisted");
-    expect(result.stateDir).toBe(host.pluginStateDir);
-    const onDisk = await readFile(
-      path.join(host.pluginStateDir, "scratch.txt"),
-      "utf-8",
-    );
-    expect(onDisk).toBe("persisted");
-  });
-
-  test("cannot write outside its state directory", async () => {
-    const host = await hardenedHost();
-
-    const result = output(await host.invokeTool("write-outside", {}));
-
-    expect(result.wrote).toBe(false);
-    expect(result.code).toBe("ERR_ACCESS_DENIED");
-  });
-
-  test("cannot import child_process, worker_threads, or the network builtins", async () => {
-    const host = await hardenedHost();
-
-    for (const specifier of [
-      "node:child_process",
-      "node:worker_threads",
-      "node:net",
-      "node:http",
-      "node:https",
-      "node:dns",
-      "node:tls",
-      "node:vm",
-      "node:module",
-      "child_process",
-      "net",
-    ]) {
-      const result = output(
-        await host.invokeTool("import-module", { specifier }),
+    async function hardenedHost(): Promise<PluginHost> {
+      const descriptor = await writePlugin(
+        "contained-plugin",
+        ["tools:register"],
+        PROBE_TOOLS,
       );
-      expect(result.imported).toBe(false);
-      expect(String(result.message)).toContain("plugin module denied");
+      const host = new PluginHost({
+        descriptor,
+        grantedCapabilities: ["tools:register"],
+        netDomains: [],
+        handlers: {},
+        hardened: true,
+        nodeExecutable: node.path,
+      });
+      running.push(host);
+      await host.start();
+      return host;
     }
-  });
 
-  test("has no network globals at all", async () => {
-    const host = await hardenedHost();
+    function output(outcome: { ok: boolean }): Record<string, unknown> {
+      if (!("output" in outcome)) {
+        throw new Error("tool call failed");
+      }
+      return (outcome as { output: Record<string, unknown> }).output;
+    }
 
-    const result = output(await host.invokeTool("globals", {}));
+    test("starts under the permission model and registers its tools", async () => {
+      const host = await hardenedHost();
+      expect(host.state).toBe("running");
+    });
 
-    expect(result).toEqual({
-      fetch: "undefined",
-      WebSocket: "undefined",
-      XMLHttpRequest: "undefined",
-      EventSource: "undefined",
+    test("cannot read a file outside the plugin directory", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("read-outside", {}));
+
+      expect(result.read).toBe(false);
+      expect(result.code).toBe("ERR_ACCESS_DENIED");
+      // Emphatically: no file contents came back as data.
+      expect(result.length).toBeUndefined();
+    });
+
+    test("can read its own files", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("read-own", {}));
+
+      expect(result.name).toBe("contained-plugin");
+    });
+
+    test("can write inside its state directory", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("write-state", {}));
+
+      expect(result.readBack).toBe("persisted");
+      expect(result.stateDir).toBe(host.pluginStateDir);
+      const onDisk = await readFile(
+        path.join(host.pluginStateDir, "scratch.txt"),
+        "utf-8",
+      );
+      expect(onDisk).toBe("persisted");
+    });
+
+    test("cannot write outside its state directory", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("write-outside", {}));
+
+      expect(result.wrote).toBe(false);
+      expect(result.code).toBe("ERR_ACCESS_DENIED");
+    });
+
+    test("cannot import child_process, worker_threads, or the network builtins", async () => {
+      const host = await hardenedHost();
+
+      for (const specifier of [
+        "node:child_process",
+        "node:worker_threads",
+        "node:net",
+        "node:http",
+        "node:https",
+        "node:dns",
+        "node:tls",
+        "node:vm",
+        "node:module",
+        "child_process",
+        "net",
+      ]) {
+        const result = output(
+          await host.invokeTool("import-module", { specifier }),
+        );
+        expect(result.imported).toBe(false);
+        expect(String(result.message)).toContain("plugin module denied");
+      }
+    });
+
+    test("cannot reach a denied builtin through process.getBuiltinModule", async () => {
+      const host = await hardenedHost();
+
+      // This is the bypass the adversarial review used: getBuiltinModule
+      // never goes through module resolution, so the resolve hook is blind
+      // to it. On Node 22.21.1 it returned a working `net`.
+      for (const specifier of [
+        "node:net",
+        "net",
+        "node:http",
+        "node:https",
+        "node:http2",
+        "node:dns",
+        "node:tls",
+        "node:dgram",
+        "node:child_process",
+        "child_process",
+        "node:module",
+        "node:vm",
+        "node:worker_threads",
+      ]) {
+        const result = output(await host.invokeTool("builtin", { specifier }));
+        expect(result.obtained).toBe(false);
+        expect(String(result.message)).toContain("plugin module denied");
+      }
+    });
+
+    test("still allows the builtins a plugin is meant to have", async () => {
+      const host = await hardenedHost();
+
+      // fs stays reachable: it is gated by the permission model, not by us.
+      const result = output(
+        await host.invokeTool("builtin", { specifier: "node:fs" }),
+      );
+
+      expect(result.obtained).toBe(true);
+    });
+
+    test("cannot reach native bindings through process.binding", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("native-binding", {}));
+
+      expect(String(result.binding)).toContain("plugin module denied");
+      expect(String(result._linkedBinding)).toContain("plugin module denied");
+    });
+
+    test("cannot put the original getBuiltinModule back", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("relock", {}));
+
+      expect(result).toEqual({ redefined: "locked", reassigned: "locked" });
+    });
+
+    test("cannot open a TCP socket", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("connect", {}, 10_000));
+
+      expect(result.connected).toBe(false);
+      // It never even got a module to call connect on.
+      expect(result.stage).toBe("module");
+      expect(String(result.message)).toContain("plugin module denied");
+    });
+
+    test("has no network globals at all", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("globals", {}));
+
+      expect(result).toEqual({
+        fetch: "undefined",
+        WebSocket: "undefined",
+        XMLHttpRequest: "undefined",
+        EventSource: "undefined",
+      });
+    });
+
+    test("refuses to start a plugin that ships a symlink out of its tree", async () => {
+      const descriptor = await writePlugin(
+        "linked-plugin",
+        ["tools:register"],
+        {
+          "tools/echo.js": ECHO_TOOL,
+        },
+      );
+      await symlink("/", path.join(descriptor.rootDir, "escape"));
+      const host = new PluginHost({
+        descriptor,
+        grantedCapabilities: ["tools:register"],
+        netDomains: [],
+        handlers: {},
+        hardened: true,
+        nodeExecutable: node.path,
+      });
+      running.push(host);
+
+      await expect(host.start()).rejects.toThrow(/symbolic link/);
+      expect(host.state).toBe("crashed");
     });
   });
-});
+}
+
+if (legacyNode) {
+  describeContainment("Node 22.x, no socket gate", legacyNode);
+} else {
+  warnMissingTier("Node 22.x");
+}
+
+if (modernNode) {
+  describeContainment("Node >= 24, socket gate", modernNode);
+} else {
+  warnMissingTier("Node >= 24");
+}
+
+if (!(legacyNode || modernNode)) {
+  warnMissingTier("any Node with --permission");
+}

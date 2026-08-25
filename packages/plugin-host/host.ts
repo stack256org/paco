@@ -1,6 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, readdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,11 +25,11 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 3000;
 /** Ceiling on retained worker stderr, so a chatty plugin cannot grow it. */
 const MAX_STDERR_BYTES = 16_000;
 /**
- * Ceiling on one protocol line. Without it a worker can pin the host's memory
- * by writing forever and never sending a newline — the reader would buffer
- * the whole stream waiting for one that never comes.
+ * Ceiling on one protocol line, in bytes (64 KiB). Without it a worker can pin
+ * the host's memory by writing forever and never sending a newline — the
+ * reader would buffer the whole stream waiting for one that never comes.
  */
-const MAX_LINE_BYTES = 64_000;
+const MAX_LINE_BYTES = 65_536;
 /** Capability requests a plugin may have outstanding at once. */
 const MAX_INFLIGHT_CAPABILITY_REQUESTS = 32;
 /** Worker `log` messages accepted per second before the rest are dropped. */
@@ -37,6 +37,10 @@ const MAX_LOGS_PER_SECOND = 50;
 
 /** Plugin ids, per the plan. Mirrors the plugin-kit manifest rule. */
 const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
+
+/** Bounds on the pre-flight scan of a plugin directory. */
+const MAX_PLUGIN_ENTRIES = 20_000;
+const MAX_PLUGIN_DEPTH = 24;
 
 /** Packages the worker must be able to read for its own imports to resolve. */
 const WORKER_RUNTIME_PACKAGES = ["zod", "@paco/plugin-kit"] as const;
@@ -134,23 +138,31 @@ interface PendingToolCall {
  *   `PATH`, `PACO_PLUGIN_ID`, `PACO_PLUGIN_STATE_DIR` — so `APP_SECRET`,
  *   `POSTGRES_URL` and every provider token are simply absent. Not filtered:
  *   never present.
- * - **No filesystem beyond its own directory.** Node's permission model
- *   (`--permission`) allows reads only under the plugin's own root, this
- *   package, and the two packages the worker imports; writes only under a
- *   per-plugin scratch dir. `/etc/hosts`, the repo, and the operator's home
- *   directory all fail with `ERR_ACCESS_DENIED`.
+ * - **A filesystem allowlist.** Node's permission model (`--permission`)
+ *   allows reads only under the plugin's own root, this package, and the two
+ *   packages the worker imports; writes only under a per-plugin scratch dir.
+ *   Paths outside those prefixes fail with `ERR_ACCESS_DENIED`.
+ * - **A symlink rule that makes the allowlist mean something.** The
+ *   permission model follows links living under an allowed prefix, so one
+ *   `escape -> /` would grant the whole filesystem. `start()` therefore
+ *   refuses any plugin tree containing a symbolic link — see
+ *   `assertPluginTreeIsContained`. This runs in BOTH modes.
  * - **No subprocesses, workers or native addons.** `--allow-child-process`,
  *   `--allow-worker` and `--allow-addons` are deliberately not passed.
- * - **No network.** The permission model does not cover sockets, so
- *   `worker-preload.ts` deletes the network globals and refuses to resolve
- *   `node:net`, `node:http`, `node:dns` and the rest for plugin code. The
- *   only way out is the `net:fetch` capability, allowlisted here.
+ * - **No network.** On Node >= 24 the permission model gates sockets; on
+ *   22.x it does not, and `worker-preload.ts` is then the only barrier. It
+ *   deletes the network globals, refuses to resolve `node:net` and friends,
+ *   AND guards `process.getBuiltinModule` / `process.binding`, which reach
+ *   builtins without going through module resolution at all. The only
+ *   sanctioned way out is the `net:fetch` capability, allowlisted here.
  * - **No unbounded anything.** Line length, stderr, in-flight capability
  *   requests, log rate, tool count and tool-call duration are all capped.
  *
- * See `SECURITY.md` in this package for the full statement, including what
- * is explicitly *not* prevented. The install-consent copy must not promise
- * more than that file claims.
+ * See `SECURITY.md` in this package for the full statement, including what is
+ * explicitly *not* prevented — notably that a plugin can still SIGKILL the
+ * host process, and that there is no CPU, memory or disk bound. Production
+ * must pin `nodeExecutable` to Node >= 24. The install-consent copy must not
+ * promise more than that file claims.
  *
  * ## What the host decides
  *
@@ -269,7 +281,15 @@ export class PluginHost {
     this.currentState = "starting";
 
     await mkdir(this.stateDir, { recursive: true });
-    await this.resolveRealPaths();
+    try {
+      await this.resolveRealPaths();
+      await this.assertPluginTreeIsContained();
+    } catch (error) {
+      // Refusing to start IS the containment here: there is no safe way to
+      // run a plugin whose directory reaches outside itself.
+      this.currentState = "crashed";
+      throw error;
+    }
 
     const child = spawn(this.nodeExecutable, this.buildWorkerArgs(), {
       // The plugin's own directory, so relative paths inside it resolve and
@@ -463,6 +483,70 @@ export class PluginHost {
         resolveAll(slots.hooks),
       ]);
     this.slots = { tools, channels, skills, agents, renderers, hooks };
+  }
+
+  /**
+   * Refuses to start a plugin whose directory can reach outside itself.
+   *
+   * Node's permission model allows a path prefix, and it FOLLOWS symlinks
+   * that live under an allowed prefix. A plugin shipping `escape -> /` is
+   * therefore granted the entire filesystem, read through its own directory:
+   * verified reading `/etc/hosts`, Paco's own source, and the operator's home
+   * directory on Node 26.7.0 with the allowlist correctly applied. The
+   * allowlist cannot express "but not through links", so the check has to
+   * happen here, before the worker exists.
+   *
+   * The installer rejects symlinked archives too; this is the defence in
+   * depth that also covers a directory installed by hand or in dev.
+   *
+   * The scan is bounded in both breadth and depth, and exceeding either bound
+   * is itself a refusal — an unbounded walk of an attacker-supplied directory
+   * would just be a different denial of service.
+   */
+  private async assertPluginTreeIsContained(): Promise<void> {
+    let entriesSeen = 0;
+
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > MAX_PLUGIN_DEPTH) {
+        throw new Error(
+          `plugin ${this.pluginId} nests directories deeper than ${MAX_PLUGIN_DEPTH}: ${dir}`,
+        );
+      }
+      const entries = await readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const entryPath = path.join(dir, entry.name);
+        entriesSeen++;
+        if (entriesSeen > MAX_PLUGIN_ENTRIES) {
+          throw new Error(
+            `plugin ${this.pluginId} contains more than ${MAX_PLUGIN_ENTRIES} files`,
+          );
+        }
+        // Dirent reflects lstat, so this is the link itself, not its target.
+        if (entry.isSymbolicLink()) {
+          throw new Error(
+            `plugin ${this.pluginId} contains a symbolic link, which would read outside its own directory: ${entryPath}`,
+          );
+        }
+        if (entry.isDirectory()) {
+          await walk(entryPath, depth + 1);
+        }
+      }
+    };
+
+    await walk(this.rootDir, 0);
+
+    // Belt and braces: every slot path, already resolved to its real path,
+    // must still land inside the plugin's real root.
+    const prefix = this.rootDir + path.sep;
+    for (const slotPaths of Object.values(this.slots)) {
+      for (const slotPath of slotPaths) {
+        if (!slotPath.startsWith(prefix)) {
+          throw new Error(
+            `plugin ${this.pluginId} has a slot file outside its own directory: ${slotPath}`,
+          );
+        }
+      }
+    }
   }
 
   /**
