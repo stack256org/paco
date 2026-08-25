@@ -51,6 +51,18 @@ export class TurnEventRecorder {
   }
 
   /**
+   * The turn id this recorder was constructed with.
+   *
+   * Exposed so a caller that only holds the recorder (not the id it passed
+   * into the constructor) can still recover it — e.g. threading it out of a
+   * step's return value for post-turn work keyed on the same turn, such as
+   * memory distillation.
+   */
+  getTurnId(): string {
+    return this.turnId;
+  }
+
+  /**
    * Enqueue a batch behind every previously enqueued batch.
    *
    * The `.catch` here is defensive, not the primary contract: `Appender`

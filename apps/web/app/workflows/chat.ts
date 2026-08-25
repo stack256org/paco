@@ -44,6 +44,7 @@ import {
   claimActiveStream,
   closeStream,
   clearActiveStream,
+  distillTurnMemoryStep,
   hasAutoCommitChangesStep,
   persistAssistantMessage,
   persistAssistantMessageWithToolResults,
@@ -536,6 +537,13 @@ export async function runAgentWorkflow(options: Options) {
   let caughtError: unknown;
   let sandboxState: AgentCallOptions["sandbox"]["state"] | undefined;
   let shouldRefreshCachedDiff = false;
+  // Carried out of the last completed `runTurn` call for the post-turn
+  // distillation step below, which needs the turn it should learn from and
+  // where its project-scope output belongs — neither of which the workflow
+  // body can otherwise compute without importing sandbox/filesystem modules
+  // it must not pull in statically (see `runAgentStep`'s own comment on this).
+  let finalTurnId: string | undefined;
+  let finalSessionRepoDir: string | undefined;
 
   try {
     const [, runtime, modelRuntime, modelMessages] = await Promise.all([
@@ -640,6 +648,8 @@ export async function runAgentWorkflow(options: Options) {
       wasAborted = wasAborted || stepResult.stepWasAborted;
       finalFinishReason = stepResult.finishReason;
       exhaustedMaxSteps = stepResult.finishReason === "length";
+      finalTurnId = stepResult.turnId;
+      finalSessionRepoDir = stepResult.sessionRepoDir;
 
       if (stepResult.stepUsage) {
         totalUsage = totalUsage
@@ -883,6 +893,20 @@ export async function runAgentWorkflow(options: Options) {
       : exhaustedMaxSteps
         ? "failed"
         : "completed";
+
+    // Very end of the completion sequence, after auto-commit and auto-PR: the
+    // client-visible stream is already closed above, so awaiting this here
+    // costs the workflow run some wall-clock time but never delays the
+    // user's turn. A Section 3 Task 6 reviewer gate will be inserted BEFORE
+    // this call once it lands on this branch.
+    if (finalTurnId && finalSessionRepoDir) {
+      await distillTurnMemoryStep({
+        chatId: options.chatId,
+        sessionRepoDir: finalSessionRepoDir,
+        userId: options.userId,
+        turnId: finalTurnId,
+      });
+    }
   } catch (error) {
     workflowStatus = wasAborted ? "aborted" : "failed";
     caughtError = error;
@@ -1013,6 +1037,10 @@ const runAgentStep = async (
   // the two mean different things to the workflow's continuation loop.
   let steeredMessage: { messageId: string; text: string } | undefined;
   let steerMonitor: { stop: () => void } | undefined;
+  // Declared outside the try for the same reason as `recorder`: the
+  // abort-catch branches below also need it, to thread through to the
+  // post-turn distillation step.
+  let sessionRepoDir: string | undefined;
 
   try {
     // Read fresh rather than threaded in from an earlier step: this step can
@@ -1054,9 +1082,63 @@ const runAgentStep = async (
     await recorder.start({ messageId, prompt, policy: turnPolicy });
     recorder.assertPromptLogged(prompt);
 
+    /*
+     * The session's repository directory — not the chat's worktree — is
+     * resolved once here and reused below for both memory retrieval and (via
+     * this step's return value) the post-turn distillation step: project
+     * memory lives in the session repo so it's shared across a session's
+     * chats, not scoped to one.
+     *
+     * Dynamically imported: this touches the filesystem and the sandbox
+     * package, which the "use workflow" function in this file must not pull
+     * in statically (see `chat-sandbox-runtime.ts`'s `hostWorkingDirectory`
+     * comment) — the same reason `chat-post-finish.ts` defers its own
+     * sandbox/memory imports to inside each step body.
+     */
+    try {
+      const { resolveWorkCwd } = await import("@/lib/agent/workspace-paths");
+      sessionRepoDir = resolveWorkCwd(agentOptions.sandbox.state);
+    } catch (error) {
+      console.error("[workflow] Failed to resolve session repo dir:", error);
+    }
+
+    /*
+     * Memory is additive context, never a turn dependency (see the plan's
+     * memory invariants): a failed load must never block or fail the turn,
+     * so loading the org and retrieving memory is wrapped in one try/catch
+     * and simply leaves `memorySection` unset on any failure.
+     *
+     * Loaded fresh every turn, right here rather than threaded in from an
+     * earlier step, for the same reason the roster/skills are: this step can
+     * replay independently under the durable workflow runtime, and memory
+     * written since the last turn (a distillation, a manual edit, a
+     * promotion) should be visible to this one.
+     */
+    let memorySection: string | undefined;
+    if (sessionRepoDir) {
+      try {
+        const [{ getOrganization }, { loadMemorySectionForTurn }] =
+          await Promise.all([
+            import("@/lib/org/organization"),
+            import("@/lib/memory/load-for-turn"),
+          ]);
+        const organization = await getOrganization();
+        memorySection = await loadMemorySectionForTurn({
+          sessionRepoDir,
+          userId,
+          organizationId: organization?.id,
+          prompt,
+        });
+      } catch (error) {
+        console.error("[workflow] Failed to load memory for turn:", error);
+      }
+    }
+
     const step = await runAgentTurn<WebAgentUIMessage>({
       prompt,
-      options: agentOptions,
+      options: memorySection
+        ? { ...agentOptions, memorySection }
+        : agentOptions,
       messageId,
       originalMessages,
       ...(claudeSessionId ? { claudeSessionId } : {}),
@@ -1157,6 +1239,11 @@ const runAgentStep = async (
         stepFinishedAt,
         step.finishReason,
       ),
+      // Threaded out for the post-turn distillation step, which runs from
+      // the workflow body once the whole turn (including any continuations)
+      // has finished — not from inside this step.
+      turnId: recorder?.getTurnId(),
+      sessionRepoDir,
     };
   } catch (error) {
     const stepFinishedAt = new Date();
@@ -1188,6 +1275,8 @@ const runAgentStep = async (
             stepFinishedAt,
             abortedFinishReason,
           ),
+          turnId: recorder?.getTurnId(),
+          sessionRepoDir,
         };
       }
 
@@ -1207,6 +1296,8 @@ const runAgentStep = async (
           stepFinishedAt,
           abortedFinishReason,
         ),
+        turnId: recorder?.getTurnId(),
+        sessionRepoDir,
       };
     }
 

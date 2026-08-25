@@ -20,6 +20,12 @@ function collectingAppender() {
 }
 
 describe("TurnEventRecorder", () => {
+  test("getTurnId returns the id the recorder was constructed with", () => {
+    const { append } = collectingAppender();
+    const recorder = new TurnEventRecorder("chat1", "turn1", append);
+    expect(recorder.getTurnId()).toBe("turn1");
+  });
+
   test("start logs turn/start and user/message; assertPromptLogged passes", async () => {
     const { batches, append } = collectingAppender();
     const recorder = new TurnEventRecorder("chat1", "turn1", append);

@@ -43,4 +43,28 @@ export interface AgentCallOptions {
   customInstructions?: string;
   /** Skills discovered in the sandbox workspace. */
   skills?: SkillMetadata[];
+  /**
+   * Rendered "## Memory" section for this turn (see
+   * `lib/memory/load-for-turn.ts`), threaded straight through to
+   * `buildAppendSystemPrompt`. Loaded fresh per turn, so it is absent
+   * whenever nothing scored above zero or the load failed.
+   */
+  memorySection?: string;
+  /**
+   * JSON Schema constraining this turn's output (`--json-schema`).
+   *
+   * The turn's parsed result is read back from
+   * `AgentStepResult.structuredOutput` once it settles. Used by headless
+   * callers (e.g. the planner) that need a shaped answer rather than free
+   * text.
+   */
+  structuredOutput?: { jsonSchema: Record<string, unknown> };
+  /**
+   * Restricts the built-in tool set available to the turn (`--tools`).
+   *
+   * Omit to inherit every tool. Used to give a headless turn read-only
+   * exploration (e.g. `["Read", "Grep", "Glob", "Bash"]`) without also
+   * granting it edit tools.
+   */
+  tools?: string[];
 }

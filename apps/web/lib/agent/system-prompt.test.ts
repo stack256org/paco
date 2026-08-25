@@ -88,6 +88,26 @@ describe("buildAppendSystemPrompt", () => {
     expect(prompt).toContain("force-push");
   });
 
+  test("places the memory section between Environment and Toolchain", () => {
+    const prompt = buildAppendSystemPrompt({
+      environmentDetails: "- Sandbox: Docker container `paco-sbx-abc`",
+      memorySection: "## Memory\n\nNotes from earlier sessions.",
+    });
+
+    const environmentIndex = prompt.indexOf("## Environment");
+    const memoryIndex = prompt.indexOf("## Memory");
+    const toolchainIndex = prompt.indexOf("## Toolchain");
+
+    expect(environmentIndex).toBeGreaterThanOrEqual(0);
+    expect(memoryIndex).toBeGreaterThan(environmentIndex);
+    expect(toolchainIndex).toBeGreaterThan(memoryIndex);
+    expect(prompt).toContain("Notes from earlier sessions.");
+  });
+
+  test("omits the memory section entirely when none is supplied", () => {
+    expect(buildAppendSystemPrompt({})).not.toContain("## Memory");
+  });
+
   test("omits a skill that opted out of model invocation", () => {
     const prompt = buildAppendSystemPrompt({
       skills: [

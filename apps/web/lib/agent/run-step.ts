@@ -23,6 +23,8 @@ export interface AgentStepResult<UI extends UIMessage> {
   isError: boolean;
   /** Set when the turn ended because the caller steered it mid-run. */
   steered?: { text: string };
+  /** Parsed result when `options.structuredOutput` was set for this turn. */
+  structuredOutput?: unknown;
 }
 
 /**
@@ -98,6 +100,7 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     customInstructions: options.customInstructions,
     skills: options.skills,
     hasGithubToken: params.githubToken !== undefined,
+    memorySection: options.memorySection,
   });
 
   const backendOptions: ClaudeBackendOptions = {
@@ -125,6 +128,10 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     ...(options.model?.effort && { effort: options.model.effort }),
     agents: resolveAgents(options),
     ...(appendSystemPrompt && { appendSystemPrompt }),
+    ...(options.structuredOutput && {
+      jsonSchema: options.structuredOutput.jsonSchema,
+    }),
+    ...(options.tools && { tools: options.tools }),
     /*
      * The run is non-interactive, so anything that asks for approval is simply
      * refused — there is no one to ask.
@@ -213,5 +220,8 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     costUsd: result.costUsd,
     isError: result.isError,
     ...(result.steered ? { steered: result.steered } : {}),
+    ...(result.structuredOutput !== undefined
+      ? { structuredOutput: result.structuredOutput }
+      : {}),
   };
 }

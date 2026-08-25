@@ -165,6 +165,14 @@ const spies = {
       prUrl: "https://github.com/acme/repo/pull/42",
     }),
   ),
+  distillTurnMemoryStep: mock(
+    (_params?: {
+      chatId?: string;
+      sessionRepoDir?: string;
+      userId?: string;
+      turnId?: string;
+    }) => Promise.resolve(),
+  ),
 };
 
 let testSessionRecord: {
@@ -204,6 +212,8 @@ let agentTurnCalls: Array<{
   prompt: string;
   maxTurns?: number;
   claudeSessionId?: string;
+  /** The `AgentCallOptions` the step handed to `runAgentTurn` for this turn. */
+  options?: { memorySection?: string };
 }> = [];
 /** Stands in for the user pressing stop, which reaches the CLI as an abort. */
 let agentAbortsTurn = false;
@@ -241,12 +251,14 @@ mock.module("@/lib/agent/run-step", () => ({
     originalMessages?: Array<Record<string, unknown>>;
     abortSignal?: AbortSignal;
     onChunk: (chunk: Record<string, unknown>) => Promise<void>;
+    options?: { memorySection?: string };
   }) => {
     agentInputMessages = params.prompt;
     agentTurnCalls.push({
       prompt: params.prompt,
       maxTurns: params.maxTurns,
       claudeSessionId: params.claudeSessionId,
+      options: params.options,
     });
 
     if (agentAbortsTurn) {
@@ -380,6 +392,32 @@ mock.module("./chat-sandbox-runtime", () => ({
   resolveChatSandboxRuntime: spies.resolveChatSandboxRuntime,
 }));
 
+// The turn step now retrieves memory before dispatching. These stand in for
+// the real filesystem/DB-touching modules it dynamically imports, so the
+// workflow tests stay hermetic — the assertions below control what
+// `loadMemorySectionForTurn` returns and check what it was called with.
+const SESSION_REPO_DIR = "/workspace/session-1/repo";
+let organizationRecord: { id: string } | null = { id: "org-1" };
+let memorySectionToReturn: string | undefined;
+const loadMemorySectionForTurnSpy = mock(
+  (_params: {
+    sessionRepoDir: string;
+    userId: string;
+    organizationId?: string;
+    prompt: string;
+  }) => Promise.resolve(memorySectionToReturn),
+);
+
+mock.module("@/lib/agent/workspace-paths", () => ({
+  resolveWorkCwd: () => SESSION_REPO_DIR,
+}));
+mock.module("@/lib/org/organization", () => ({
+  getOrganization: () => Promise.resolve(organizationRecord),
+}));
+mock.module("@/lib/memory/load-for-turn", () => ({
+  loadMemorySectionForTurn: loadMemorySectionForTurnSpy,
+}));
+
 const { runAgentWorkflow } = await import("./chat");
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -461,9 +499,12 @@ beforeEach(() => {
   };
   pendingSteerEvents = [];
   nextSteerEventId = 1;
+  organizationRecord = { id: "org-1" };
+  memorySectionToReturn = undefined;
   appendSessionEventsSpy.mockClear();
   listUnconsumedSteerEventsSpy.mockClear();
   setChatClaudeSessionIdSpy.mockClear();
+  loadMemorySectionForTurnSpy.mockClear();
   Object.values(spies).forEach((s) => s.mockClear());
 });
 
@@ -526,6 +567,56 @@ describe("runAgentWorkflow", () => {
     const types = writtenChunks.map((c) => c.type);
     expect(types[0]).toBe("start");
     expect(types[types.length - 1]).toBe("finish");
+  });
+
+  test("threads a retrieved memory section into the turn's options", async () => {
+    memorySectionToReturn = "## Memory\n\nThe user prefers pnpm.";
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(loadMemorySectionForTurnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionRepoDir: SESSION_REPO_DIR,
+        userId: "user-1",
+        organizationId: "org-1",
+        prompt: "Hello",
+      }),
+    );
+    expect(agentTurnCalls[0]?.options?.memorySection).toBe(
+      "## Memory\n\nThe user prefers pnpm.",
+    );
+  });
+
+  test("omits memorySection from the turn's options when retrieval finds nothing", async () => {
+    memorySectionToReturn = undefined;
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls[0]?.options?.memorySection).toBeUndefined();
+  });
+
+  test("proceeds without memory when retrieval throws", async () => {
+    loadMemorySectionForTurnSpy.mockImplementationOnce(() => {
+      throw new Error("memory backend unavailable");
+    });
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls[0]?.options?.memorySection).toBeUndefined();
+    const types = writtenChunks.map((c) => c.type);
+    expect(types[types.length - 1]).toBe("finish");
+  });
+
+  test("runs post-turn memory distillation with the session repo dir once the turn finishes", async () => {
+    await runAgentWorkflow(makeOptions());
+
+    expect(spies.distillTurnMemoryStep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: "chat-1",
+        sessionRepoDir: SESSION_REPO_DIR,
+        userId: "user-1",
+      }),
+    );
   });
 
   test("does not stream transient workspace setup status from runtime prep", async () => {

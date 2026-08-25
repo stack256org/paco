@@ -92,11 +92,24 @@ export function buildAppendSystemPrompt(params: {
   skills?: SkillMetadata[];
   /** Whether the user has connected a GitHub account. */
   hasGithubToken?: boolean;
+  /**
+   * Rendered "## Memory" section (see `lib/memory/retrieve.ts`'s
+   * `renderMemorySection`), already scored and budget-trimmed for this turn.
+   *
+   * Placed right after Environment and ahead of the Toolchain rules: it is
+   * context about this project/user/org, same tier as the sandbox topology,
+   * not an instruction like the rules that follow it.
+   */
+  memorySection?: string;
 }): string {
   const sections: string[] = [];
 
   if (params.environmentDetails) {
     sections.push(`## Environment\n\n${params.environmentDetails}`);
+  }
+
+  if (params.memorySection) {
+    sections.push(params.memorySection);
   }
 
   sections.push(TOOLCHAIN, RUNNING_THE_APP);
