@@ -92,6 +92,33 @@ export function hasIterableAnnotations(
 }
 
 /**
+ * How much of an element's own text to quote back in an iteration prompt.
+ *
+ * `design-inspector.js` already trims to 80 characters before posting, but
+ * that cap lives in the injected script — this module's own schema
+ * (`inspector-message.ts`) accepts any string, so the bound is re-applied
+ * here rather than assumed. The prompt only needs enough text to identify
+ * which element the user clicked; the selector is what actually locates it.
+ */
+const MAX_EXCERPT_LENGTH = 80;
+
+/**
+ * An element's visible text, made safe to sit inside the double quotes the
+ * prompt wraps it in.
+ *
+ * Newlines are collapsed because the excerpt goes inline into a sentence,
+ * and embedded double quotes are turned into single ones: left alone, text
+ * containing a `"` closes the quotation early, so the model reads the rest of
+ * the element's own copy as if it were the user's instruction.
+ */
+function quotableExcerpt(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim().replaceAll('"', "'");
+  return collapsed.length > MAX_EXCERPT_LENGTH
+    ? `${collapsed.slice(0, MAX_EXCERPT_LENGTH)}…`
+    : collapsed;
+}
+
+/**
  * The message an "Iterate" press sends, composed from one candidate's chips.
  *
  * Annotations with no note are skipped rather than sent as a bare selector:
@@ -107,7 +134,7 @@ export function composeIterationPrompt(
   const items = annotationsForCandidate(annotations, candidate)
     .filter((annotation) => annotation.note.trim().length > 0)
     .map((annotation) => {
-      const excerpt = annotation.text.trim();
+      const excerpt = quotableExcerpt(annotation.text);
       const target = excerpt
         ? `${annotation.selector} ("${excerpt}")`
         : annotation.selector;
