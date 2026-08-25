@@ -25,10 +25,7 @@ import {
   listUnconsumedSteerEvents,
 } from "@/lib/db/session-events";
 import type { AgentCallOptions, SteerController } from "@/lib/agent/types";
-import {
-  resolveChatResumeToken,
-  setChatResumeToken,
-} from "@/lib/db/sessions";
+import { resolveChatResumeToken, setChatResumeToken } from "@/lib/db/sessions";
 import { getWorkflowMetadata, getWritable } from "workflow";
 import { getRun } from "workflow/api";
 import { assistantFileLinkPrompt } from "@/lib/assistant-file-links";
@@ -526,7 +523,7 @@ async function runDesignTurnStep(params: {
     { getOrganization },
     { resolveChatAgents },
     { hostWorkspaceFor },
-    { createCandidates },
+    { createCandidates, removeCandidates },
     { runDesignTurn, DesignTurnAllFailedError, FALLBACK_DESIGNER_AGENT },
   ] = await Promise.all([
     import("@/lib/org/organization"),
@@ -548,12 +545,42 @@ async function runDesignTurnStep(params: {
     );
   }
 
-  const candidates = await createCandidates({
-    sessionWorkspace: hostWorkspaceFor(params.sandboxState),
-    chatId: params.chatId,
-    baseBranch: params.baseBranch,
-    count: params.count,
-  });
+  const sessionWorkspace = hostWorkspaceFor(params.sandboxState);
+
+  /*
+   * `removeCandidates` (Task 1) is otherwise only ever reached from
+   * `acceptCandidate` — the "user picked a winner" path. None of the plan's
+   * three cleanup paths (accept, cancel, chat deletion) covers a design turn
+   * that never produced anything to pick from: a `createCandidates` failure
+   * partway through, or every candidate turn failing, both leave worktrees
+   * and branches `createCandidates` already made with nothing left in this
+   * codebase that will ever remove them. Every failure exit below cleans up
+   * before returning or rethrowing; only the success path — where the user
+   * still needs the candidates to choose from — leaves them in place.
+   */
+  const cleanupOrphanedCandidates = async (): Promise<void> => {
+    try {
+      await removeCandidates({ sessionWorkspace, chatId: params.chatId });
+    } catch (cleanupError) {
+      console.error(
+        "[workflow] Failed to remove design candidates after a failed design turn:",
+        cleanupError,
+      );
+    }
+  };
+
+  let candidates: Awaited<ReturnType<typeof createCandidates>>;
+  try {
+    candidates = await createCandidates({
+      sessionWorkspace,
+      chatId: params.chatId,
+      baseBranch: params.baseBranch,
+      count: params.count,
+    });
+  } catch (error) {
+    await cleanupOrphanedCandidates();
+    throw error;
+  }
 
   const onProgress = async (progress: DesignProgress) => {
     const writer = params.writable.getWriter();
@@ -579,6 +606,7 @@ async function runDesignTurnStep(params: {
     });
     return { outcomes, allFailed: false };
   } catch (error) {
+    await cleanupOrphanedCandidates();
     if (error instanceof DesignTurnAllFailedError) {
       return { outcomes: error.outcomes, allFailed: true };
     }
@@ -777,11 +805,24 @@ export async function runAgentWorkflow(options: Options) {
         );
       }
 
+      // `designCandidateCount`'s `2 | 3` type is compile-time only — Task 4
+      // starts passing this from the client, over the wire, where nothing
+      // stops an arbitrary number from arriving. Reject it here, before
+      // `createCandidates` ever runs, rather than letting it reach git with
+      // a `count` its own branch-naming rule (`design/<chatId>/<n>`, n =
+      // 1..3) was never meant to see.
+      const requestedCandidateCount = options.designCandidateCount ?? 3;
+      if (requestedCandidateCount !== 2 && requestedCandidateCount !== 3) {
+        throw new Error(
+          `Design mode requires 2 or 3 candidates, got ${requestedCandidateCount}.`,
+        );
+      }
+
       const designResult = await runDesignTurnStep({
         sandboxState: runtime.sandboxState,
         chatId: options.chatId,
         baseBranch: runtime.currentBranch,
-        count: options.designCandidateCount ?? 3,
+        count: requestedCandidateCount,
         prompt: extractLatestUserText(options.messages),
         agentOptions,
         writable,
@@ -1498,11 +1539,20 @@ const runAgentStep = async (
      */
     let resolvedAgents: Record<string, ClaudeAgentDefinition> | undefined;
     let resolvedSkills: SkillMetadata[] | undefined;
+    /**
+     * Plugin-contributed MCP servers for this turn (`--mcp-config`). Same
+     * degrade-to-undefined posture as the roster/skills resolvers right
+     * below: `resolveChatMcpServers` never throws on its own (it already
+     * catches everything internally), but it's resolved inside this same
+     * try/catch anyway so one dynamic import failing before it runs doesn't
+     * leave this whole block half-finished.
+     */
+    let resolvedMcpServers: AgentCallOptions["mcpServers"] | undefined;
     try {
       const [
         { getOrganization },
         { loadMemorySectionForTurn },
-        { resolveChatAgents, resolveChatSkills },
+        { resolveChatAgents, resolveChatMcpServers, resolveChatSkills },
       ] = await Promise.all([
         import("@/lib/org/organization"),
         import("@/lib/memory/load-for-turn"),
@@ -1520,6 +1570,7 @@ const runAgentStep = async (
       // this always runs rather than being gated on `organization` existing.
       resolvedAgents = await resolveChatAgents(organization?.id);
       resolvedSkills = await resolveChatSkills(agentOptions.skills ?? []);
+      resolvedMcpServers = await resolveChatMcpServers();
     } catch (error) {
       console.error(
         "[workflow] Failed to load memory/roster/skills for turn:",
@@ -1534,6 +1585,7 @@ const runAgentStep = async (
         ...(memorySection ? { memorySection } : {}),
         ...(resolvedAgents ? { agents: resolvedAgents } : {}),
         ...(resolvedSkills ? { skills: resolvedSkills } : {}),
+        ...(resolvedMcpServers ? { mcpServers: resolvedMcpServers } : {}),
       },
       messageId,
       originalMessages,

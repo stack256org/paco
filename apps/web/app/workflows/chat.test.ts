@@ -242,6 +242,13 @@ let agentAssistantParts: Array<Record<string, unknown>> | undefined;
 let agentFinishReason = "stop";
 let agentTotalUsage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 };
 let agentInputMessages: unknown;
+type TestAgentTurnOptions = {
+  memorySection?: string;
+  mcpServers?: Record<
+    string,
+    { command: string; args: string[]; env: Record<string, string> }
+  >;
+};
 let agentTurnCalls: Array<{
   prompt: string;
   maxTurns?: number;
@@ -249,7 +256,7 @@ let agentTurnCalls: Array<{
   /** Which backend the workflow asked this turn to run on (`chat.backend`). */
   chatBackend?: string;
   /** The `AgentCallOptions` the step handed to `runAgentTurn` for this turn. */
-  options?: { memorySection?: string };
+  options?: TestAgentTurnOptions;
 }> = [];
 /** Stands in for the user pressing stop, which reaches the CLI as an abort. */
 let agentAbortsTurn = false;
@@ -299,7 +306,7 @@ mock.module("@/lib/agent/run-step", () => ({
       onSteer: (steer: (text: string) => Promise<void>) => void;
     };
     onChunk: (chunk: Record<string, unknown>) => Promise<void>;
-    options?: { memorySection?: string };
+    options?: TestAgentTurnOptions;
   }) => {
     agentInputMessages = params.prompt;
     agentTurnCalls.push({
@@ -527,8 +534,24 @@ const resolveChatAgentsSpy = mock((_organizationId: string) =>
 const resolveChatSkillsSpy = mock((workspaceSkills: unknown[]) =>
   Promise.resolve(resolveChatSkillsResult ?? workspaceSkills),
 );
+/**
+ * Plugin-contributed MCP servers for a turn (`--mcp-config`), resolved the
+ * same way roster/skills are above. `undefined` (the default) means "no
+ * plugins enabled" — `resolveChatMcpServers` itself returns `undefined` in
+ * that case, never an empty object (see its own doc).
+ */
+let resolveChatMcpServersResult:
+  | Record<
+      string,
+      { command: string; args: string[]; env: Record<string, string> }
+    >
+  | undefined;
+const resolveChatMcpServersSpy = mock(() =>
+  Promise.resolve(resolveChatMcpServersResult),
+);
 mock.module("@/lib/agent/chat-environment", () => ({
   resolveChatAgents: resolveChatAgentsSpy,
+  resolveChatMcpServers: resolveChatMcpServersSpy,
   resolveChatSkills: resolveChatSkillsSpy,
   buildChatEnvironmentDetails: () => "",
 }));
@@ -572,26 +595,38 @@ const TEST_FALLBACK_DESIGNER_AGENT = {
 /** Set by a test to control what `runDesignTurn` resolves/throws. */
 let designTurnOutcomesOverride: TestDesignOutcome[] | undefined;
 let designTurnShouldFailAll = false;
+/** Set by a test to simulate `createCandidates` itself throwing. */
+let createCandidatesShouldThrow = false;
+/** Set by a test to simulate `runDesignTurn` throwing something other than `DesignTurnAllFailedError`. */
+let runDesignTurnShouldThrowUnexpectedError = false;
 const createCandidatesSpy = mock(
   (params: {
     chatId: string;
     baseBranch: string;
     count: number;
     sessionWorkspace: string;
-  }) =>
-    Promise.resolve(
+  }) => {
+    if (createCandidatesShouldThrow) {
+      return Promise.reject(new Error("could not create worktree"));
+    }
+    return Promise.resolve(
       Array.from({ length: params.count }, (_, i): TestDesignCandidate => ({
         index: i + 1,
         branch: `design/${params.chatId}/${i + 1}`,
         worktreeDir: `${params.sessionWorkspace}/designs/${params.chatId}/${i + 1}`,
       })),
-    ),
+    );
+  },
+);
+const removeCandidatesSpy = mock(
+  (_params: { sessionWorkspace: string; chatId: string }) => Promise.resolve(),
 );
 const runDesignTurnSpy = mock(
   async (params: {
     candidates: TestDesignCandidate[];
     prompt: string;
     designerAgent: unknown;
+    agentOptions: { sandbox: { environmentDetails?: string } };
     onProgress: (progress: {
       candidate: number;
       status: string;
@@ -633,6 +668,10 @@ const runDesignTurnSpy = mock(
       });
     }
 
+    if (runDesignTurnShouldThrowUnexpectedError) {
+      throw new Error("the backend crashed");
+    }
+
     if (designTurnShouldFailAll) {
       throw new TestDesignTurnAllFailedError(outcomes);
     }
@@ -643,6 +682,7 @@ const runDesignTurnSpy = mock(
 
 mock.module("@/lib/design/candidates", () => ({
   createCandidates: createCandidatesSpy,
+  removeCandidates: removeCandidatesSpy,
 }));
 mock.module("@/lib/design/design-turn", () => ({
   runDesignTurn: runDesignTurnSpy,
@@ -740,16 +780,21 @@ beforeEach(() => {
   resolveWorkCwdShouldThrow = false;
   resolveChatAgentsResult = undefined;
   resolveChatSkillsResult = undefined;
+  resolveChatMcpServersResult = undefined;
   completionSequenceCallOrder = [];
   designTurnOutcomesOverride = undefined;
   designTurnShouldFailAll = false;
+  createCandidatesShouldThrow = false;
+  runDesignTurnShouldThrowUnexpectedError = false;
   appendSessionEventsSpy.mockClear();
   listUnconsumedSteerEventsSpy.mockClear();
   setChatResumeTokenSpy.mockClear();
   loadMemorySectionForTurnSpy.mockClear();
   resolveChatAgentsSpy.mockClear();
   resolveChatSkillsSpy.mockClear();
+  resolveChatMcpServersSpy.mockClear();
   createCandidatesSpy.mockClear();
+  removeCandidatesSpy.mockClear();
   runDesignTurnSpy.mockClear();
   Object.values(spies).forEach((s) => s.mockClear());
 });
@@ -839,6 +884,26 @@ describe("runAgentWorkflow", () => {
     await runAgentWorkflow(makeOptions());
 
     expect(agentTurnCalls[0]?.options?.memorySection).toBeUndefined();
+  });
+
+  test("threads plugin-contributed MCP servers into the turn's options", async () => {
+    resolveChatMcpServersResult = {
+      "plugin-a": { command: "node", args: ["bridge.mjs"], env: {} },
+    };
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls[0]?.options?.mcpServers).toEqual({
+      "plugin-a": { command: "node", args: ["bridge.mjs"], env: {} },
+    });
+  });
+
+  test("omits mcpServers from the turn's options when no plugins are enabled", async () => {
+    resolveChatMcpServersResult = undefined;
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls[0]?.options?.mcpServers).toBeUndefined();
   });
 
   test("proceeds without memory when retrieval throws", async () => {
@@ -2109,6 +2174,11 @@ describe("design mode", () => {
     const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
     const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
     expect(workflowRun.status).toBe("completed");
+
+    // Candidates survive a successful design turn — the user still needs
+    // them to pick a winner from (Task 1's `acceptCandidate` cleans up once
+    // one is actually accepted).
+    expect(removeCandidatesSpy).not.toHaveBeenCalled();
   });
 
   test("honors designCandidateCount", async () => {
@@ -2159,6 +2229,56 @@ describe("design mode", () => {
 
     expect(spies.clearActiveStream).toHaveBeenCalled();
     expect(spies.sendFinish).toHaveBeenCalled();
+
+    // Every candidate failed, so nothing is left to pick from — the
+    // worktrees `createCandidates` made would otherwise sit orphaned
+    // forever, since `removeCandidates` is only ever reached from
+    // `acceptCandidate` (the "user picked a winner" path) elsewhere in the
+    // codebase.
+    expect(removeCandidatesSpy).toHaveBeenCalledTimes(1);
+    expect(removeCandidatesSpy.mock.calls[0][0]).toMatchObject({
+      chatId: "chat-1",
+    });
+  });
+
+  test("removes candidates when the design turn throws an unexpected error", async () => {
+    runDesignTurnShouldThrowUnexpectedError = true;
+
+    await expect(
+      runAgentWorkflow(makeOptions({ mode: "design" })),
+    ).rejects.toThrow("the backend crashed");
+
+    expect(removeCandidatesSpy).toHaveBeenCalledTimes(1);
+    expect(removeCandidatesSpy.mock.calls[0][0]).toMatchObject({
+      chatId: "chat-1",
+    });
+
+    const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
+    const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
+    expect(workflowRun.status).toBe("failed");
+    // Still cleared and closed, even though the turn threw — the same
+    // finally-block guarantee every other turn gets.
+    expect(spies.clearActiveStream).toHaveBeenCalled();
+    expect(spies.sendFinish).toHaveBeenCalled();
+  });
+
+  test("removes candidates when createCandidates itself fails", async () => {
+    createCandidatesShouldThrow = true;
+
+    await expect(
+      runAgentWorkflow(makeOptions({ mode: "design" })),
+    ).rejects.toThrow("could not create worktree");
+
+    // `runDesignTurn` never got anything to fan out to.
+    expect(runDesignTurnSpy).not.toHaveBeenCalled();
+    expect(removeCandidatesSpy).toHaveBeenCalledTimes(1);
+    expect(removeCandidatesSpy.mock.calls[0][0]).toMatchObject({
+      chatId: "chat-1",
+    });
+
+    const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
+    const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
+    expect(workflowRun.status).toBe("failed");
   });
 
   test("one candidate failing still marks the run completed", async () => {
@@ -2192,6 +2312,9 @@ describe("design mode", () => {
     const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
     const workflowRun = rwCalls.at(-1)?.[5] as { status: string };
     expect(workflowRun.status).toBe("completed");
+    // Two of three candidates survived — still something to pick from, so
+    // nothing gets cleaned up.
+    expect(removeCandidatesSpy).not.toHaveBeenCalled();
   });
 });
 

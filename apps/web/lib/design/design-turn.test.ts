@@ -41,6 +41,16 @@ function baseAgentOptions(): AgentCallOptions {
       workingDirectory: "/workspace",
       hostWorkingDirectory: "/workspace",
       currentBranch: "chat/chat-1",
+      // Shaped like the real `buildChatEnvironmentDetails` output for the
+      // CHAT's own worktree, so tests can check a candidate's own
+      // environmentDetails actually replaces this rather than leaking it
+      // through verbatim.
+      environmentDetails: [
+        "- Container: paco-sbx-session-1",
+        "- Your working directory (you run here): /workspace",
+        "- The container sees this at the same path, so it is the directory to use there too.",
+        "- Branch: `chat/chat-1` — this chat has its own git worktree, so your changes here do not touch other chats in this session.",
+      ].join("\n"),
     },
   };
 }
@@ -143,6 +153,41 @@ describe("runDesignTurn", () => {
     // The designer persona itself is included, so the turn behaves as the
     // designer roster agent rather than the default orchestrator.
     expect(seenInstructions[0]).toContain(FALLBACK_DESIGNER_AGENT.prompt);
+  });
+
+  test("gives each candidate its OWN environment details, not the chat's", async () => {
+    const candidates = [candidate(1, "/d/1"), candidate(2, "/d/2")];
+    const seenEnvironmentDetails: Array<string | undefined> = [];
+    const runTurn: RunCandidateTurn = (params) => {
+      seenEnvironmentDetails.push(params.options.sandbox.environmentDetails);
+      return Promise.resolve({ isError: false, finishReason: "stop" });
+    };
+
+    await runDesignTurn({
+      candidates,
+      prompt: "Build a landing page",
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      runTurn,
+      commitCandidate: noopCommit,
+    });
+
+    // Candidate 1 is told candidate 1's own path and branch...
+    expect(seenEnvironmentDetails[0]).toContain("/d/1");
+    expect(seenEnvironmentDetails[0]).toContain("design/chat-1/1");
+    // ...candidate 2 is told candidate 2's, not candidate 1's or the chat's...
+    expect(seenEnvironmentDetails[1]).toContain("/d/2");
+    expect(seenEnvironmentDetails[1]).toContain("design/chat-1/2");
+    // ...and neither carries the CHAT's own worktree path or branch, which
+    // `baseAgentOptions()`'s `environmentDetails` names — not cosmetic:
+    // whichever directory/branch a candidate is told is the one its edits
+    // (made on the host) actually land on.
+    for (const environmentDetails of seenEnvironmentDetails) {
+      expect(environmentDetails).not.toContain("/workspace");
+      expect(environmentDetails).not.toContain("chat/chat-1");
+    }
   });
 
   test("one candidate failing does not stop the others from succeeding", async () => {

@@ -168,6 +168,54 @@ function buildCandidateCustomInstructions(params: {
   ].join("\n\n");
 }
 
+/**
+ * A design candidate's own environment details, replacing the chat's.
+ *
+ * Mirrors `buildChatEnvironmentDetails` (`lib/agent/chat-environment.ts`)
+ * exactly, but duplicated rather than imported: that module's top-level
+ * `import { getRoster } from "@/lib/db/roster"` would otherwise drag a live
+ * Postgres client into every design-turn test, and into this file's own
+ * dependency graph, just to reuse a function that does no I/O of its own
+ * (the same tradeoff `FALLBACK_DESIGNER_AGENT`, above, already makes).
+ *
+ * Without this, every candidate's turn carried the CHAT's
+ * `environmentDetails` verbatim — told its working directory and branch were
+ * the chat's, while it was actually running in its own worktree on its own
+ * `design/<chatId>/<n>` branch. `chat-environment.ts`'s own doc calls this
+ * exact class of mistake "not cosmetic": the agent runs on the host, so the
+ * directory (and branch) it is told is the one its edits actually land on.
+ *
+ * `sandboxDetails` here is the chat's own already-built environment string
+ * (`agentOptions.sandbox.environmentDetails`), which itself already carries
+ * a working-directory line and a branch line for the CHAT — both filtered
+ * out below, the same way `buildChatEnvironmentDetails` filters the
+ * session-level sandbox's own lines before adding the chat's.
+ */
+function buildCandidateEnvironmentDetails(params: {
+  sandboxDetails?: string;
+  worktreePath: string;
+  branch: string;
+}): string {
+  const lines = [
+    `- Your working directory (you run here): ${params.worktreePath}`,
+    "- The container sees this at the same path, so it is the directory to use there too.",
+    `- Branch: \`${params.branch}\` — this design candidate has its own git worktree, so your changes here do not touch the chat's branch or the other candidates.`,
+  ];
+
+  const inheritedLines = (params.sandboxDetails ?? "")
+    .split("\n")
+    .filter(
+      (line) =>
+        !(
+          line.startsWith("- Your working directory") ||
+          line.startsWith("- The same files inside the container") ||
+          line.startsWith("- Branch:")
+        ),
+    );
+
+  return [...inheritedLines, ...lines].filter(Boolean).join("\n");
+}
+
 async function runGit(
   args: string[],
   cwd: string,
@@ -376,6 +424,12 @@ export async function runDesignTurn(
                 workingDirectory: candidate.worktreeDir,
                 hostWorkingDirectory: candidate.worktreeDir,
                 currentBranch: candidate.branch,
+                environmentDetails: buildCandidateEnvironmentDetails({
+                  sandboxDetails:
+                    params.agentOptions.sandbox.environmentDetails,
+                  worktreePath: candidate.worktreeDir,
+                  branch: candidate.branch,
+                }),
               },
               model: {
                 id:
