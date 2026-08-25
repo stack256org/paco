@@ -112,6 +112,22 @@ export interface PluginTasksApi {
   create(input: PluginTaskCreateInput): Promise<PluginTaskCreateResult>;
 }
 
+/**
+ * The capability surface itself.
+ *
+ * Deliberately absent: `panel()`. `ui:panel` is a grantable capability with
+ * consent-screen copy of its own, but no host has ever implemented a
+ * `"ui:panel"` handler, so `api.panel()` reached `host.ts`'s "capability not
+ * available" branch and rejected unconditionally — a method a plugin author
+ * could read, an operator could grant, and nothing could ever make work.
+ *
+ * There is nothing for it to push to either. The only plugin-authored
+ * surface that reaches a browser is the renderer iframe
+ * (`components/tool-call/renderers/plugin-renderer.tsx`), and that is driven
+ * entirely by one tool call's own input/output, by design. A plugin
+ * contributes a panel by shipping `renderers/<toolName>.html`, not by
+ * calling a method.
+ */
 export interface PluginApi {
   readonly pluginId: string;
   /**
@@ -129,8 +145,6 @@ export interface PluginApi {
   postMessage(message: { chatId: string; text: string }): Promise<unknown>;
   /** `events:subscribe` — session events the host fans out. */
   events: PluginEventsApi;
-  /** `ui:panel` — pushes state to the plugin's sandboxed panel. */
-  panel(payload: unknown): Promise<unknown>;
   /** `tasks:create` — creates tasks on the board from an inbound message. */
   tasks: PluginTasksApi;
   /** Diagnostics, surfaced through the host's logger. */

@@ -115,7 +115,6 @@ const api: PluginApi = {
       return () => eventSubscribers.delete(callback);
     },
   },
-  panel: (payload) => requestCapability("ui:panel", payload),
   tasks: {
     create: (input: PluginTaskCreateInput) =>
       requestCapability(
