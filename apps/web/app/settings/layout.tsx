@@ -10,6 +10,7 @@ import {
   Clock,
   LogOut,
   Menu,
+  Puzzle,
   Settings as SettingsIcon,
   ShieldAlert,
   SlidersHorizontal,
@@ -152,6 +153,17 @@ const adminSidebarItems = [
     label: "Health",
     href: "/settings/health",
     icon: Activity,
+  },
+  {
+    /*
+     * Admin-only, like Agents and Health above: installing a plugin and
+     * granting it capabilities is an administrative act (`./plugins/actions.ts`
+     * enforces this itself, regardless of what this nav shows).
+     */
+    id: "plugins",
+    label: "Plugins",
+    href: "/settings/plugins",
+    icon: Puzzle,
   },
   {
     id: "admin",
