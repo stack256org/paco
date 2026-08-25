@@ -1,0 +1,16 @@
+{
+  "name": "slack",
+  "version": "1.0.0",
+  "description": "Slack channel: @-mentions become tasks, and task status posts back into the thread.",
+  "pacoApi": 1,
+  "capabilities": [
+    "channels:ingress",
+    "net:fetch",
+    "messages:post",
+    "tasks:create",
+    "events:subscribe",
+    "storage:kv",
+    "tools:register"
+  ],
+  "netDomains": ["slack.com"]
+}
