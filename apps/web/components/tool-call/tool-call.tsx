@@ -7,6 +7,8 @@ import type { WebAgentUIToolPart } from "@/app/types";
 import {
   extractRenderState,
   getToolName,
+  type PluginRendererInfo,
+  resolvePluginRenderer,
   type ToolRenderState,
 } from "@/app/lib/render-tool";
 import { DEFAULT_WORKING_DIRECTORY } from "@/lib/sandbox/config";
@@ -17,11 +19,20 @@ import { WriteRenderer } from "./renderers/write-renderer";
 import { EditRenderer } from "./renderers/edit-renderer";
 import { GlobRenderer } from "./renderers/glob-renderer";
 import { GrepRenderer } from "./renderers/grep-renderer";
+import { PluginRenderer } from "./renderers/plugin-renderer";
 import { TaskRenderer } from "./renderers/task-renderer";
 import { TodoRenderer } from "./renderers/todo-renderer";
 import { AskUserQuestionRenderer } from "./renderers/ask-user-question-renderer";
 import { FetchRenderer } from "./renderers/fetch-renderer";
 import { SkillRenderer } from "./renderers/skill-renderer";
+
+/**
+ * Stable empty default for `pluginRenderers` — a fresh `[]` literal as a
+ * default prop value is re-created on every render, which breaks
+ * referential equality for no reason. A module-level constant is reused
+ * across every render/caller instead.
+ */
+const NO_PLUGIN_RENDERERS: PluginRendererInfo[] = [];
 
 export type ToolCallProps = {
   part: WebAgentUIToolPart;
@@ -30,6 +41,14 @@ export type ToolCallProps = {
   isStreaming?: boolean;
   onApprove?: (id: string) => void;
   onDeny?: (id: string, reason?: string) => void;
+  /**
+   * Enabled plugins' registered renderers (`renderers/<toolName>.html`),
+   * keyed by the tool names each one covers. Defaults to none, so a caller
+   * that doesn't pass this — which is every caller as of this change, until
+   * something wires enabled plugins through — gets the exact same fallback
+   * rendering as before.
+   */
+  pluginRenderers?: PluginRendererInfo[];
 };
 
 /**
@@ -42,6 +61,7 @@ export function ToolCall({
   isStreaming = false,
   onApprove,
   onDeny,
+  pluginRenderers = NO_PLUGIN_RENDERERS,
 }: ToolCallProps) {
   const state = extractRenderState(part, activeApprovalId, isStreaming);
   const approvalProps = { onApprove, onDeny };
@@ -76,15 +96,28 @@ export function ToolCall({
       return <FetchRenderer part={part} state={state} {...approvalProps} />;
     case "tool-skill":
       return <SkillRenderer part={part} state={state} {...approvalProps} />;
-    default:
+    default: {
+      const toolName = getToolName(part);
+      const pluginMatch = resolvePluginRenderer(toolName, pluginRenderers);
+      if (pluginMatch) {
+        return (
+          <PluginRenderer
+            part={part}
+            state={state}
+            pluginId={pluginMatch.pluginId}
+            file={pluginMatch.file}
+          />
+        );
+      }
       return (
         <DefaultRenderer
           part={part}
           state={state}
-          toolName={getToolName(part)}
+          toolName={toolName}
           {...approvalProps}
         />
       );
+    }
   }
 }
 
