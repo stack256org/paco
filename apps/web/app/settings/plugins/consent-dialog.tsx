@@ -15,6 +15,8 @@ import { ConsentForm } from "./consent-form";
 export interface ConsentGrantResult {
   ok: boolean;
   error?: string;
+  /** Present only when this call just minted the plugin's ingress secret — the one time its plaintext is ever returned. */
+  ingressSecret?: string;
 }
 
 interface ConsentDialogProps {
@@ -28,7 +30,8 @@ interface ConsentDialogProps {
   /** Pre-checked on open — empty for a fresh install, the plugin's current grants for an update. */
   initialGrants: Capability[];
   onGrant: (grants: Capability[]) => Promise<ConsentGrantResult>;
-  onGranted: () => void;
+  /** Called once with the successful result, so the caller can surface a freshly-minted `ingressSecret` before this dialog closes. */
+  onGranted: (result: ConsentGrantResult) => void;
 }
 
 /**
@@ -77,7 +80,7 @@ export function ConsentDialog({
     try {
       const result = await onGrant(grants);
       if (result.ok) {
-        onGranted();
+        onGranted(result);
         onOpenChange(false);
       } else {
         setError(result.error ?? "That grant could not be saved.");

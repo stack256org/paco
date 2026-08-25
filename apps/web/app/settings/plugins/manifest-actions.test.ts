@@ -34,6 +34,9 @@ class FakePluginGrantEscalationError extends Error {
  */
 mock.module("@/lib/db/plugins", () => ({
   PluginGrantEscalationError: FakePluginGrantEscalationError,
+  ensurePluginIngressSecret: async () => {
+    // Unreachable from this file's tests.
+  },
   getPlugin: async (id: string) => rows.get(id),
   listPlugins: async () => [...rows.values()],
   removePlugin: async () => {

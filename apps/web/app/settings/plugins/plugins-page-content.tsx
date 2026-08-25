@@ -14,6 +14,7 @@ import {
 } from "./actions";
 import { ConsentDialog } from "./consent-dialog";
 import { InstallDialog } from "./install-dialog";
+import { IngressSecretDialog } from "./ingress-secret-dialog";
 import { getPluginNetDomainsAction } from "./manifest-actions";
 import { PluginCard } from "./plugin-card";
 import type { PluginListRow } from "./plugin-list-row";
@@ -59,6 +60,10 @@ export function PluginsPageContent({
   const [statuses, setStatuses] = useState<Record<string, PluginStatus>>({});
   const [installOpen, setInstallOpen] = useState(false);
   const [consent, setConsent] = useState<ConsentState | null>(null);
+  const [ingressSecret, setIngressSecret] = useState<{
+    pluginId: string;
+    secret: string;
+  } | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -283,7 +288,20 @@ export function PluginsPageContent({
           initialGrants={consent.initialGrants}
           netDomains={consent.netDomains}
           onGrant={handleGrant}
-          onGranted={() => router.refresh()}
+          onGranted={(result) => {
+            // `ingressSecret` is present only on the ONE call that mints a
+            // plugin's `channels:ingress` secret (`grantAndEnableAction`'s
+            // own doc comment) — every later re-grant/re-enable omits it, so
+            // there is nothing to show then, and this dialog is the only
+            // place its plaintext is ever surfaced.
+            if (result.ingressSecret) {
+              setIngressSecret({
+                pluginId: consent.pluginId,
+                secret: result.ingressSecret,
+              });
+            }
+            router.refresh();
+          }}
           onOpenChange={(open) => {
             if (!open) {
               setConsent(null);
@@ -292,6 +310,19 @@ export function PluginsPageContent({
           open={consent !== null}
           pluginId={consent.pluginId}
           requested={consent.requested}
+        />
+      ) : null}
+
+      {ingressSecret ? (
+        <IngressSecretDialog
+          onOpenChange={(open) => {
+            if (!open) {
+              setIngressSecret(null);
+            }
+          }}
+          open={ingressSecret !== null}
+          pluginId={ingressSecret.pluginId}
+          secret={ingressSecret.secret}
         />
       ) : null}
 
