@@ -34,7 +34,7 @@ function parseSlackApiResponse(body: string): SlackApiResponse {
   return { ok: false, error: "unparsable Slack response" };
 }
 
-/** Calls `auth.test`, to validate a bot token during `tools/slack_setup.ts`. */
+/** Calls `auth.test`, to validate a bot token during `tools/slack-setup.ts`. */
 export async function slackAuthTest(
   api: PluginApi,
   botToken: string,
@@ -49,7 +49,7 @@ export async function slackAuthTest(
 
 /**
  * Posts a threaded message via `chat.postMessage`, reading the bot token
- * from kv (set once by `tools/slack_setup.ts`). Never throws: a missing
+ * from kv (set once by `tools/slack-setup.ts`). Never throws: a missing
  * token or a Slack-side failure is logged through `api.log` and returned as
  * `{ok: false}` rather than breaking the ingress request or hook delivery
  * that triggered it.

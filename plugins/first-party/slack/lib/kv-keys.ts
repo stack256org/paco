@@ -3,23 +3,23 @@ import { isRecord } from "./guards.ts";
 /**
  * `storage:kv` key names and shapes this plugin writes/reads, per the plan
  * (Section 6 Task 3). Centralized here so `channels/events.ts`,
- * `tools/slack_setup.ts` and `hooks/task-updates.ts` never drift on a key's
+ * `tools/slack-setup.ts` and `hooks/task-updates.ts` never drift on a key's
  * exact spelling.
  */
 
-/** Set once by `tools/slack_setup.ts`; read by `channels/events.ts` to
+/** Set once by `tools/slack-setup.ts`; read by `channels/events.ts` to
  * verify Slack's v0 request signature. */
 export const KV_SIGNING_SECRET = "slack:signing-secret";
 
-/** Set once by `tools/slack_setup.ts`; read whenever this plugin calls the
+/** Set once by `tools/slack-setup.ts`; read whenever this plugin calls the
  * Slack Web API. */
 export const KV_BOT_TOKEN = "slack:bot-token";
 
-/** Set once by `tools/slack_setup.ts`; the session a mention maps to when
+/** Set once by `tools/slack-setup.ts`; the session a mention maps to when
  * its channel has no explicit entry in `slack:channel-map:<channelId>`. */
 export const KV_DEFAULT_SESSION = "slack:default-session";
 
-/** Slack channel id -> Paco session id, set by `tools/slack_setup.ts`'s
+/** Slack channel id -> Paco session id, set by `tools/slack-setup.ts`'s
  * optional `channelMap` input. */
 export function kvChannelMapKey(slackChannelId: string): string {
   return `slack:channel-map:${slackChannelId}`;

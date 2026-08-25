@@ -16,7 +16,7 @@ import type {
 } from "../../../packages/plugin-host/plugin-api.ts";
 import eventsChannel from "./channels/events.ts";
 import taskUpdatesHook from "./hooks/task-updates.ts";
-import slackSetupTool from "./tools/slack_setup.ts";
+import slackSetupTool from "./tools/slack-setup.ts";
 
 /**
  * Unit tests import the channel/tool/hook modules directly against a fake
@@ -323,7 +323,7 @@ describe("channels/events.ts", () => {
   });
 });
 
-describe("tools/slack_setup.ts", () => {
+describe("tools/slack-setup.ts", () => {
   test("validates the token, stores config in kv, and returns the webhook URL", async () => {
     const { api, kvStore } = makeFakeApi({
       fetchImpl: () => ({
