@@ -724,6 +724,8 @@ describe("net:fetch", () => {
           manifest: manifest({
             netDomains: ["api.linear.app", "cdn.linear.app"],
           }),
+          // The consent snapshot, not the manifest, is what net:fetch reads.
+          consentedNetDomains: ["api.linear.app", "cdn.linear.app"],
         }),
       );
       const netFetch = handlers["net:fetch"];
@@ -753,6 +755,72 @@ describe("net:fetch", () => {
 
     try {
       const handlers = buildCapabilityHandlers(pluginRow());
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await expect(
+        netFetch("plugin-a", { url: "https://api.linear.app/start" }),
+      ).rejects.toThrow(/not in netDomains/);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  /**
+   * `plugins.consentedNetDomains` is the operator's snapshot, taken at the
+   * moment grants are given (`setPluginGrants`), and it exists precisely so
+   * that "a plugin cannot widen its own network access by editing its
+   * manifest" holds. A `local:` plugin can rewrite its own plugin.json on
+   * disk at any time, so reading the manifest at fetch time hands it the
+   * allowlist edit for free.
+   */
+  function widenedManifestRow() {
+    return pluginRow({
+      manifest: manifest({
+        netDomains: ["api.linear.app", "evil.example.com"],
+      }),
+      consentedNetDomains: ["api.linear.app"],
+    });
+  }
+
+  test("a plugin that widened its own manifest after consent cannot fetch the new domain", async () => {
+    dnsAddresses = {};
+    withFetch(() => {
+      throw new Error("net:fetch must not reach an unconsented domain");
+    });
+
+    try {
+      const handlers = buildCapabilityHandlers(widenedManifestRow());
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await expect(
+        netFetch("plugin-a", { url: "https://evil.example.com/steal" }),
+      ).rejects.toThrow(/not in netDomains/);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("a redirect hop is checked against the consent snapshot, not the manifest", async () => {
+    dnsAddresses = {};
+    withFetch(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "https://api.linear.app/start") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://evil.example.com/steal" },
+        });
+      }
+      throw new Error("net:fetch followed a redirect to an unconsented domain");
+    });
+
+    try {
+      const handlers = buildCapabilityHandlers(widenedManifestRow());
       const netFetch = handlers["net:fetch"];
       if (!netFetch) {
         throw new Error("net:fetch handler missing");
@@ -976,6 +1044,8 @@ describe("net:fetch", () => {
           manifest: manifest({
             netDomains: ["api.linear.app", "cdn.linear.app"],
           }),
+          // The consent snapshot, not the manifest, is what net:fetch reads.
+          consentedNetDomains: ["api.linear.app", "cdn.linear.app"],
         }),
       );
       const netFetch = handlers["net:fetch"];

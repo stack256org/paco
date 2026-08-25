@@ -98,7 +98,7 @@ const PRIVATE_RANGES = buildPrivateRangesBlockList();
  * host has already confirmed the plugin was granted the capability.
  *
  * `pluginRow` is captured once, at host-construction time, and only its
- * static `manifest.netDomains` is read back out of it — the plugin id used
+ * static `consentedNetDomains` is read back out of it — the plugin id used
  * to scope every `storage:kv` operation always comes from the `pluginId`
  * argument the host supplies on every call, never from `pluginRow` or from
  * the request payload, so a payload cannot forge its way into another
@@ -459,15 +459,17 @@ async function fetchFollowingRedirects(
  * re-validates every redirect hop and rejects targets that resolve into the
  * host's own network (see `assertNetFetchTargetAllowed`).
  *
- * `pluginRow.manifest.netDomains` is the consented domain list. Task 3's
- * `plugins` row has no separate "consented domains" column — grants are a
- * capability-level allow/deny (`grantedCapabilities`), not a per-domain
- * list — so once `net:fetch` is granted at all, the domains the operator
- * consented to are exactly the ones declared in the manifest stored on that
- * row. That manifest is only ever rewritten by the installer
- * (`upsertPlugin`, `lib/db/plugins.ts`); nothing about a plugin's files
- * changing on disk after install can widen it without a re-install passing
- * back through that path.
+ * The domain list is `pluginRow.consentedNetDomains` — the snapshot taken at
+ * the moment the operator actually gave grants (`setPluginGrants`,
+ * `lib/db/plugins.ts`) — NEVER `pluginRow.manifest.netDomains`. That column
+ * exists exactly so "a plugin cannot widen its own network access by editing
+ * its manifest" holds, and `registry.ts` already honors it when it hands
+ * `netDomains` to the host. This handler used to read the manifest instead,
+ * on the strength of a comment claiming there was no consented-domains
+ * column; there is one (`schema.ts`), and the consequence was that a
+ * `local:` plugin rewriting its own `plugin.json` on disk after consent
+ * widened its own allowlist — on the initial request and on every redirect
+ * hop this handler re-checks.
  */
 async function handleNetFetch(
   pluginRow: PluginRow,
@@ -478,7 +480,7 @@ async function handleNetFetch(
     throw new Error(`net:fetch: invalid payload: ${parsed.error.message}`);
   }
   const { url, method, headers, body } = parsed.data;
-  const netDomains = pluginRow.manifest.netDomains ?? [];
+  const netDomains = pluginRow.consentedNetDomains;
 
   let target: URL;
   try {
