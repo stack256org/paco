@@ -508,6 +508,7 @@ export function useSessionChats(
       backend: "claude-code",
       activeStreamId: null,
       claudeSessionId: null,
+      resumeTokens: {},
       lastAssistantMessageAt: null,
       // A new chat's preview starts private regardless of where it came
       // from — see the column comment in schema.ts. A fork must not inherit
@@ -613,6 +614,7 @@ export function useSessionChats(
       backend: sourceChat.backend,
       activeStreamId: null,
       claudeSessionId: null,
+      resumeTokens: {},
       lastAssistantMessageAt: null,
       // A new chat's preview starts private regardless of where it came
       // from — see the column comment in schema.ts. A fork must not inherit

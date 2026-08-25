@@ -166,7 +166,11 @@ export function OpenFxProviderSection() {
             </label>
             <input
               className="input input-sm w-full"
-              disabled={form === null || saving}
+              // Always disabled, not just while loading/saving: the OpenFX
+              // binary has no flag or env var that overrides where it sends
+              // provider traffic (PROTOCOL.md §1), so there is nothing an
+              // admin could configure here that would do anything yet.
+              disabled
               id="openfx-endpoint"
               onChange={(event) =>
                 setForm((prev) =>
@@ -178,9 +182,9 @@ export function OpenFxProviderSection() {
               value={form?.endpoint ?? ""}
             />
             <p className="label">
-              Stored for reference; the OpenFX binary itself currently has no
-              way to point at a custom endpoint, so this has no effect on where
-              it sends provider traffic yet.
+              Disabled: the OpenFX binary itself currently has no way to point
+              at a custom endpoint, so this would have no effect on where it
+              sends provider traffic.
             </p>
 
             <div className="grid gap-4 sm:grid-cols-2">

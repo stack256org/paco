@@ -11,6 +11,7 @@ import {
 } from "drizzle-orm";
 import { db } from "./client";
 import {
+  type Chat,
   chatMessages,
   chatReads,
   chats,
@@ -539,6 +540,7 @@ export async function getChatSummariesBySessionId(
       backend: chats.backend,
       activeStreamId: chats.activeStreamId,
       claudeSessionId: chats.claudeSessionId,
+      resumeTokens: chats.resumeTokens,
       lastAssistantMessageAt: chats.lastAssistantMessageAt,
       previewVisibility: chats.previewVisibility,
       previewSlug: chats.previewSlug,
@@ -612,29 +614,68 @@ export async function updateChatActiveStreamId(
 }
 
 /**
- * Read the Claude Code session backing this chat.
+ * Resolve which resume token a turn on `backend` should use, from a chat's
+ * per-backend `resumeTokens` map.
  *
- * Returns null on the first turn, which tells the caller to create a session
- * rather than resume one.
+ * `chats.backend` is a mutable, per-chat choice, and each backend's resume
+ * token means something only to that backend's own session store — Claude
+ * Code's `--resume` and OpenFX's ACP `sessionId` are not interchangeable
+ * (`OpenFxBackend.loadSession` would hand a Claude Code session id straight
+ * to ACP's `session/load`, and the reverse is just as wrong). Reading the
+ * token under the *current* backend's key, rather than one shared column,
+ * is what makes switching a chat's backend and switching it back resume
+ * correctly on both sides instead of one clobbering the other.
+ *
+ * Falls back to the legacy single-column `claudeSessionId` only for
+ * `"claude-code"`, and only when `resumeTokens` has nothing under that key
+ * — the shape of a row written before this column existed. Migration 0012
+ * backfills it, so this fallback only ever matters for a row that backfill
+ * missed; nothing writes to `claudeSessionId` anymore (see
+ * `setChatResumeToken`).
+ *
+ * Pure and DB-free on purpose: given a chat row (already fetched by the
+ * caller — this reads nothing itself), it just answers "what does this
+ * backend resume from". Returns `undefined`, not `null`, to match
+ * `TurnContext.resumeToken`'s own optional-string shape (`AgentBackend`'s
+ * `interface.ts`) — the field callers actually spread this into.
  */
-export async function getChatClaudeSessionId(
-  chatId: string,
-): Promise<string | null> {
-  const [row] = await db
-    .select({ claudeSessionId: chats.claudeSessionId })
-    .from(chats)
-    .where(eq(chats.id, chatId))
-    .limit(1);
-
-  return row?.claudeSessionId ?? null;
+export function resolveChatResumeToken(
+  chat: Pick<Chat, "resumeTokens" | "claudeSessionId">,
+  backend: string,
+): string | undefined {
+  const scoped = chat.resumeTokens[backend];
+  if (scoped) {
+    return scoped;
+  }
+  if (backend === "claude-code" && chat.claudeSessionId) {
+    return chat.claudeSessionId;
+  }
+  return undefined;
 }
 
-/** Persist the Claude Code session id so later turns can resume it. */
-export async function setChatClaudeSessionId(
+/**
+ * Persist this turn's resume token under the backend that produced it.
+ *
+ * A jsonb merge (Postgres's `||` operator on two jsonb objects, shallow,
+ * right side wins) rather than a read-modify-write from the caller's own
+ * in-memory copy of `resumeTokens`: two writes racing — a steer/queue
+ * continuation, a retried workflow step — must not have the second one
+ * overwrite the whole map from a copy that predates the first write and
+ * silently drop its key.
+ */
+export async function setChatResumeToken(
   chatId: string,
-  claudeSessionId: string,
-) {
-  await db.update(chats).set({ claudeSessionId }).where(eq(chats.id, chatId));
+  backend: string,
+  resumeToken: string,
+): Promise<void> {
+  await db
+    .update(chats)
+    .set({
+      resumeTokens: sql`${chats.resumeTokens} || ${JSON.stringify({
+        [backend]: resumeToken,
+      })}::jsonb`,
+    })
+    .where(eq(chats.id, chatId));
 }
 
 /**

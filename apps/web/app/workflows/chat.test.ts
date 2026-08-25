@@ -211,9 +211,21 @@ let testChatRecord: {
   sessionId: string;
   modelId: string | null;
   turnPolicy: "steer" | "queue";
+  backend: "claude-code" | "openfx";
 };
-/** Backs `getChatClaudeSessionId`/`setChatClaudeSessionId` below. */
-let testClaudeSessionId: string | null = null;
+/**
+ * Backs the `resolveChatResumeToken`/`setChatResumeToken` mock below, one
+ * slot per backend id — this chat's resume token is scoped by backend
+ * (Section 7 Task 5 follow-up), so a Claude Code token and an OpenFX token
+ * must be able to coexist without one clobbering the other across a
+ * backend switch.
+ */
+let testResumeTokens: Record<string, string | null> = {
+  "claude-code": null,
+  openfx: null,
+};
+/** What the mocked `runAgentTurn` reports as this turn's resume token. */
+let agentResumeTokenToReturn = "claude-session-1";
 let testPreferences: {
   defaultModelId: string;
   defaultDiffMode: "unified";
@@ -234,6 +246,8 @@ let agentTurnCalls: Array<{
   prompt: string;
   maxTurns?: number;
   claudeSessionId?: string;
+  /** Which backend the workflow asked this turn to run on (`chat.backend`). */
+  chatBackend?: string;
   /** The `AgentCallOptions` the step handed to `runAgentTurn` for this turn. */
   options?: { memorySection?: string };
 }> = [];
@@ -278,6 +292,7 @@ mock.module("@/lib/agent/run-step", () => ({
     messageId: string;
     maxTurns?: number;
     claudeSessionId?: string;
+    chatBackend?: string;
     originalMessages?: Array<Record<string, unknown>>;
     abortSignal?: AbortSignal;
     steerController?: {
@@ -291,6 +306,7 @@ mock.module("@/lib/agent/run-step", () => ({
       prompt: params.prompt,
       maxTurns: params.maxTurns,
       claudeSessionId: params.claudeSessionId,
+      chatBackend: params.chatBackend,
       options: params.options,
     });
 
@@ -358,7 +374,7 @@ mock.module("@/lib/agent/run-step", () => ({
         models: {},
       },
       finishReason: agentFinishReason,
-      claudeSessionId: "claude-session-1",
+      claudeSessionId: agentResumeTokenToReturn,
       costUsd: undefined,
       isError: false,
       ...(steeredText !== undefined ? { steered: { text: steeredText } } : {}),
@@ -431,16 +447,26 @@ mock.module("ai", () => ({
     }),
 }));
 
-const setChatClaudeSessionIdSpy = mock((_chatId: string, sessionId: string) => {
-  testClaudeSessionId = sessionId;
-  return Promise.resolve();
-});
+const setChatResumeTokenSpy = mock(
+  (_chatId: string, backend: string, resumeToken: string) => {
+    testResumeTokens[backend] = resumeToken;
+    return Promise.resolve();
+  },
+);
 
 mock.module("@/lib/db/sessions", () => ({
   getChatById: async () => testChatRecord,
   getSessionById: async () => testSessionRecord,
-  getChatClaudeSessionId: () => Promise.resolve(testClaudeSessionId),
-  setChatClaudeSessionId: setChatClaudeSessionIdSpy,
+  // A simplified stand-in for the real (pure) `resolveChatResumeToken`:
+  // this fake ignores the `chat` argument (already the case for the
+  // predecessor `getChatClaudeSessionId` mock, which ignored its `chatId`)
+  // and reads straight from `testResumeTokens`, keyed by backend — which is
+  // exactly what the real function reads off the chat row it's given.
+  resolveChatResumeToken: (
+    _chat: unknown,
+    backend: string,
+  ): string | undefined => testResumeTokens[backend] ?? undefined,
+  setChatResumeToken: setChatResumeTokenSpy,
 }));
 
 mock.module("@/lib/db/user-preferences", () => ({
@@ -546,26 +572,39 @@ const TEST_FALLBACK_DESIGNER_AGENT = {
 /** Set by a test to control what `runDesignTurn` resolves/throws. */
 let designTurnOutcomesOverride: TestDesignOutcome[] | undefined;
 let designTurnShouldFailAll = false;
+/** Set by a test to simulate `createCandidates` itself throwing. */
+let createCandidatesShouldThrow = false;
+/** Set by a test to simulate `runDesignTurn` throwing something other than `DesignTurnAllFailedError`. */
+let runDesignTurnShouldThrowUnexpectedError = false;
 const createCandidatesSpy = mock(
   (params: {
     chatId: string;
     baseBranch: string;
     count: number;
     sessionWorkspace: string;
-  }) =>
-    Promise.resolve(
+  }) => {
+    if (createCandidatesShouldThrow) {
+      return Promise.reject(new Error("could not create worktree"));
+    }
+    return Promise.resolve(
       Array.from({ length: params.count }, (_, i): TestDesignCandidate => ({
         index: i + 1,
         branch: `design/${params.chatId}/${i + 1}`,
         worktreeDir: `${params.sessionWorkspace}/designs/${params.chatId}/${i + 1}`,
       })),
-    ),
+    );
+  },
+);
+const removeCandidatesSpy = mock(
+  (_params: { sessionWorkspace: string; chatId: string }) =>
+    Promise.resolve(),
 );
 const runDesignTurnSpy = mock(
   async (params: {
     candidates: TestDesignCandidate[];
     prompt: string;
     designerAgent: unknown;
+    agentOptions: { sandbox: { environmentDetails?: string } };
     onProgress: (progress: {
       candidate: number;
       status: string;
@@ -607,6 +646,10 @@ const runDesignTurnSpy = mock(
       });
     }
 
+    if (runDesignTurnShouldThrowUnexpectedError) {
+      throw new Error("the backend crashed");
+    }
+
     if (designTurnShouldFailAll) {
       throw new TestDesignTurnAllFailedError(outcomes);
     }
@@ -617,6 +660,7 @@ const runDesignTurnSpy = mock(
 
 mock.module("@/lib/design/candidates", () => ({
   createCandidates: createCandidatesSpy,
+  removeCandidates: removeCandidatesSpy,
 }));
 mock.module("@/lib/design/design-turn", () => ({
   runDesignTurn: runDesignTurnSpy,
@@ -694,8 +738,10 @@ beforeEach(() => {
     sessionId: "session-1",
     modelId: null,
     turnPolicy: "steer",
+    backend: "claude-code",
   };
-  testClaudeSessionId = null;
+  testResumeTokens = { "claude-code": null, openfx: null };
+  agentResumeTokenToReturn = "claude-session-1";
   testPreferences = {
     defaultModelId: "anthropic/claude-haiku-4.5",
     defaultDiffMode: "unified",
@@ -717,7 +763,7 @@ beforeEach(() => {
   designTurnShouldFailAll = false;
   appendSessionEventsSpy.mockClear();
   listUnconsumedSteerEventsSpy.mockClear();
-  setChatClaudeSessionIdSpy.mockClear();
+  setChatResumeTokenSpy.mockClear();
   loadMemorySectionForTurnSpy.mockClear();
   resolveChatAgentsSpy.mockClear();
   resolveChatSkillsSpy.mockClear();
@@ -1834,7 +1880,7 @@ describe("turn steering", () => {
     // read). Steering through the backend's own `steer()` instead resolves
     // normally, so the id it carries back is captured just like any other
     // turn.
-    testClaudeSessionId = null;
+    testResumeTokens["claude-code"] = null;
     bufferSteerMessage("buffered-1", "Actually, do this instead");
 
     await runAgentWorkflow(makeOptions());
@@ -1855,8 +1901,9 @@ describe("turn steering", () => {
         claudeSessionId: "claude-session-1",
       }),
     ]);
-    expect(setChatClaudeSessionIdSpy).toHaveBeenCalledWith(
+    expect(setChatResumeTokenSpy).toHaveBeenCalledWith(
       "chat-1",
+      "claude-code",
       "claude-session-1",
     );
     expect(consumedEvents()).toEqual([
@@ -1954,6 +2001,68 @@ describe("turn steering", () => {
     expect(consumedEvents()).toEqual([]);
     expect(pendingSteerEvents).toEqual([
       { id: 1, messageId: "buffered-3", text: "Should not run" },
+    ]);
+  });
+});
+
+/**
+ * Resume tokens are scoped per backend (`chats.resumeTokens`, keyed by
+ * backend id) rather than one shared column — the CRITICAL bug this closes:
+ * `OpenFxBackend.loadSession({sessionId: <a Claude Code session id>})` (or
+ * the reverse, `--resume <an ACP session id>` handed to Claude Code) is what
+ * a single shared `claudeSessionId` column produced the moment a chat's
+ * backend was switched mid-conversation. See `resolveChatResumeToken`'s doc
+ * in `lib/db/sessions.ts`.
+ */
+describe("resume tokens scoped per backend", () => {
+  test("switching backends never resumes with the other backend's token, and switching back resumes the original", async () => {
+    disableAutoSave();
+
+    // Turn 1: claude-code, from a fresh chat.
+    testChatRecord.backend = "claude-code";
+    agentResumeTokenToReturn = "claude-session-1";
+    await runAgentWorkflow(makeOptions());
+
+    // Turn 2: switched to openfx. Must NOT attempt to resume with the
+    // Claude Code session id from turn 1 — this is the bug: OpenFX would
+    // call `session/load` with a session id it never created.
+    testChatRecord.backend = "openfx";
+    agentResumeTokenToReturn = "openfx-session-1";
+    await runAgentWorkflow(makeOptions());
+
+    // Turn 3: switched back to claude-code. Must resume with the ORIGINAL
+    // claude-code token from turn 1, not undefined and not openfx's token.
+    testChatRecord.backend = "claude-code";
+    agentResumeTokenToReturn = "claude-session-1-continued";
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls).toEqual([
+      expect.objectContaining({
+        chatBackend: "claude-code",
+        claudeSessionId: undefined,
+      }),
+      expect.objectContaining({
+        chatBackend: "openfx",
+        // The critical assertion: no resume token crosses from
+        // claude-code's session into openfx's turn. `undefined` here is
+        // what tells `resolveBackend`'s `OpenFxBackend` to start a fresh
+        // `session/new` rather than `session/load`.
+        claudeSessionId: undefined,
+      }),
+      expect.objectContaining({
+        chatBackend: "claude-code",
+        // Resumes the ORIGINAL claude-code token from turn 1 — proving the
+        // openfx turn in between did not overwrite or clear it.
+        claudeSessionId: "claude-session-1",
+      }),
+    ]);
+
+    // Each turn's result was written back under the backend that actually
+    // produced it, never under the other one's key.
+    expect(setChatResumeTokenSpy.mock.calls).toEqual([
+      ["chat-1", "claude-code", "claude-session-1"],
+      ["chat-1", "openfx", "openfx-session-1"],
+      ["chat-1", "claude-code", "claude-session-1-continued"],
     ]);
   });
 });

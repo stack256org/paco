@@ -19,7 +19,16 @@ export interface AgentStepResult<UI extends UIMessage> {
   responseMessage?: UI;
   usage: TurnUsage;
   finishReason: "stop" | "length" | "error" | "tool-calls";
-  /** Claude Code session id, to persist for the next turn's `--resume`. */
+  /**
+   * This turn's resume token, under whichever backend actually ran it —
+   * despite the name, not Claude-specific: `resolveBackend`'s result
+   * decides the backend, and the caller (the chat workflow) is what scopes
+   * this by backend id before persisting it (`setChatResumeToken` in
+   * `lib/db/sessions.ts`). Left named `claudeSessionId` rather than
+   * renamed, to avoid rippling the change through every caller for a field
+   * whose meaning ("this turn's resume token") was already documented as
+   * backend-neutral before OpenFX existed.
+   */
   claudeSessionId: string;
   costUsd?: number;
   isError: boolean;

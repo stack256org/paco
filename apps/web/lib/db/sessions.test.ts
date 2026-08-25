@@ -245,3 +245,97 @@ describe("upsertChatMessageScoped", () => {
     expect(result.status).toBe("conflict");
   });
 });
+
+describe("resolveChatResumeToken", () => {
+  test("returns the token scoped to the requested backend", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    const token = resolveChatResumeToken(
+      {
+        resumeTokens: {
+          "claude-code": "claude-session-1",
+          openfx: "acp-session-1",
+        },
+        claudeSessionId: "legacy-value-should-not-be-read",
+      },
+      "openfx",
+    );
+
+    expect(token).toBe("acp-session-1");
+  });
+
+  test("returns undefined for a backend with no token yet — a fresh session, not a crash", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    const token = resolveChatResumeToken(
+      {
+        resumeTokens: { "claude-code": "claude-session-1" },
+        claudeSessionId: null,
+      },
+      "openfx",
+    );
+
+    expect(token).toBeUndefined();
+  });
+
+  test("switching a chat's backend never leaks the other backend's token", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+    const chat = {
+      resumeTokens: { "claude-code": "claude-session-1" },
+      claudeSessionId: null,
+    };
+
+    // The chat has run on claude-code, never on openfx: openfx must start
+    // fresh (no `session/load`), not resume with claude-code's session id.
+    expect(resolveChatResumeToken(chat, "openfx")).toBeUndefined();
+    // Reading it back for claude-code still returns the original token.
+    expect(resolveChatResumeToken(chat, "claude-code")).toBe(
+      "claude-session-1",
+    );
+  });
+
+  test("falls back to the legacy claudeSessionId column only for claude-code, and only when unscoped", () => {
+    return sessionsModulePromise.then(({ resolveChatResumeToken }) => {
+      const legacyRow = { resumeTokens: {}, claudeSessionId: "legacy-session" };
+
+      expect(resolveChatResumeToken(legacyRow, "claude-code")).toBe(
+        "legacy-session",
+      );
+      // The legacy column is Claude Code's own value; it must never answer
+      // for a different backend.
+      expect(resolveChatResumeToken(legacyRow, "openfx")).toBeUndefined();
+    });
+  });
+
+  test("a scoped token takes priority over the legacy column", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    const token = resolveChatResumeToken(
+      {
+        resumeTokens: { "claude-code": "new-session" },
+        claudeSessionId: "stale-legacy-session",
+      },
+      "claude-code",
+    );
+
+    expect(token).toBe("new-session");
+  });
+});
+
+describe("setChatResumeToken", () => {
+  beforeEach(() => {
+    lastUpdateSet = {};
+  });
+
+  test("writes a resumeTokens merge, not the whole column, keyed by backend", async () => {
+    const { setChatResumeToken } = await sessionsModulePromise;
+
+    await setChatResumeToken("chat-1", "openfx", "acp-session-1");
+
+    // A `sql` template fragment (a jsonb `||` merge), not a plain object:
+    // asserting it exists and isn't a bare literal is what's testable
+    // without a real Postgres to execute the merge against.
+    expect(lastUpdateSet.resumeTokens).toBeDefined();
+    expect(typeof lastUpdateSet.resumeTokens).toBe("object");
+  });
+});

@@ -4,7 +4,7 @@ import {
   requireOwnedSessionChat,
 } from "@/app/api/sessions/_lib/session-context";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
-import { getSessionById } from "@/lib/db/sessions";
+import { getSessionById, resolveChatResumeToken } from "@/lib/db/sessions";
 import { WORKSPACE_ASLEEP } from "@/lib/error-copy";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 
@@ -46,7 +46,14 @@ export async function POST(_request: Request, context: RouteContext) {
     );
   }
 
-  const claudeSessionId = chatContext.chat.claudeSessionId;
+  // Scoped to "claude-code" regardless of the chat's *current* `backend`:
+  // compaction is a Claude Code CLI operation (`compactSession`), so it
+  // always targets Claude's own resume token, the same one a turn on this
+  // chat would resume from if it were switched back to claude-code.
+  const claudeSessionId = resolveChatResumeToken(
+    chatContext.chat,
+    "claude-code",
+  );
   if (!claudeSessionId) {
     return Response.json(
       {

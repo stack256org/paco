@@ -26,8 +26,8 @@ import {
 } from "@/lib/db/session-events";
 import type { AgentCallOptions, SteerController } from "@/lib/agent/types";
 import {
-  getChatClaudeSessionId,
-  setChatClaudeSessionId,
+  resolveChatResumeToken,
+  setChatResumeToken,
 } from "@/lib/db/sessions";
 import { getWorkflowMetadata, getWritable } from "workflow";
 import { getRun } from "workflow/api";
@@ -526,7 +526,7 @@ async function runDesignTurnStep(params: {
     { getOrganization },
     { resolveChatAgents },
     { hostWorkspaceFor },
-    { createCandidates },
+    { createCandidates, removeCandidates },
     { runDesignTurn, DesignTurnAllFailedError, FALLBACK_DESIGNER_AGENT },
   ] = await Promise.all([
     import("@/lib/org/organization"),
@@ -548,12 +548,42 @@ async function runDesignTurnStep(params: {
     );
   }
 
-  const candidates = await createCandidates({
-    sessionWorkspace: hostWorkspaceFor(params.sandboxState),
-    chatId: params.chatId,
-    baseBranch: params.baseBranch,
-    count: params.count,
-  });
+  const sessionWorkspace = hostWorkspaceFor(params.sandboxState);
+
+  /*
+   * `removeCandidates` (Task 1) is otherwise only ever reached from
+   * `acceptCandidate` — the "user picked a winner" path. None of the plan's
+   * three cleanup paths (accept, cancel, chat deletion) covers a design turn
+   * that never produced anything to pick from: a `createCandidates` failure
+   * partway through, or every candidate turn failing, both leave worktrees
+   * and branches `createCandidates` already made with nothing left in this
+   * codebase that will ever remove them. Every failure exit below cleans up
+   * before returning or rethrowing; only the success path — where the user
+   * still needs the candidates to choose from — leaves them in place.
+   */
+  const cleanupOrphanedCandidates = async (): Promise<void> => {
+    try {
+      await removeCandidates({ sessionWorkspace, chatId: params.chatId });
+    } catch (cleanupError) {
+      console.error(
+        "[workflow] Failed to remove design candidates after a failed design turn:",
+        cleanupError,
+      );
+    }
+  };
+
+  let candidates: Awaited<ReturnType<typeof createCandidates>>;
+  try {
+    candidates = await createCandidates({
+      sessionWorkspace,
+      chatId: params.chatId,
+      baseBranch: params.baseBranch,
+      count: params.count,
+    });
+  } catch (error) {
+    await cleanupOrphanedCandidates();
+    throw error;
+  }
 
   const onProgress = async (progress: DesignProgress) => {
     const writer = params.writable.getWriter();
@@ -579,6 +609,7 @@ async function runDesignTurnStep(params: {
     });
     return { outcomes, allFailed: false };
   } catch (error) {
+    await cleanupOrphanedCandidates();
     if (error instanceof DesignTurnAllFailedError) {
       return { outcomes: error.outcomes, allFailed: true };
     }
@@ -777,11 +808,27 @@ export async function runAgentWorkflow(options: Options) {
         );
       }
 
+      // `designCandidateCount`'s `2 | 3` type is compile-time only — Task 4
+      // starts passing this from the client, over the wire, where nothing
+      // stops an arbitrary number from arriving. Reject it here, before
+      // `createCandidates` ever runs, rather than letting it reach git with
+      // a `count` its own branch-naming rule (`design/<chatId>/<n>`, n =
+      // 1..3) was never meant to see.
+      const requestedCandidateCount = options.designCandidateCount ?? 3;
+      if (
+        requestedCandidateCount !== 2 &&
+        requestedCandidateCount !== 3
+      ) {
+        throw new Error(
+          `Design mode requires 2 or 3 candidates, got ${requestedCandidateCount}.`,
+        );
+      }
+
       const designResult = await runDesignTurnStep({
         sandboxState: runtime.sandboxState,
         chatId: options.chatId,
         baseBranch: runtime.currentBranch,
-        count: options.designCandidateCount ?? 3,
+        count: requestedCandidateCount,
         prompt: extractLatestUserText(options.messages),
         agentOptions,
         writable,
@@ -838,7 +885,7 @@ export async function runAgentWorkflow(options: Options) {
      * Run one agent turn and fold its result into the workflow's running
      * state. Used for the primary turn and for every continuation turn that
      * consumes a buffered steer message — both go through the identical step
-     * invocation (recorder, checkpointing, resume via claudeSessionId).
+     * invocation (recorder, checkpointing, resume via the chat's per-backend resume token).
      *
      * Each turn gets its own assistant message id, its own seed messages, and
      * its own checkpoint. A buffered message already got its own persisted
@@ -1387,6 +1434,7 @@ const runAgentStep = async (
     // replay independently under the durable workflow runtime, and the chat's
     // current policy is what decides whether a steer monitor is armed at all.
     const chat = await getChatById(chatId);
+    const currentBackend = chat?.backend ?? "claude-code";
     const turnPolicy: TurnPolicy = chat?.turnPolicy ?? "steer";
     if (turnPolicy === "steer") {
       steerMonitor = startSteerMonitor(chatId, abortController, (steered) => {
@@ -1407,9 +1455,15 @@ const runAgentStep = async (
           }
         : undefined;
 
-    // Claude Code keeps its own conversation history, so only the newest user
-    // turn is sent; prior turns are recovered with `--resume`.
-    const claudeSessionId = await getChatClaudeSessionId(chatId);
+    // The backend keeps its own conversation history, so only the newest
+    // user turn is sent; prior turns are recovered via this backend's own
+    // resume token (`chats.resumeTokens[currentBackend]`) — scoped per
+    // backend so switching a chat's backend and switching it back resumes
+    // each side correctly instead of one clobbering the other (see
+    // `resolveChatResumeToken`'s own doc).
+    const resumeToken = chat
+      ? resolveChatResumeToken(chat, currentBackend)
+      : undefined;
 
     // Read inside the step, never returned from one. Step results are persisted
     // by the durable workflow runtime, so a token that crossed a step boundary
@@ -1530,7 +1584,10 @@ const runAgentStep = async (
       },
       messageId,
       originalMessages,
-      ...(claudeSessionId ? { claudeSessionId } : {}),
+      // `claudeSessionId` is `runAgentTurn`'s neutral resume-token field
+      // (see its own doc — the name predates OpenFX and is not renamed
+      // here) fed with THIS backend's own token, never the other one's.
+      ...(resumeToken ? { claudeSessionId: resumeToken } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(githubToken ? { githubToken } : {}),
       chatId,
@@ -1562,9 +1619,12 @@ const runAgentStep = async (
       ...(step.steered ? { steered: step.steered } : {}),
     });
 
-    // Persist the session id so the next turn resumes instead of starting over.
-    if (step.claudeSessionId && step.claudeSessionId !== claudeSessionId) {
-      await setChatClaudeSessionId(chatId, step.claudeSessionId);
+    // Persist the resume token under the backend that produced it, so the
+    // next turn on that SAME backend resumes instead of starting over — and
+    // a turn on the OTHER backend never sees it (see
+    // `resolveChatResumeToken`'s own doc on why that matters).
+    if (step.claudeSessionId && step.claudeSessionId !== resumeToken) {
+      await setChatResumeToken(chatId, currentBackend, step.claudeSessionId);
     }
 
     const stepUsage = toLanguageModelUsage(step.usage);

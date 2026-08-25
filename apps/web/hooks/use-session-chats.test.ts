@@ -23,6 +23,7 @@ function createChat(
     backend: "claude-code",
     activeStreamId: null,
     claudeSessionId: null,
+    resumeTokens: {},
     lastAssistantMessageAt: null,
     previewVisibility: "private",
     previewSlug: previewSlug(id),
