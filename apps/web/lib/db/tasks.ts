@@ -188,11 +188,25 @@ export async function listTasks(
     .orderBy(desc(tasks.createdAt));
 }
 
-/** Extra columns a status transition may set alongside the new status. */
+/**
+ * Extra columns a status transition may set alongside the new status.
+ *
+ * `sessionId` is here for one case: a proposal task
+ * (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is created `blocked`
+ * with no session at all, and the human who unblocks it is the first person
+ * to say which repository the work belongs in. That choice arrives with the
+ * `blocked -> todo` transition and is written in the same guarded update
+ * rather than through a second, unchecked write — see `unblockTaskAction`
+ * (`app/tasks/actions.ts`).
+ */
 export type TaskTransitionPatch = Partial<
   Pick<
     Task,
-    "chatId" | "reviewerRejections" | "resultSummary" | "assignedAgent"
+    | "chatId"
+    | "sessionId"
+    | "reviewerRejections"
+    | "resultSummary"
+    | "assignedAgent"
   >
 >;
 

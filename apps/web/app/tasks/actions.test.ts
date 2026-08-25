@@ -66,7 +66,8 @@ class MockTaskTransitionError extends Error {
 type FakeTask = {
   id: string;
   organizationId: string;
-  sessionId: string;
+  /** Null for a proposal/reflection task that belongs to no session yet. */
+  sessionId: string | null;
   parentTaskId: string | null;
   title: string;
   goal: string;
@@ -92,7 +93,7 @@ const LEGAL: Record<string, string[]> = {
   todo: ["running"],
   running: ["review", "blocked", "failed"],
   review: ["done", "running", "blocked", "failed"],
-  blocked: ["running"],
+  blocked: ["running", "todo"],
   failed: ["todo"],
   done: [],
 };
@@ -104,7 +105,7 @@ mock.module("@/lib/db/tasks", () => ({
     const row: FakeTask = {
       id: `task-${tasksStore.length + 1}`,
       organizationId: input.organizationId as string,
-      sessionId: input.sessionId as string,
+      sessionId: input.sessionId as string | null,
       parentTaskId: (input.parentTaskId as string | null) ?? null,
       title: input.title as string,
       goal: input.goal as string,
@@ -564,12 +565,18 @@ describe("unblockTaskAction", () => {
     });
   });
 
-  test("a task with no chat cannot be unblocked", async () => {
-    tasksStore = [blockedTask({ chatId: null })];
+  test("a session that cannot be loaded leaves the task blocked, not running", async () => {
+    tasksStore = [blockedTask()];
+    sessionsById = new Map();
 
     const result = await unblockTaskAction("task-1");
 
     expect(result.ok).toBe(false);
+    // The whole point: validation happens before the write, so a task whose
+    // unblock could never have succeeded is still where a human left it —
+    // not stranded in `running`, a status the board offers no action for.
+    expect(tasksStore[0]?.status).toBe("blocked");
+    expect(transitionCalls).toHaveLength(0);
     expect(kickExecutorFixTurnCalls).toHaveLength(0);
   });
 
@@ -583,12 +590,90 @@ describe("unblockTaskAction", () => {
     expect(tasksStore[0]?.status).toBe("failed");
   });
 
-  test("an illegal edge (e.g. done -> running via unblock) is surfaced, not thrown", async () => {
+  test("a task that is not blocked is surfaced, not thrown", async () => {
     tasksStore = [blockedTask({ status: "done" })];
 
     const result = await unblockTaskAction("task-1");
 
     expect(result.ok).toBe(false);
+    expect(tasksStore[0]?.status).toBe("done");
+    expect(transitionCalls).toHaveLength(0);
     expect(kickExecutorFixTurnCalls).toHaveLength(0);
+  });
+
+  test("a blocked task with no chat is released to todo and started fresh", async () => {
+    tasksStore = [blockedTask({ chatId: null, reviewerRejections: 0 })];
+
+    const result = await unblockTaskAction("task-1");
+
+    expect(result).toEqual({ ok: true, chatId: "chat-1" });
+    expect(transitionCalls).toEqual([
+      {
+        organizationId: "org-1",
+        taskId: "task-1",
+        to: "todo",
+        patch: { sessionId: "session-1", reviewerRejections: 0 },
+      },
+    ]);
+    expect(startTaskCalls).toEqual([
+      { organizationId: "org-1", taskId: "task-1" },
+    ]);
+    // There is no chat to resume — starting one is the unblock.
+    expect(kickExecutorFixTurnCalls).toHaveLength(0);
+  });
+
+  test("a proposal task with no session is unblocked onto the session the caller picks", async () => {
+    tasksStore = [
+      blockedTask({ chatId: null, sessionId: null, reviewerRejections: 0 }),
+    ];
+
+    const result = await unblockTaskAction("task-1", {
+      sessionId: "session-1",
+    });
+
+    expect(result).toEqual({ ok: true, chatId: "chat-1" });
+    expect(transitionCalls[0]?.patch).toMatchObject({
+      sessionId: "session-1",
+    });
+    expect(tasksStore[0]?.sessionId).toBe("session-1");
+    expect(startTaskCalls).toHaveLength(1);
+  });
+
+  test("a proposal task with no session and no session picked stays blocked", async () => {
+    tasksStore = [
+      blockedTask({ chatId: null, sessionId: null, reviewerRejections: 0 }),
+    ];
+
+    const result = await unblockTaskAction("task-1");
+
+    expect(result.ok).toBe(false);
+    expect(tasksStore[0]?.status).toBe("blocked");
+    expect(transitionCalls).toHaveLength(0);
+    expect(startTaskCalls).toHaveLength(0);
+  });
+
+  test("a session the caller does not own cannot be attached", async () => {
+    tasksStore = [
+      blockedTask({ chatId: null, sessionId: null, reviewerRejections: 0 }),
+    ];
+
+    const result = await unblockTaskAction("task-1", {
+      sessionId: "session-2",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(tasksStore[0]?.status).toBe("blocked");
+    expect(transitionCalls).toHaveLength(0);
+    expect(startTaskCalls).toHaveLength(0);
+  });
+
+  test("a failure to start the fresh chat leaves the task in todo, where Start is offered", async () => {
+    tasksStore = [blockedTask({ chatId: null, reviewerRejections: 0 })];
+    startTaskResult = { ok: false, error: "no sandbox" };
+
+    const result = await unblockTaskAction("task-1");
+
+    expect(result).toEqual({ ok: false, error: "no sandbox" });
+    expect(tasksStore[0]?.status).toBe("todo");
   });
 });

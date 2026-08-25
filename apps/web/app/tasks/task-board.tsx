@@ -12,6 +12,7 @@ import {
 } from "./actions";
 import { NewTaskDialog } from "./new-task-dialog";
 import { type PendingAction, TaskColumns } from "./task-columns";
+import { UnblockTaskDialog } from "./unblock-task-dialog";
 
 /**
  * The org's task board: one column per status in the state machine
@@ -38,6 +39,14 @@ export function TaskBoard() {
   const [pending, setPending] = useState<
     Record<string, PendingAction | undefined>
   >({});
+  /**
+   * The blocked task whose session the human is being asked to pick, if any.
+   *
+   * A blocked task that already has a session is unblocked in one click; one
+   * with none (every proposal task — see `UnblockTaskDialog`) cannot be, and
+   * asking here is what stops those cards accumulating in Blocked forever.
+   */
+  const [unblockingId, setUnblockingId] = useState<string | null>(null);
   const requestIdRef = useRef(0);
 
   const loadTasks = useCallback(async () => {
@@ -85,6 +94,21 @@ export function TaskBoard() {
     }
   }
 
+  /**
+   * A task with a session can be unblocked outright; one without needs a
+   * session chosen first, which `UnblockTaskDialog` asks for.
+   */
+  function handleUnblock(taskId: string) {
+    const target = tasks?.find((row) => row.id === taskId);
+    if (target && !target.sessionId) {
+      setUnblockingId(taskId);
+      return;
+    }
+    void runAction(taskId, "unblock", () => unblockTaskAction(taskId));
+  }
+
+  const unblockingTask = tasks?.find((row) => row.id === unblockingId) ?? null;
+
   return (
     <div className="flex h-full flex-col gap-4 p-4">
       <div className="flex items-center justify-between gap-4">
@@ -125,9 +149,7 @@ export function TaskBoard() {
           onStart={(taskId) =>
             void runAction(taskId, "start", () => startTaskAction(taskId))
           }
-          onUnblock={(taskId) =>
-            void runAction(taskId, "unblock", () => unblockTaskAction(taskId))
-          }
+          onUnblock={handleUnblock}
           pending={pending}
           tasks={tasks}
         />
@@ -137,6 +159,29 @@ export function TaskBoard() {
         onCreated={() => void loadTasks()}
         onOpenChange={setDialogOpen}
         open={dialogOpen}
+      />
+
+      <UnblockTaskDialog
+        onConfirm={(sessionId) => {
+          const taskId = unblockingId;
+          if (!taskId) {
+            return;
+          }
+          // Kept open, and `submitting`, until the action resolves — the
+          // dialog is the only place its error can be read back.
+          void runAction(taskId, "unblock", () =>
+            unblockTaskAction(taskId, { sessionId }),
+          ).finally(() => setUnblockingId(null));
+        }}
+        onOpenChange={(open) => {
+          if (!open) {
+            setUnblockingId(null);
+          }
+        }}
+        submitting={
+          unblockingId !== null && pending[unblockingId] === "unblock"
+        }
+        task={unblockingTask}
       />
     </div>
   );

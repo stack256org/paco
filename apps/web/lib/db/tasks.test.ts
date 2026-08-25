@@ -467,6 +467,24 @@ describe("transitionTaskStatus", () => {
     expect(updated.chatId).toBe("chat-1");
   });
 
+  test("blocked -> todo can attach the session a proposal task never had", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: null,
+      title: "Skill proposal",
+      goal: "Goal",
+      initialStatus: "blocked",
+    });
+
+    const updated = await transitionTaskStatus("org-1", task.id, "todo", {
+      sessionId: "session-9",
+    });
+
+    expect(updated.status).toBe("todo");
+    expect(updated.sessionId).toBe("session-9");
+  });
+
   test("appends exactly one task/status event with the correct from/to when a chat is attached", async () => {
     store = [];
     const task = await createTask({

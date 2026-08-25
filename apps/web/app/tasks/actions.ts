@@ -275,64 +275,119 @@ export async function retryTaskAction(
   }
 }
 
+export type UnblockTaskOptions = {
+  /**
+   * The session to attach to a task that has none — a proposal task
+   * (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is created `blocked`
+   * with `sessionId: null`, so the human unblocking it is the first person
+   * to say which repository the work belongs in. Ignored for a task that
+   * already has a session.
+   */
+  sessionId?: string;
+};
+
 /**
- * `blocked -> running`: a human unblock.
+ * A human unblock. What that means depends on how far the task got.
  *
- * Resets `reviewerRejections` to 0 — the bounded-retry counter that got the
- * task blocked in the first place no longer applies once a human has looked
- * at it — and re-kicks one executor turn on the task's existing chat via
- * `kickExecutorFixTurn` (`lib/tasks/reviewer-gate.ts`), the same helper the
- * automatic reviewer gate uses for its own `review -> running` retries. A
- * task can only reach `blocked` from `running`, so its `chatId` is always
- * set by the time this runs.
+ * A task that already has a chat is mid-flight — it was `running` and hit
+ * the approval/rejection wall — so unblocking it is `blocked -> running`
+ * with `reviewerRejections` reset (the bounded-retry counter that blocked it
+ * no longer applies once a human has looked at it) and one executor turn
+ * re-kicked on the existing chat via `kickExecutorFixTurn`
+ * (`lib/tasks/reviewer-gate.ts`), the same helper the automatic reviewer
+ * gate uses for its own `review -> running` retries.
  *
- * If the re-kick itself fails to start, the task is moved on to `failed`
- * rather than left claiming to be `running` with no turn behind it —
- * mirroring `startTask`'s own `failTask` fallback.
+ * A task with NO chat never ran at all, and that is the common case rather
+ * than an edge one: every production path into `blocked` at creation time —
+ * reflection proposals and org-memory promotion proposals — files a task
+ * with no chat and no session. There is no turn to resume, so unblocking it
+ * means releasing it into the backlog (`blocked -> todo`, carrying the
+ * chosen session) and starting it for real through `startTask`, exactly as
+ * the board's own Start button would.
+ *
+ * Everything is validated BEFORE anything is written. That ordering is the
+ * point: this used to perform the `blocked -> running` write first and
+ * validate afterwards, so a task whose unblock could never succeed was left
+ * `running` with no turn behind it — and `running` has no action on the
+ * board, so the task was stranded for good. Now a rejected unblock leaves
+ * the task exactly where the human found it, and the two writes that do
+ * happen (`blocked -> todo`, then `startTask`'s own `todo -> running`) both
+ * end somewhere the board can act on: `startTask` failing leaves the task in
+ * `todo`, which renders Start.
  */
 export async function unblockTaskAction(
   taskId: string,
+  options?: UnblockTaskOptions,
 ): Promise<StartTaskResult> {
-  const { organizationId } = await requireOrgMembership();
+  const { userId, organizationId } = await requireOrgMembership();
 
   const task = await getTask(organizationId, taskId);
   if (!task) {
     return { ok: false, error: `Task "${taskId}" not found` };
   }
-  if (!task.chatId) {
-    return { ok: false, error: `Task "${taskId}" has no chat to resume` };
+  if (task.status !== "blocked") {
+    return {
+      ok: false,
+      error: `Task "${taskId}" is not "blocked" (currently "${task.status}")`,
+    };
   }
 
-  let updated: Awaited<ReturnType<typeof getTask>>;
-  try {
-    updated = await transitionTaskStatus(organizationId, taskId, "running", {
-      reviewerRejections: 0,
-    });
-  } catch (error) {
-    if (error instanceof TaskTransitionError) {
-      return { ok: false, error: error.message };
-    }
-    return { ok: false, error: errorMessage(error) };
+  const sessionId = task.sessionId ?? options?.sessionId ?? null;
+  if (!sessionId) {
+    return {
+      ok: false,
+      error: "Choose a session for this task before continuing it.",
+    };
   }
-  if (!updated?.chatId) {
-    return { ok: false, error: `Task "${taskId}" has no chat to resume` };
-  }
-  const chatId = updated.chatId;
-  if (!updated.sessionId) {
-    return { ok: false, error: `Task "${taskId}" has no session to resume` };
-  }
-  const sessionId = updated.sessionId;
 
   const session = await getSessionById(sessionId);
   if (!session) {
     return { ok: false, error: `Session "${sessionId}" not found` };
   }
+  // Only a session the caller is newly *attaching* is theirs to prove: a
+  // session the task already carries was vetted when the task was created,
+  // and the board is deliberately org-wide, so re-checking ownership there
+  // would stop a colleague unblocking a task they can plainly see. Mirrors
+  // `createTaskAction`'s check on the session picker it offers.
+  if (!task.sessionId && session.userId !== userId) {
+    return { ok: false, error: "That session was not found." };
+  }
+
+  if (task.chatId) {
+    return await resumeBlockedTask(organizationId, task.id, {
+      chatId: task.chatId,
+      sessionId,
+      userId: session.userId,
+    });
+  }
+
+  return await releaseBlockedTaskToTodo(organizationId, task.id, sessionId);
+}
+
+/**
+ * `blocked -> running` for a task that already has a chat, re-kicking one
+ * executor turn on it. A re-kick that fails to start moves the task on to
+ * `failed` rather than leaving it claiming to be `running` with nothing
+ * behind it — mirroring `startTask`'s own `failTask` fallback.
+ */
+async function resumeBlockedTask(
+  organizationId: string,
+  taskId: string,
+  chat: { chatId: string; sessionId: string; userId: string },
+): Promise<StartTaskResult> {
+  try {
+    await transitionTaskStatus(organizationId, taskId, "running", {
+      reviewerRejections: 0,
+    });
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
+  }
 
   try {
     await kickExecutorFixTurn({
-      sessionId,
-      chatId,
-      userId: session.userId,
+      sessionId: chat.sessionId,
+      chatId: chat.chatId,
+      userId: chat.userId,
       problems: ["A human unblocked this task. Continue the work."],
     });
   } catch (error) {
@@ -350,5 +405,27 @@ export async function unblockTaskAction(
     return { ok: false, error: message };
   }
 
-  return { ok: true, chatId };
+  return { ok: true, chatId: chat.chatId };
+}
+
+/**
+ * `blocked -> todo` for a task that never ran, attaching the session it is
+ * to run in and then starting it. `reviewerRejections` is reset for the same
+ * reason the resume path resets it: a human has now looked at this.
+ */
+async function releaseBlockedTaskToTodo(
+  organizationId: string,
+  taskId: string,
+  sessionId: string,
+): Promise<StartTaskResult> {
+  try {
+    await transitionTaskStatus(organizationId, taskId, "todo", {
+      sessionId,
+      reviewerRejections: 0,
+    });
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
+  }
+
+  return await startTask(organizationId, taskId);
 }

@@ -16,6 +16,13 @@ import { canTransition, nextOnReviewerVerdict } from "./state";
  * illegal edge, the gate's transition throws, and the task is stranded in
  * `review` forever (no later turn can move it — `getTaskByChatId` only
  * matches `running` — and the board renders no action for `review`).
+ *
+ * `blocked → todo` is the same human unblock for a task that never started:
+ * a proposal (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is BORN
+ * `blocked` with no chat, so there is no turn to resume — releasing it into
+ * the backlog is what unblocking it means (`unblockTaskAction` then starts
+ * it, and a start that fails leaves it in `todo`, where the board offers
+ * Start, instead of stranded).
  */
 const LEGAL_EDGES: ReadonlyArray<readonly [TaskStatus, TaskStatus]> = [
   ["todo", "running"],
@@ -28,6 +35,7 @@ const LEGAL_EDGES: ReadonlyArray<readonly [TaskStatus, TaskStatus]> = [
   ["review", "blocked"],
   ["failed", "todo"],
   ["blocked", "running"],
+  ["blocked", "todo"],
 ];
 
 const LEGAL_KEYS = new Set(LEGAL_EDGES.map(([from, to]) => `${from}->${to}`));
