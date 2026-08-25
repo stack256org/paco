@@ -43,6 +43,16 @@ export interface SubmitMessageInput {
    * task board) can pass a tighter cap instead.
    */
   maxSteps?: number;
+  /**
+   * Runs this turn as a design turn — N parallel designer candidates in
+   * their own worktrees — instead of one turn on the chat's branch. Set per
+   * message by the composer's Design toggle, never stored on the chat.
+   */
+  mode?: "design";
+  /** How many candidates a design turn runs. Validated by the caller. */
+  designCandidateCount?: 2 | 3;
+  /** Refine that one existing candidate instead of generating a fresh set. */
+  designIterateCandidate?: 1 | 2 | 3;
 }
 
 export type SubmitMessageOutcome =
@@ -84,6 +94,9 @@ export async function submitChatMessage(
     sessionStatus,
     activeStreamId,
     maxSteps = DEFAULT_MAX_STEPS,
+    mode,
+    designCandidateCount,
+    designIterateCandidate,
   } = input;
 
   if (sessionStatus === "archived") {
@@ -139,6 +152,9 @@ export async function submitChatMessage(
       authSession,
       assistantId: generateId(),
       maxSteps,
+      ...(mode ? { mode } : {}),
+      ...(designCandidateCount ? { designCandidateCount } : {}),
+      ...(designIterateCandidate ? { designIterateCandidate } : {}),
     },
   ]);
 

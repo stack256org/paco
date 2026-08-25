@@ -680,9 +680,20 @@ const runDesignTurnSpy = mock(
   },
 );
 
+let resolveCandidateResult: TestDesignCandidate | null = {
+  index: 2,
+  branch: "design/chat-1/2",
+  worktreeDir: "/workspace/designs/chat-1/2",
+};
+const resolveCandidateSpy = mock(
+  (_params: { sessionWorkspace: string; chatId: string; index: number }) =>
+    Promise.resolve(resolveCandidateResult),
+);
+
 mock.module("@/lib/design/candidates", () => ({
   createCandidates: createCandidatesSpy,
   removeCandidates: removeCandidatesSpy,
+  resolveCandidate: resolveCandidateSpy,
 }));
 mock.module("@/lib/design/design-turn", () => ({
   runDesignTurn: runDesignTurnSpy,
@@ -795,6 +806,12 @@ beforeEach(() => {
   resolveChatMcpServersSpy.mockClear();
   createCandidatesSpy.mockClear();
   removeCandidatesSpy.mockClear();
+  resolveCandidateSpy.mockClear();
+  resolveCandidateResult = {
+    index: 2,
+    branch: "design/chat-1/2",
+    worktreeDir: "/workspace/designs/chat-1/2",
+  };
   runDesignTurnSpy.mockClear();
   Object.values(spies).forEach((s) => s.mockClear());
 });
@@ -2179,6 +2196,57 @@ describe("design mode", () => {
     // them to pick a winner from (Task 1's `acceptCandidate` cleans up once
     // one is actually accepted).
     expect(removeCandidatesSpy).not.toHaveBeenCalled();
+  });
+
+  test("iterating refines the existing candidate instead of recreating them", async () => {
+    await runAgentWorkflow(
+      makeOptions({ mode: "design", designIterateCandidate: 2 }),
+    );
+
+    // The candidate the user annotated keeps its worktree and its history:
+    // `createCandidates` would have branched a fresh one off the chat branch.
+    expect(createCandidatesSpy).not.toHaveBeenCalled();
+    expect(resolveCandidateSpy).toHaveBeenCalledTimes(1);
+    expect(resolveCandidateSpy.mock.calls[0][0]).toMatchObject({
+      chatId: "chat-1",
+      index: 2,
+    });
+
+    const runCall = runDesignTurnSpy.mock.calls[0][0] as {
+      candidates: TestDesignCandidate[];
+      framing?: string;
+    };
+    expect(runCall.candidates.map((candidate) => candidate.index)).toEqual([2]);
+    expect(runCall.framing).toBe("iteration");
+
+    // The siblings are untouched — nothing is cleaned up by an iteration.
+    expect(removeCandidatesSpy).not.toHaveBeenCalled();
+  });
+
+  test("refuses to iterate on a candidate whose worktree is gone", async () => {
+    resolveCandidateResult = null;
+
+    await expect(
+      runAgentWorkflow(
+        makeOptions({ mode: "design", designIterateCandidate: 3 }),
+      ),
+    ).rejects.toThrow("no longer there to refine");
+
+    expect(runDesignTurnSpy).not.toHaveBeenCalled();
+    // Failing to find the candidate must not take the other candidates with
+    // it.
+    expect(removeCandidatesSpy).not.toHaveBeenCalled();
+  });
+
+  test("rejects an iteration target outside 1..3", async () => {
+    await expect(
+      runAgentWorkflow(
+        makeOptions({ mode: "design", designIterateCandidate: 7 }),
+      ),
+    ).rejects.toThrow("candidate 1, 2 or 3");
+
+    expect(resolveCandidateSpy).not.toHaveBeenCalled();
+    expect(createCandidatesSpy).not.toHaveBeenCalled();
   });
 
   test("honors designCandidateCount", async () => {

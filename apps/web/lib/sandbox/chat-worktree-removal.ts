@@ -5,6 +5,7 @@ import {
   type SandboxState,
 } from "@paco/sandbox";
 import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
+import { removeCandidates } from "@/lib/design/candidates";
 import { canOperateOnSandbox } from "@/lib/sandbox/utils";
 
 /**
@@ -115,6 +116,29 @@ export async function removeChatWorktree(
     const sandbox = await connectSandbox(sandboxState);
     const workspaceRoot = hostWorkspaceFor(sandboxState);
     const repo = repoDir(workspaceRoot);
+
+    /*
+     * A chat's design candidates go with it.
+     *
+     * They are worktrees of the same repository, at `designs/<chatId>/<n>`,
+     * branched off the chat's own branch — so a chat deleted while a design
+     * turn's candidates are still on disk leaves two or three directories
+     * (and their branches) that nothing in the product can reach again, the
+     * exact orphan class this function's own doc was written about.
+     *
+     * Best-effort, and first: `removeCandidates` is idempotent and a no-op
+     * for a chat that never ran a design turn, and failing to clean them up
+     * is not a reason to refuse to delete the chat — the worktree removal
+     * below is what decides that.
+     */
+    try {
+      await removeCandidates({ sessionWorkspace: workspaceRoot, chatId });
+    } catch (error) {
+      console.error(
+        `[chat ${chatId}] design candidate cleanup failed during delete:`,
+        error,
+      );
+    }
 
     const removal = classifyWorktreeRemoval(
       await sandbox.exec(

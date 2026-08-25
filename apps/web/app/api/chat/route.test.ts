@@ -745,6 +745,97 @@ describe("/api/chat route", () => {
     });
   });
 
+  test("passes design mode through to the workflow with a valid count", async () => {
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(
+      createRequest(
+        JSON.stringify({
+          sessionId: "session-1",
+          chatId: "chat-1",
+          mode: "design",
+          messages: [
+            {
+              id: "user-1",
+              role: "user",
+              parts: [{ type: "text", text: "Design a landing page" }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(startCalls[0]?.[1]).toEqual([
+      expect.objectContaining({ mode: "design", designCandidateCount: 3 }),
+    ]);
+  });
+
+  test("passes an iteration target through to the workflow", async () => {
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(
+      createRequest(
+        JSON.stringify({
+          sessionId: "session-1",
+          chatId: "chat-1",
+          mode: "design",
+          designIterateCandidate: 2,
+          messages: [
+            {
+              id: "user-1",
+              role: "user",
+              parts: [
+                { type: "text", text: "On candidate 2: #hero — bigger." },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(response.ok).toBe(true);
+    expect(startCalls[0]?.[1]).toEqual([
+      expect.objectContaining({ mode: "design", designIterateCandidate: 2 }),
+    ]);
+  });
+
+  test("rejects a candidate count design mode cannot run", async () => {
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(
+      createRequest(
+        JSON.stringify({
+          sessionId: "session-1",
+          chatId: "chat-1",
+          mode: "design",
+          designCandidateCount: 9,
+          messages: [
+            {
+              id: "user-1",
+              role: "user",
+              parts: [{ type: "text", text: "Design a landing page" }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    // Nothing was started: an invalid count never reaches the durable run.
+    expect(startCalls).toHaveLength(0);
+  });
+
+  test("leaves an ordinary send free of design options", async () => {
+    const { POST } = await routeModulePromise;
+
+    await POST(createValidRequest());
+
+    const started = startCalls[0]?.[1] as Array<Record<string, unknown>>;
+    expect(started[0]).not.toHaveProperty("mode");
+    expect(started[0]).not.toHaveProperty("designCandidateCount");
+  });
+
   test("includes x-workflow-run-id header on success", async () => {
     const { POST } = await routeModulePromise;
 

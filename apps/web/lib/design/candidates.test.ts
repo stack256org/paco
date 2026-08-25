@@ -13,8 +13,12 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
-const { createCandidates, removeCandidates, acceptCandidate } =
-  await import("./candidates");
+const {
+  createCandidates,
+  removeCandidates,
+  acceptCandidate,
+  resolveCandidate,
+} = await import("./candidates");
 
 const execFileAsync = promisify(execFile);
 
@@ -230,6 +234,54 @@ describe("removeCandidates", () => {
       `design/${chatId}/*`,
     ]);
     expect(branchList.trim()).toBe("");
+  });
+});
+
+describe("resolveCandidate", () => {
+  test("describes a candidate that exists, matching createCandidates", async () => {
+    const { root, chatId } = await makeFixture("resolve1");
+    const [first, second] = await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: `chat/${chatId}`,
+      count: 2,
+    });
+
+    expect(
+      await resolveCandidate({ sessionWorkspace: root, chatId, index: 1 }),
+    ).toEqual(first);
+    expect(
+      await resolveCandidate({ sessionWorkspace: root, chatId, index: 2 }),
+    ).toEqual(second);
+  });
+
+  test("answers null for a candidate that was never created", async () => {
+    const { root, chatId } = await makeFixture("resolve2");
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: `chat/${chatId}`,
+      count: 2,
+    });
+
+    expect(
+      await resolveCandidate({ sessionWorkspace: root, chatId, index: 3 }),
+    ).toBeNull();
+  });
+
+  test("answers null once the candidates have been removed", async () => {
+    const { root, chatId } = await makeFixture("resolve3");
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: `chat/${chatId}`,
+      count: 2,
+    });
+    await removeCandidates({ sessionWorkspace: root, chatId });
+
+    expect(
+      await resolveCandidate({ sessionWorkspace: root, chatId, index: 1 }),
+    ).toBeNull();
   });
 });
 

@@ -1,5 +1,59 @@
-import { describe, expect, test } from "bun:test";
-import { classifyWorktreeRemoval } from "./chat-worktree-removal";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
+
+mock.module("server-only", () => ({}));
+
+// ── The workspace side, mocked: this module's job is the decision, not
+//    Docker. ─────────────────────────────────────────────────────────
+
+type ExecResult = { success: boolean; stdout?: string; stderr?: string };
+
+let execResults: ExecResult[] = [];
+const execCalls: string[] = [];
+const connectSandboxMock = mock(() =>
+  Promise.resolve({
+    exec: (command: string) => {
+      execCalls.push(command);
+      return Promise.resolve(execResults.shift() ?? { success: true });
+    },
+  }),
+);
+mock.module("@paco/sandbox", () => ({
+  connectSandbox: connectSandboxMock,
+  chatDir: (root: string, chatId: string) => `${root}/chats/${chatId}`,
+  repoDir: (root: string) => `${root}/repo`,
+}));
+
+mock.module("@/lib/agent/workspace-paths", () => ({
+  hostWorkspaceFor: () => "/workspaces/s1",
+}));
+
+mock.module("@/lib/sandbox/utils", () => ({
+  canOperateOnSandbox: Boolean,
+}));
+
+let removeCandidatesShouldThrow = false;
+const removeCandidatesMock = mock(
+  (_params: { sessionWorkspace: string; chatId: string }) => {
+    if (removeCandidatesShouldThrow) {
+      return Promise.reject(new Error("git said no"));
+    }
+    return Promise.resolve();
+  },
+);
+mock.module("@/lib/design/candidates", () => ({
+  removeCandidates: removeCandidatesMock,
+}));
+
+const { classifyWorktreeRemoval, removeChatWorktree } =
+  await import("./chat-worktree-removal");
+
+beforeEach(() => {
+  execResults = [];
+  execCalls.length = 0;
+  removeCandidatesShouldThrow = false;
+  removeCandidatesMock.mockClear();
+  connectSandboxMock.mockClear();
+});
 
 describe("classifyWorktreeRemoval", () => {
   test("a clean run removed it", () => {
@@ -66,5 +120,41 @@ describe("classifyWorktreeRemoval", () => {
         success: false,
       }),
     ).toEqual({ kind: "failed", reason: "something went wrong" });
+  });
+});
+
+describe("removeChatWorktree design-candidate cleanup", () => {
+  test("removes the chat's design candidates before its own worktree", async () => {
+    const outcome = await removeChatWorktree(
+      { type: "docker", sandboxName: "s1" },
+      "chat-1",
+    );
+
+    expect(outcome).toEqual({ kind: "removed" });
+    expect(removeCandidatesMock).toHaveBeenCalledTimes(1);
+    expect(removeCandidatesMock.mock.calls[0][0]).toEqual({
+      sessionWorkspace: "/workspaces/s1",
+      chatId: "chat-1",
+    });
+    expect(execCalls[0]).toContain("worktree remove");
+  });
+
+  test("a candidate cleanup failure does not block the delete", async () => {
+    removeCandidatesShouldThrow = true;
+
+    const outcome = await removeChatWorktree(
+      { type: "docker", sandboxName: "s1" },
+      "chat-1",
+    );
+
+    expect(outcome).toEqual({ kind: "removed" });
+    expect(execCalls[0]).toContain("worktree remove");
+  });
+
+  test("touches nothing when the workspace is not running", async () => {
+    const outcome = await removeChatWorktree(null, "chat-1");
+
+    expect(outcome).toEqual({ kind: "not-running" });
+    expect(removeCandidatesMock).not.toHaveBeenCalled();
   });
 });

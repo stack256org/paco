@@ -103,6 +103,14 @@ type Options = {
   mode?: "design";
   /** How many design candidates to run. Defaults to `DEFAULT_DESIGN_CANDIDATE_COUNT`. */
   designCandidateCount?: 2 | 3;
+  /**
+   * Refine ONE existing candidate in its own worktree instead of generating
+   * a fresh set. Set by the design panel's "Iterate" control (Task 4): the
+   * candidate the user annotated keeps its direction and its history, so
+   * `createCandidates` — which destroys and recreates every candidate from
+   * the chat's branch — must not run.
+   */
+  designIterateCandidate?: 1 | 2 | 3;
 };
 
 type ChatModelRuntime = {
@@ -517,6 +525,8 @@ async function runDesignTurnStep(params: {
   prompt: string;
   agentOptions: AgentCallOptions;
   writable: Writable;
+  /** Set to refine that one existing candidate rather than create a new set. */
+  iterateCandidate?: 1 | 2 | 3;
 }): Promise<{ outcomes: DesignCandidateOutcome[]; allFailed: boolean }> {
   "use step";
 
@@ -524,7 +534,7 @@ async function runDesignTurnStep(params: {
     { getOrganization },
     { resolveChatAgents },
     { hostWorkspaceFor },
-    { createCandidates, removeCandidates },
+    { createCandidates, removeCandidates, resolveCandidate },
     { runDesignTurn, DesignTurnAllFailedError, FALLBACK_DESIGNER_AGENT },
   ] = await Promise.all([
     import("@/lib/org/organization"),
@@ -560,6 +570,14 @@ async function runDesignTurnStep(params: {
    * still needs the candidates to choose from — leaves them in place.
    */
   const cleanupOrphanedCandidates = async (): Promise<void> => {
+    // An iteration never cleans up. Its siblings are untouched, finished
+    // work the user is still choosing between, and the candidate being
+    // refined keeps whatever it had committed before this pass — removing
+    // any of that because one refinement failed would throw away the whole
+    // design turn on the strength of a single failed follow-up.
+    if (params.iterateCandidate) {
+      return;
+    }
     try {
       await removeCandidates({ sessionWorkspace, chatId: params.chatId });
     } catch (cleanupError) {
@@ -571,16 +589,30 @@ async function runDesignTurnStep(params: {
   };
 
   let candidates: Awaited<ReturnType<typeof createCandidates>>;
-  try {
-    candidates = await createCandidates({
+  if (params.iterateCandidate) {
+    const existing = await resolveCandidate({
       sessionWorkspace,
       chatId: params.chatId,
-      baseBranch: params.baseBranch,
-      count: params.count,
+      index: params.iterateCandidate,
     });
-  } catch (error) {
-    await cleanupOrphanedCandidates();
-    throw error;
+    if (!existing) {
+      throw new Error(
+        `Design candidate ${params.iterateCandidate} is no longer there to refine. Its worktree has been removed — start a new design turn.`,
+      );
+    }
+    candidates = [existing];
+  } else {
+    try {
+      candidates = await createCandidates({
+        sessionWorkspace,
+        chatId: params.chatId,
+        baseBranch: params.baseBranch,
+        count: params.count,
+      });
+    } catch (error) {
+      await cleanupOrphanedCandidates();
+      throw error;
+    }
   }
 
   const onProgress = async (progress: DesignProgress) => {
@@ -602,6 +634,7 @@ async function runDesignTurnStep(params: {
       prompt: params.prompt,
       agentOptions: params.agentOptions,
       designerAgent,
+      framing: params.iterateCandidate ? "iteration" : "initial",
       onProgress,
       onChunk: () => Promise.resolve(),
     });
@@ -819,6 +852,23 @@ export async function runAgentWorkflow(options: Options) {
         );
       }
 
+      // Same reasoning as the count above: the client picks this, so the
+      // `1 | 2 | 3` type is compile-time only. An out-of-range index would
+      // otherwise reach `resolveCandidate` and simply find nothing, which
+      // reads as "your candidate vanished" rather than "that is not a
+      // candidate index."
+      const iterateCandidate = options.designIterateCandidate;
+      if (
+        iterateCandidate !== undefined &&
+        iterateCandidate !== 1 &&
+        iterateCandidate !== 2 &&
+        iterateCandidate !== 3
+      ) {
+        throw new Error(
+          `Design mode can only iterate on candidate 1, 2 or 3, got ${iterateCandidate}.`,
+        );
+      }
+
       const designResult = await runDesignTurnStep({
         sandboxState: runtime.sandboxState,
         chatId: options.chatId,
@@ -827,6 +877,7 @@ export async function runAgentWorkflow(options: Options) {
         prompt: extractLatestUserText(options.messages),
         agentOptions,
         writable,
+        ...(iterateCandidate ? { iterateCandidate } : {}),
       });
 
       pendingAssistantResponse = {

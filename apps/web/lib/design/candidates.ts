@@ -233,6 +233,42 @@ export async function removeCandidates(params: {
 }
 
 /**
+ * The candidate at `index`, if its worktree is still on disk — `null`
+ * otherwise.
+ *
+ * This is what iterating on a candidate needs: refining candidate 2 means
+ * running the designer again in candidate 2's *existing* worktree, so it
+ * needs that candidate's branch and directory without going anywhere near
+ * `createCandidates`, which deliberately destroys and recreates every
+ * candidate from the chat's branch.
+ *
+ * The directory is checked rather than assumed, because the names are pure
+ * functions of the chat id: a `DesignCandidate` can always be *described*,
+ * whether or not one was ever created. Returning `null` lets the caller say
+ * "that candidate is gone" instead of starting an agent turn in a directory
+ * that does not exist.
+ */
+export async function resolveCandidate(params: {
+  sessionWorkspace: string;
+  chatId: string;
+  index: 1 | 2 | 3;
+}): Promise<DesignCandidate | null> {
+  const { sessionWorkspace, chatId, index } = params;
+  const worktreeDir = designWorktreeDir(sessionWorkspace, chatId, index);
+
+  try {
+    const stats = await fs.stat(worktreeDir);
+    if (!stats.isDirectory()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return { index, branch: designBranch(chatId, index), worktreeDir };
+}
+
+/**
  * Merge one design candidate's branch into the chat's branch, inside the
  * chat's own worktree, then remove every candidate worktree and branch.
  *

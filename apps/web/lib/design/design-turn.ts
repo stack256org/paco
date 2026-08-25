@@ -50,6 +50,12 @@ export type DesignCandidateProgressStatus =
   | "completed"
   | "failed";
 
+/**
+ * Whether a design turn is generating a fresh set of candidates or refining
+ * one that already exists in its own worktree.
+ */
+export type DesignTurnFraming = "initial" | "iteration";
+
 /** One candidate's progress, streamed live as a `data-design-progress` part. */
 export interface DesignProgress {
   candidate: number;
@@ -148,21 +154,43 @@ function buildPortContractInstruction(index: 1 | 2 | 3): string {
 }
 
 /**
+ * The framing for a turn that refines a candidate that already exists.
+ *
+ * A design turn's second pass is not "produce candidate 2 of 1": the
+ * worktree already holds a finished direction the user has looked at and
+ * annotated, and the whole point of iterating in the SAME worktree is that
+ * the direction survives and only the noted parts change. Telling the
+ * candidate it is generating one of N fresh alternatives would invite it to
+ * start over, which is exactly the outcome iterating exists to avoid.
+ */
+function buildIterationFraming(index: number): string {
+  return [
+    `You are REFINING DESIGN CANDIDATE ${index}, in the worktree where you`,
+    "already built it. Keep this candidate's established visual direction and",
+    "structure; change only what the feedback below asks for, at the elements",
+    "it names. Commit your work.",
+  ].join(" ");
+}
+
+/**
  * Everything a candidate turn's own system prompt needs beyond the base
  * agent options: the designer's persona (so the top-level turn behaves as
  * the designer roster agent, not the default orchestrator), which candidate
- * it is and how it should differ from its siblings, and the preview-port
- * contract.
+ * it is and how it should differ from its siblings (or, when iterating, how
+ * it should differ from *itself*), and the preview-port contract.
  */
 function buildCandidateCustomInstructions(params: {
   designerPrompt: string;
   index: number;
   count: number;
+  framing: DesignTurnFraming;
   baseCustomInstructions?: string;
 }): string {
   return [
     params.designerPrompt,
-    buildCandidateFraming(params.index, params.count),
+    params.framing === "iteration"
+      ? buildIterationFraming(params.index)
+      : buildCandidateFraming(params.index, params.count),
     buildPortContractInstruction(params.index as 1 | 2 | 3),
     ...(params.baseCustomInstructions ? [params.baseCustomInstructions] : []),
   ].join("\n\n");
@@ -368,6 +396,11 @@ export interface RunDesignTurnParams {
   agentOptions: AgentCallOptions;
   /** The designer roster agent, whose persona frames every candidate's turn. */
   designerAgent: ClaudeAgentDefinition;
+  /**
+   * `"iteration"` when `candidates` are existing worktrees being refined
+   * rather than fresh ones. Defaults to `"initial"`.
+   */
+  framing?: DesignTurnFraming;
   onProgress: (progress: DesignProgress) => Promise<void>;
   onChunk: (candidateIndex: number, chunk: UIMessageChunk) => Promise<void>;
   /** Injectable for tests; defaults to the real `runAgentTurn`. */
@@ -429,6 +462,7 @@ export async function runDesignTurn(
                 designerPrompt: params.designerAgent.prompt,
                 index: candidate.index,
                 count,
+                framing: params.framing ?? "initial",
                 baseCustomInstructions: params.agentOptions.customInstructions,
               }),
               sandbox: {

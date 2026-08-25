@@ -155,6 +155,34 @@ describe("runDesignTurn", () => {
     expect(seenInstructions[0]).toContain(FALLBACK_DESIGNER_AGENT.prompt);
   });
 
+  test("frames an iteration as a refinement of the candidate that exists", async () => {
+    const seenInstructions: string[] = [];
+    const runTurn: RunCandidateTurn = (params) => {
+      seenInstructions.push(params.options.customInstructions ?? "");
+      return Promise.resolve({ isError: false, finishReason: "stop" });
+    };
+
+    await runDesignTurn({
+      candidates: [candidate(2, "/d/2")],
+      prompt: 'On candidate 2: #hero ("Welcome") — make it bigger.',
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      framing: "iteration",
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      runTurn,
+      commitCandidate: noopCommit,
+    });
+
+    expect(seenInstructions[0]).toContain("REFINING DESIGN CANDIDATE 2");
+    // Never "candidate 2 of 1": an iteration runs one candidate on its own,
+    // and the generation framing's "of N" would read as a fresh start.
+    expect(seenInstructions[0]).not.toContain("DESIGN CANDIDATE 2 of");
+    // The port contract still reaches it — the dev server has to come back up
+    // on the same port the preview proxies to.
+    expect(seenInstructions[0]).toContain("PORT=4321");
+  });
+
   test("gives each candidate its OWN environment details, not the chat's", async () => {
     const candidates = [candidate(1, "/d/1"), candidate(2, "/d/2")];
     const seenEnvironmentDetails: Array<string | undefined> = [];
