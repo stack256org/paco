@@ -39,7 +39,47 @@
  * literally as the allow/deny paths do — see the task-345 report's concerns.
  */
 
+import { DEFAULT_SANDBOX_PORTS } from "@/lib/sandbox/config";
+
 export const CERT_ROOT = "/etc/paco/preview-certs";
+
+/**
+ * Path, on every design-candidate preview host, that serves the click
+ * inspector script.
+ *
+ * Proxied straight through to Paco's own app rather than read off disk by
+ * nginx itself: the script lives at `apps/web/public/design-inspector.js`
+ * and is already served like any other Next.js public asset at
+ * `/design-inspector.js` on Paco's own origin, so this location just needs
+ * to reach that origin over the loopback — the same `127.0.0.1:<appPort>`
+ * the `/_paco_auth` subrequest already targets, for the same reason (see
+ * this file's header comment, point 2).
+ */
+export const DESIGN_INSPECTOR_PATH = "/__paco/design-inspector.js";
+
+/**
+ * Which of a sandbox's published container ports a design candidate's dev
+ * server is expected to bind, for a candidate index of 1..3.
+ *
+ * The chat's own preview always targets `PREVIEW_PORT`
+ * (`lib/sandbox/config.ts`) — the first of `DEFAULT_SANDBOX_PORTS`
+ * (`[3000, 5173, 4321, 8000]`). That list publishes three *more* ports from
+ * the very same container for exactly this purpose: rather than inventing
+ * new ports and wiring a fifth (or sixth, or seventh) one through the
+ * sandbox's Docker config, a candidate simply claims the next slot already
+ * published — candidate 1 on 5173, candidate 2 on 4321, candidate 3 on
+ * 8000. Whatever dev-server tooling a candidate's worktree runs is
+ * responsible for actually binding there (the same way the chat's own dev
+ * server is expected to bind 3000); this function only names the
+ * convention. The caller that wires up a candidate's nginx block
+ * (`syncPreviewRoutes`'s candidate handling) still has to resolve that
+ * container port to whatever host port Docker actually published it on —
+ * `listSandboxPreviewPorts` already does exactly that, called once per
+ * container port instead of just `PREVIEW_PORT`'s.
+ */
+export function candidateContainerPort(index: 1 | 2 | 3): number {
+  return DEFAULT_SANDBOX_PORTS[index];
+}
 
 /** Where a preview hostname's certificate and key live, if it has one. */
 export function previewCertDir(hostname: string): string {
@@ -103,6 +143,20 @@ export type PreviewServerBlockInput = {
    * worst outcome is a preview served over HTTP, which works.
    */
   certDir: string | null;
+  /**
+   * Whether this block routes a design-candidate preview rather than an
+   * ordinary chat preview. Defaults to `false`.
+   *
+   * The *only* thing this flag changes: a candidate block gets the click
+   * inspector injected (`sub_filter` before `</body>`, plus the
+   * `DESIGN_INSPECTOR_PATH` location that serves it) — nothing about
+   * routing or auth differs, since a candidate is authorized exactly like
+   * its owning chat (`decideCandidatePreviewAccess`). An ordinary chat
+   * block must never carry the inspector: it is unreviewed, freshly
+   * generated code shown to whoever the chat's preview is shared with, not
+   * a design surface meant to be clicked on.
+   */
+  isDesignCandidate?: boolean;
 };
 
 /**
@@ -113,7 +167,13 @@ export type PreviewServerBlockInput = {
  * literally in generated nginx configuration.
  */
 export function previewServerBlock(input: PreviewServerBlockInput): string {
-  const { hostname, upstreamPort, appPort, certDir } = input;
+  const {
+    hostname,
+    upstreamPort,
+    appPort,
+    certDir,
+    isDesignCandidate = false,
+  } = input;
 
   assertSafeHostname(hostname);
   assertValidPort(upstreamPort, "upstreamPort");
@@ -142,6 +202,31 @@ export function previewServerBlock(input: PreviewServerBlockInput): string {
       ? ""
       : '    if ($scheme = "http") {\n        return 301 https://$host$request_uri;\n    }\n\n';
 
+  // Only a design-candidate block gets the inspector: an nginx location
+  // that hands the script out (proxied to Paco's own public asset, see
+  // `DESIGN_INSPECTOR_PATH`'s doc comment) plus the `sub_filter` directives
+  // that inject a `<script>` tag for it into every HTML response. An
+  // ordinary chat preview must never carry either — see this input's
+  // `isDesignCandidate` doc comment.
+  const inspectorLocation = isDesignCandidate
+    ? `
+    location = ${DESIGN_INSPECTOR_PATH} {
+        proxy_pass http://127.0.0.1:${appPort}/design-inspector.js;
+    }
+`
+    : "";
+
+  // `sub_filter` cannot rewrite a response nginx never sees uncompressed,
+  // so the upstream is told not to gzip in the first place — clearing
+  // `Accept-Encoding` on the proxied request, rather than trying to
+  // decompress and re-encode it here.
+  const inspectorSubFilter = isDesignCandidate
+    ? `        proxy_set_header Accept-Encoding "";
+        sub_filter '</body>' '<script src="${DESIGN_INSPECTOR_PATH}"></script></body>';
+        sub_filter_once on;
+`
+    : "";
+
   return `# Generated by Paco (lib/preview/nginx-config.ts) via nginx-reload.ts.
 # Do not edit by hand — this file is overwritten every time preview routes
 # are synced, and a hand edit is silently lost on the next sync.
@@ -163,11 +248,11 @@ ${httpsRedirect}    # Every preview is authorized by Paco on every request, publ
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-Uri $request_uri;
     }
-
+${inspectorLocation}
     location / {
         auth_request /_paco_auth;
 
-        proxy_pass http://127.0.0.1:${upstreamPort};
+${inspectorSubFilter}        proxy_pass http://127.0.0.1:${upstreamPort};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header Upgrade $http_upgrade;

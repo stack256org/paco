@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { previewHostname, previewSlug, previewSlugFromHost } from "./hostname";
+import {
+  candidatePreviewHostname,
+  parsePreviewHostSlug,
+  previewHostname,
+  previewSlug,
+  previewSlugFromHost,
+} from "./hostname";
 
 describe("previewSlug", () => {
   test("is lowercase and DNS-safe", () => {
@@ -81,5 +87,82 @@ describe("previewSlugFromHost", () => {
     expect(
       previewSlugFromHost(hostname as string, "previews.example.com"),
     ).toBe(previewSlug("abc123"));
+  });
+});
+
+describe("candidatePreviewHostname", () => {
+  test("appends the candidate suffix to the chat's slug", () => {
+    expect(candidatePreviewHostname("abc123", 2, "previews.example.com")).toBe(
+      `${previewSlug("abc123")}-d2.previews.example.com`,
+    );
+  });
+
+  test("differs per candidate index for the same chat", () => {
+    const one = candidatePreviewHostname("abc123", 1, "previews.example.com");
+    const two = candidatePreviewHostname("abc123", 2, "previews.example.com");
+    const three = candidatePreviewHostname("abc123", 3, "previews.example.com");
+    expect(new Set([one, two, three]).size).toBe(3);
+  });
+
+  test("is null when no base domain is configured", () => {
+    expect(candidatePreviewHostname("abc123", 1, null)).toBeNull();
+  });
+
+  test("is null when the base domain is blank", () => {
+    expect(candidatePreviewHostname("abc123", 1, "   ")).toBeNull();
+  });
+});
+
+describe("parsePreviewHostSlug", () => {
+  test("an ordinary chat slug has no candidate index", () => {
+    expect(parsePreviewHostSlug("abc123")).toEqual({
+      chatSlug: "abc123",
+      candidateIndex: null,
+    });
+  });
+
+  test("recovers the chat slug and candidate index from a candidate label", () => {
+    expect(parsePreviewHostSlug("abc123-d2")).toEqual({
+      chatSlug: "abc123",
+      candidateIndex: 2,
+    });
+  });
+
+  test("recognizes every valid candidate index", () => {
+    expect(parsePreviewHostSlug("abc-d1").candidateIndex).toBe(1);
+    expect(parsePreviewHostSlug("abc-d2").candidateIndex).toBe(2);
+    expect(parsePreviewHostSlug("abc-d3").candidateIndex).toBe(3);
+  });
+
+  test("an out-of-range suffix is left as part of the chat slug", () => {
+    expect(parsePreviewHostSlug("abc-d4")).toEqual({
+      chatSlug: "abc-d4",
+      candidateIndex: null,
+    });
+  });
+
+  test("a zero or negative-looking suffix is left as part of the chat slug", () => {
+    expect(parsePreviewHostSlug("abc-d0")).toEqual({
+      chatSlug: "abc-d0",
+      candidateIndex: null,
+    });
+  });
+
+  test("round-trips with candidatePreviewHostname and previewSlugFromHost", () => {
+    const hostname = candidatePreviewHostname(
+      "abc123",
+      3,
+      "previews.example.com",
+    );
+    expect(hostname).not.toBeNull();
+    const label = previewSlugFromHost(
+      hostname as string,
+      "previews.example.com",
+    );
+    expect(label).not.toBeNull();
+    expect(parsePreviewHostSlug(label as string)).toEqual({
+      chatSlug: previewSlug("abc123"),
+      candidateIndex: 3,
+    });
   });
 });
