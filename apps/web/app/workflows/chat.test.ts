@@ -101,6 +101,15 @@ function createResolvedChatSandboxRuntime(
   };
 }
 
+/**
+ * Records the order `runTaskCompletionStep` and `distillTurnMemoryStep` are
+ * called in, across a whole workflow run — the reviewer gate has to decide
+ * the task's fate before distillation learns from the turn, per Task 6.
+ * Bun's separate mock objects don't share a call-order timeline on their
+ * own, so this array is what the ordering test in this file reads.
+ */
+let completionSequenceCallOrder: string[] = [];
+
 const spies = {
   persistUserMessage: mock(() => Promise.resolve()),
   persistAssistantMessageWithToolResults: mock(() => Promise.resolve()),
@@ -171,7 +180,20 @@ const spies = {
       sessionRepoDir?: string;
       userId?: string;
       turnId?: string;
-    }) => Promise.resolve(),
+    }) => {
+      completionSequenceCallOrder.push("distillTurnMemoryStep");
+      return Promise.resolve();
+    },
+  ),
+  runTaskCompletionStep: mock(
+    (_params?: {
+      chatId?: string;
+      isError?: boolean;
+      finishReason?: string;
+    }) => {
+      completionSequenceCallOrder.push("runTaskCompletionStep");
+      return Promise.resolve();
+    },
   ),
 };
 
@@ -462,6 +484,28 @@ mock.module("@/lib/memory/load-for-turn", () => ({
   loadMemorySectionForTurn: loadMemorySectionForTurnSpy,
 }));
 
+/**
+ * The turn step also resolves the org roster and plugin skill contributions
+ * (Section 3 Task 2 / Section 2 Task 8) the same way it resolves memory
+ * above — via a dynamic import this file stands in for. `undefined` here
+ * means "let the real default apply" (`resolveChatAgentsSpy` yields `{}`,
+ * mirroring an org with nothing configured; `resolveChatSkillsSpy` echoes
+ * back whatever workspace skills it was given).
+ */
+let resolveChatAgentsResult: Record<string, unknown> | undefined;
+let resolveChatSkillsResult: unknown[] | undefined;
+const resolveChatAgentsSpy = mock((_organizationId: string) =>
+  Promise.resolve(resolveChatAgentsResult ?? {}),
+);
+const resolveChatSkillsSpy = mock((workspaceSkills: unknown[]) =>
+  Promise.resolve(resolveChatSkillsResult ?? workspaceSkills),
+);
+mock.module("@/lib/agent/chat-environment", () => ({
+  resolveChatAgents: resolveChatAgentsSpy,
+  resolveChatSkills: resolveChatSkillsSpy,
+  buildChatEnvironmentDetails: () => "",
+}));
+
 const { runAgentWorkflow } = await import("./chat");
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -548,10 +592,15 @@ beforeEach(() => {
   organizationRecord = { id: "org-1" };
   memorySectionToReturn = undefined;
   resolveWorkCwdShouldThrow = false;
+  resolveChatAgentsResult = undefined;
+  resolveChatSkillsResult = undefined;
+  completionSequenceCallOrder = [];
   appendSessionEventsSpy.mockClear();
   listUnconsumedSteerEventsSpy.mockClear();
   setChatClaudeSessionIdSpy.mockClear();
   loadMemorySectionForTurnSpy.mockClear();
+  resolveChatAgentsSpy.mockClear();
+  resolveChatSkillsSpy.mockClear();
   Object.values(spies).forEach((s) => s.mockClear());
 });
 
@@ -672,6 +721,32 @@ describe("runAgentWorkflow", () => {
       sessionRepoDir?: string;
     };
     expect(call.sessionRepoDir).toBeUndefined();
+  });
+
+  test("gates task completion after auto-PR and before memory distillation", async () => {
+    await runAgentWorkflow(makeOptions());
+
+    expect(spies.runTaskCompletionStep).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      isError: false,
+      finishReason: "stop",
+    });
+    // The reviewer gate decides the task's fate before distillation learns
+    // from the turn (Section 3 Task 6) — not after, and not interleaved.
+    expect(completionSequenceCallOrder).toEqual([
+      "runTaskCompletionStep",
+      "distillTurnMemoryStep",
+    ]);
+  });
+
+  test("marks task completion as an error when the turn's finish reason is error", async () => {
+    agentFinishReason = "error";
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(spies.runTaskCompletionStep).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: "chat-1", isError: true }),
+    );
   });
 
   test("runs post-turn memory distillation with the session repo dir and the recorder's turnId once the turn finishes", async () => {

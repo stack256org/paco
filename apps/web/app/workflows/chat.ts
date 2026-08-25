@@ -8,8 +8,9 @@ import {
   pruneMessages,
   type UIMessageChunk,
 } from "ai";
-import type { ClaudeRunUsage } from "@paco/claude-code";
+import type { ClaudeAgentDefinition, ClaudeRunUsage } from "@paco/claude-code";
 import type { TurnPolicy } from "@paco/agent-backend";
+import type { SkillMetadata } from "@paco/sandbox";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { appUrl } from "@/lib/app-url";
@@ -55,6 +56,7 @@ import {
   refreshLifecycleActivity,
   runAutoCommitStep,
   runAutoCreatePrStep,
+  runTaskCompletionStep,
   sendFinish,
 } from "./chat-post-finish";
 import { dedupeMessageReasoning } from "@/lib/chat/dedupe-message-reasoning";
@@ -998,11 +1000,23 @@ export async function runAgentWorkflow(options: Options) {
         ? "failed"
         : "completed";
 
-    // Very end of the completion sequence, after auto-commit and auto-PR: the
+    // After auto-commit and auto-PR, before memory distillation: the
     // client-visible stream is already closed above, so awaiting this here
     // costs the workflow run some wall-clock time but never delays the
-    // user's turn. A Section 3 Task 6 reviewer gate will be inserted BEFORE
-    // this call once it lands on this branch.
+    // user's turn. This chat may not own a task at all (the common case),
+    // in which case `runTaskCompletionStep` is a no-op; when it does, this
+    // is what decides whether the task fails outright or moves through the
+    // reviewer gate — that decision has to land before distillation learns
+    // from the turn below.
+    await runTaskCompletionStep({
+      chatId: options.chatId,
+      isError: finalFinishReason === "error",
+      finishReason: finalFinishReason ?? "unknown",
+    });
+
+    // Very end of the completion sequence, after task completion: awaiting
+    // this here costs the workflow run wall-clock time but, like the step
+    // above, never delays the user's turn — the stream is already closed.
     //
     // One call per turn that actually ran (the primary turn, plus every
     // continuation a steer/queue buffer produced), sequentially and awaited:
@@ -1268,12 +1282,32 @@ const runAgentStep = async (
      * promotion) should be visible to this one.
      */
     let memorySection: string | undefined;
+    /*
+     * The subagent roster and plugin skill contributions, resolved fresh per
+     * turn right alongside memory above and for the same reason: this step
+     * can replay independently under the durable workflow runtime, so a
+     * roster edit or a plugin toggle since the last turn should be visible
+     * on this one rather than stuck at whatever `resolveChatSandboxRuntime`
+     * saw when the workflow started.
+     *
+     * Additive, never a turn dependency, exactly like memory: a failure here
+     * leaves both `undefined`, so the turn falls back to whatever
+     * `agentOptions` already carried — `run-step.ts`'s package-level
+     * `DEFAULT_AGENTS` when `agents` is unset, and the workspace-only skills
+     * `resolveChatSandboxRuntime` found.
+     */
+    let resolvedAgents: Record<string, ClaudeAgentDefinition> | undefined;
+    let resolvedSkills: SkillMetadata[] | undefined;
     try {
-      const [{ getOrganization }, { loadMemorySectionForTurn }] =
-        await Promise.all([
-          import("@/lib/org/organization"),
-          import("@/lib/memory/load-for-turn"),
-        ]);
+      const [
+        { getOrganization },
+        { loadMemorySectionForTurn },
+        { resolveChatAgents, resolveChatSkills },
+      ] = await Promise.all([
+        import("@/lib/org/organization"),
+        import("@/lib/memory/load-for-turn"),
+        import("@/lib/agent/chat-environment"),
+      ]);
       const organization = await getOrganization();
       memorySection = await loadMemorySectionForTurn({
         ...(sessionRepoDir ? { sessionRepoDir } : {}),
@@ -1281,15 +1315,25 @@ const runAgentStep = async (
         organizationId: organization?.id,
         prompt,
       });
+      if (organization) {
+        resolvedAgents = await resolveChatAgents(organization.id);
+      }
+      resolvedSkills = await resolveChatSkills(agentOptions.skills ?? []);
     } catch (error) {
-      console.error("[workflow] Failed to load memory for turn:", error);
+      console.error(
+        "[workflow] Failed to load memory/roster/skills for turn:",
+        error,
+      );
     }
 
     const step = await runAgentTurn<WebAgentUIMessage>({
       prompt,
-      options: memorySection
-        ? { ...agentOptions, memorySection }
-        : agentOptions,
+      options: {
+        ...agentOptions,
+        ...(memorySection ? { memorySection } : {}),
+        ...(resolvedAgents ? { agents: resolvedAgents } : {}),
+        ...(resolvedSkills ? { skills: resolvedSkills } : {}),
+      },
       messageId,
       originalMessages,
       ...(claudeSessionId ? { claudeSessionId } : {}),

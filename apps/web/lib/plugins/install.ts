@@ -78,6 +78,18 @@ function pluginsDir(): string {
   return path.join(dataDir(), "plugins");
 }
 
+/**
+ * Where one installed plugin lives on disk.
+ *
+ * Exported so callers that scan an installed plugin's own slots (skills,
+ * agents) — `pluginSkillContributions`/`pluginAgentContributions` in
+ * `contributions.ts` — resolve the same directory `commitInstall` moved the
+ * plugin into, without a second copy of the `pluginsDir()` convention.
+ */
+export function pluginDir(id: string): string {
+  return path.join(pluginsDir(), id);
+}
+
 /** Fetches `source` into `destDir`, which already exists as an empty directory. */
 async function fetchInto(
   source: InstallSource,
