@@ -53,6 +53,38 @@ export const pluginManifestSchema = z
 
 export type PluginManifest = z.infer<typeof pluginManifestSchema>;
 
+/**
+ * Cross-checks a parsed manifest against the plugin's discovered `channels/`
+ * slot: a plugin that ships one or more `channels/*.ts` files must also
+ * request the `"channels:ingress"` capability.
+ *
+ * This cannot be one more branch inside `pluginManifestSchema`'s
+ * `superRefine` above, even though it is the same shape of rule as the
+ * `net:fetch`/`netDomains` and `mcpServers`/`tools:register` checks there:
+ * `superRefine` only ever sees the parsed contents of `plugin.json`, and
+ * whether a `channels/` directory exists is a filesystem fact that only
+ * `discovery.ts` (`discoverPlugin`) has, once it has walked the plugin's
+ * slots. It is still a manifest rule in every other sense — same
+ * capability-requires-companion shape, same "declare it or it's rejected"
+ * intent — just evaluated one layer up, at the point slots are actually
+ * known. `discoverPlugin` calls this immediately after discovering
+ * `slots.channels` and folds a violation into the same `{ok: false, error}`
+ * result a manifest parse failure returns, so callers see one failure shape
+ * either way.
+ */
+export function checkChannelsCapability(
+  manifest: PluginManifest,
+  channelSlotFiles: readonly string[],
+): string | undefined {
+  if (
+    channelSlotFiles.length > 0 &&
+    !manifest.capabilities.includes("channels:ingress")
+  ) {
+    return 'a plugin with a "channels/" slot must request the "channels:ingress" capability';
+  }
+  return undefined;
+}
+
 export function parsePluginManifest(
   json: unknown,
 ): { ok: true; manifest: PluginManifest } | { ok: false; error: string } {

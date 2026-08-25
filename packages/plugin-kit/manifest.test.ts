@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { parsePluginManifest, pluginManifestSchema } from "./manifest.ts";
+import {
+  checkChannelsCapability,
+  parsePluginManifest,
+  pluginManifestSchema,
+} from "./manifest.ts";
 
 function minimalManifest(overrides: Record<string, unknown> = {}) {
   return {
@@ -144,6 +148,55 @@ describe("pluginManifestSchema", () => {
     if (result.success) {
       expect(result.data.capabilities).toEqual(["tasks:create"]);
     }
+  });
+
+  test('accepts "channels:ingress" on its own, with no companion field required', () => {
+    const result = pluginManifestSchema.safeParse(
+      minimalManifest({ capabilities: ["channels:ingress"] }),
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.capabilities).toEqual(["channels:ingress"]);
+    }
+  });
+});
+
+describe("checkChannelsCapability", () => {
+  function parsedManifest(capabilities: string[] = []) {
+    const result = pluginManifestSchema.safeParse(
+      minimalManifest({ capabilities }),
+    );
+    if (!result.success) {
+      throw new Error(result.error.message);
+    }
+    return result.data;
+  }
+
+  test("returns undefined when there is no channels/ slot", () => {
+    expect(checkChannelsCapability(parsedManifest([]), [])).toBeUndefined();
+  });
+
+  test("returns undefined when a channels/ slot is paired with channels:ingress", () => {
+    expect(
+      checkChannelsCapability(parsedManifest(["channels:ingress"]), [
+        "/plugin/channels/events.ts",
+      ]),
+    ).toBeUndefined();
+  });
+
+  test('names the rule when a channels/ slot exists without "channels:ingress"', () => {
+    const error = checkChannelsCapability(parsedManifest([]), [
+      "/plugin/channels/events.ts",
+    ]);
+    expect(error).toContain("channels/");
+    expect(error).toContain('"channels:ingress"');
+  });
+
+  test("is unaffected by unrelated capabilities", () => {
+    const error = checkChannelsCapability(parsedManifest(["storage:kv"]), [
+      "/plugin/channels/events.ts",
+    ]);
+    expect(error).toContain('"channels:ingress"');
   });
 });
 

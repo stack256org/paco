@@ -10,15 +10,20 @@
  * `capability-request` messages and the host answers them; the worker only
  * ever learns the answer.
  */
+import { basename } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import type { Capability } from "@paco/plugin-kit";
 import type {
   PluginApi,
+  PluginChannelModule,
+  PluginChannelResponse,
   PluginFetchRequest,
   PluginFetchResponse,
   PluginHookModule,
   PluginSessionEvent,
+  PluginTaskCreateInput,
+  PluginTaskCreateResult,
   PluginToolModule,
 } from "./plugin-api.ts";
 import {
@@ -57,6 +62,8 @@ const pendingCapabilityCalls = new Map<
 
 const eventSubscribers = new Set<(event: PluginSessionEvent) => void>();
 const tools = new Map<string, PluginToolModule>();
+/** Loaded `channels/*` modules, keyed by their `name` or slot-file basename. */
+const channels = new Map<string, PluginChannelModule>();
 /** Abort controllers for tool calls still running, keyed by callId. */
 const inFlightToolCalls = new Map<string, AbortController>();
 
@@ -108,6 +115,13 @@ const api: PluginApi = {
     },
   },
   panel: (payload) => requestCapability("ui:panel", payload),
+  tasks: {
+    create: (input: PluginTaskCreateInput) =>
+      requestCapability(
+        "tasks:create",
+        input,
+      ) as Promise<PluginTaskCreateResult>,
+  },
   log(level, message) {
     send({ kind: "log", level, message });
   },
@@ -123,6 +137,22 @@ function isToolModule(value: unknown): value is PluginToolModule {
     candidate.name.length > 0 &&
     typeof candidate.execute === "function"
   );
+}
+
+function isChannelModule(value: unknown): value is PluginChannelModule {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<PluginChannelModule>;
+  return (
+    (candidate.name === undefined || typeof candidate.name === "string") &&
+    typeof candidate.handle === "function"
+  );
+}
+
+/** A slot file's basename with its `.ts`/`.js` extension stripped. */
+function slotKey(filePath: string): string {
+  return basename(filePath).replace(/\.(js|ts)$/, "");
 }
 
 async function loadDefaultExport(filePath: string): Promise<unknown> {
@@ -158,6 +188,31 @@ async function loadTools(slots: PluginSlots): Promise<RegisteredTool[]> {
     }
   }
   return registered;
+}
+
+/**
+ * Registers every `channels/*` default export, keyed by its declared `name`
+ * or (when omitted) its slot file's basename. A slot file that fails to load
+ * or has no valid default export is reported and skipped, same as
+ * `loadTools` — one broken channel must not stop the rest, or the ready
+ * handshake, from completing.
+ */
+async function loadChannels(slots: PluginSlots): Promise<void> {
+  for (const filePath of slots.channels) {
+    try {
+      const slotModule = await loadDefaultExport(filePath);
+      if (!isChannelModule(slotModule)) {
+        api.log("warn", `channel slot ${filePath} has no valid default export`);
+        continue;
+      }
+      channels.set(slotModule.name ?? slotKey(filePath), slotModule);
+    } catch (error) {
+      api.log(
+        "error",
+        `failed to load channel ${filePath}: ${describe(error)}`,
+      );
+    }
+  }
 }
 
 /**
@@ -204,6 +259,7 @@ async function handleInit(message: {
   pluginId = message.pluginId;
   const loading = (async () => {
     const registered = await loadTools(message.slots);
+    await loadChannels(message.slots);
     await loadHooks(message.slots);
     return registered;
   })();
@@ -243,6 +299,56 @@ async function handleInvokeTool(message: {
     });
   } finally {
     inFlightToolCalls.delete(message.callId);
+  }
+}
+
+/**
+ * Routes one inbound webhook to the `channels/*` module registered for it.
+ * An unknown channel key, or a handler that throws, is answered with an
+ * `ingress-result` rather than left to crash the worker — a broken or
+ * misconfigured channel must not take the whole plugin down, and the host
+ * always expects exactly one reply per `requestId`.
+ */
+async function handleIngress(message: {
+  requestId: string;
+  channel: string;
+  headers: Record<string, string>;
+  body: unknown;
+  rawBody: string;
+}): Promise<void> {
+  const channelModule = channels.get(message.channel);
+  if (!channelModule) {
+    send({
+      kind: "ingress-result",
+      requestId: message.requestId,
+      status: 404,
+      body: { error: `unknown channel: ${message.channel}` },
+    });
+    return;
+  }
+
+  try {
+    const result: PluginChannelResponse = await channelModule.handle(
+      {
+        headers: message.headers,
+        body: message.body,
+        rawBody: message.rawBody,
+      },
+      api,
+    );
+    send({
+      kind: "ingress-result",
+      requestId: message.requestId,
+      status: result.status,
+      body: result.body,
+    });
+  } catch (error) {
+    send({
+      kind: "ingress-result",
+      requestId: message.requestId,
+      status: 500,
+      body: { error: describe(error) },
+    });
   }
 }
 
@@ -339,6 +445,12 @@ async function handleLine(line: string): Promise<void> {
     case "cancel-tool":
       handleCancelTool(message.data);
       break;
+    case "ingress": {
+      const ingress = message.data;
+      await initialized;
+      await handleIngress(ingress);
+      break;
+    }
     case "shutdown":
       process.exit(0);
       break;

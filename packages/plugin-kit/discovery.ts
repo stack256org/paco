@@ -1,7 +1,11 @@
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
-import { parsePluginManifest, type PluginManifest } from "./manifest.ts";
+import {
+  checkChannelsCapability,
+  parsePluginManifest,
+  type PluginManifest,
+} from "./manifest.ts";
 
 export interface PluginDescriptor {
   manifest: PluginManifest;
@@ -129,6 +133,14 @@ export async function discoverPlugin(
       discoverSkillSlot(path.join(absoluteRootDir, "skills")),
     ],
   );
+
+  const channelsCapabilityError = checkChannelsCapability(
+    parsed.manifest,
+    channels,
+  );
+  if (channelsCapabilityError) {
+    return { ok: false, error: channelsCapabilityError };
+  }
 
   return {
     ok: true,

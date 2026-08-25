@@ -328,13 +328,37 @@ export const chats = pgTable(
       .default("claude-code"),
     activeStreamId: text("active_stream_id"),
     /**
-     * Claude Code session id backing this chat.
+     * Legacy, single-backend predecessor of `resumeTokens` below.
      *
-     * Set on the first turn and reused with `--resume` afterwards so the CLI
-     * keeps its own conversation history instead of us replaying the full
-     * transcript on every turn.
+     * Nothing writes to this column anymore — every write goes through
+     * `resumeTokens["claude-code"]` instead (`setChatResumeToken` in
+     * `lib/db/sessions.ts`). Kept as a pure read fallback
+     * (`resolveChatResumeToken`) for any row the one-time backfill
+     * migration (00XX) missed, and because dropping a column is a one-way
+     * door a read fallback isn't.
      */
     claudeSessionId: text("claude_session_id"),
+    /**
+     * Resume tokens per agent backend, keyed by backend id
+     * (`"claude-code"` / `"openfx"`).
+     *
+     * `backend` above is a mutable, per-chat choice, and each backend's
+     * resume token means something only to that backend's own session
+     * store: Claude Code's `--resume` and OpenFX's ACP `sessionId` are not
+     * interchangeable — handing one to the other backend either fails
+     * outright or, worse, resumes the wrong conversation
+     * (`OpenFxBackend.loadSession` would pass a Claude Code session id
+     * straight to ACP's `session/load`). Keying the resume token by backend
+     * means switching back and forth needs no clearing at all: each side's
+     * token just sits under its own key until that backend runs again, and
+     * a round trip (claude-code -> openfx -> claude-code) resumes both
+     * sides correctly. See `resolveChatResumeToken`/`setChatResumeToken` in
+     * `lib/db/sessions.ts`.
+     */
+    resumeTokens: jsonb("resume_tokens")
+      .$type<Record<string, string>>()
+      .notNull()
+      .default({}),
     lastAssistantMessageAt: timestamp("last_assistant_message_at"),
     /**
      * Who may open this chat's preview.
@@ -716,6 +740,23 @@ export const plugins = pgTable("plugins", {
     .notNull()
     .default([]),
   enabled: boolean("enabled").notNull().default(false),
+  /**
+   * The per-plugin shared secret for `/api/channels/[pluginId]/[channel]`,
+   * sealed with `lib/crypto/secret-box` — same rationale as
+   * `githubTokens.sealedToken`: the route needs the original value back on
+   * every inbound webhook to compare against `x-paco-channel-secret`, so it
+   * cannot be hashed.
+   *
+   * Null until a plugin is first enabled (`ensurePluginIngressSecret` in
+   * `lib/db/plugins.ts`, called from `grantAndEnableAction`), which
+   * generates one and returns it in the clear exactly once — that single
+   * response is the only place the plaintext ever exists outside the
+   * sealed column and the plugin author's own webhook config. Stable
+   * across re-enables: only ever generated when absent, never rotated
+   * automatically, so disabling and re-enabling a plugin doesn't silently
+   * break its already-configured webhook.
+   */
+  ingressSecret: text("ingress_secret"),
   installedAt: timestamp("installed_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

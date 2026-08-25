@@ -3,6 +3,7 @@ export type {
   HostLogEntry,
   HostLogger,
   HostLogLevel,
+  IngressOutcome,
   PluginHostOptions,
   PluginHostState,
   ToolOutcome,
@@ -12,12 +13,18 @@ export type { FetchAllowDecision } from "./net-allowlist.ts";
 export { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
 export type {
   PluginApi,
+  PluginChannelModule,
+  PluginChannelRequest,
+  PluginChannelResponse,
   PluginEventsApi,
   PluginFetchRequest,
   PluginFetchResponse,
   PluginHookModule,
   PluginKvApi,
   PluginSessionEvent,
+  PluginTaskCreateInput,
+  PluginTaskCreateResult,
+  PluginTasksApi,
   PluginToolModule,
 } from "./plugin-api.ts";
 export type {

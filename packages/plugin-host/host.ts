@@ -25,6 +25,8 @@ const MAX_MALFORMED_MESSAGES = 5;
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 /** Default ceiling on a single tool invocation. */
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
+/** Default ceiling on one inbound channel webhook, per the plan. */
+const DEFAULT_INGRESS_TIMEOUT_MS = 10_000;
 /** How long `stop()` waits after `shutdown` before SIGKILL. */
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 3000;
 /** Ceiling on retained worker stderr, so a chatty plugin cannot grow it. */
@@ -102,6 +104,22 @@ export type ToolOutcome =
   | { ok: true; output: unknown }
   | { ok: false; error: string };
 
+/**
+ * The result of one `deliverIngress` call. Always resolves — same
+ * philosophy as `ToolOutcome` — with `reason` telling the caller (the
+ * `/api/channels/[pluginId]/[channel]` route) exactly which HTTP status the
+ * failure maps to: `"not-granted"` and `"not-running"` both mean the plugin
+ * cannot currently take the request (503-shaped), `"timeout"` means the
+ * worker never answered in time (504-shaped).
+ */
+export type IngressOutcome =
+  | { ok: true; status: number; body?: unknown }
+  | {
+      ok: false;
+      reason: "not-granted" | "not-running" | "timeout";
+      error: string;
+    };
+
 export type PluginHostState = "starting" | "running" | "crashed" | "stopped";
 
 export interface PluginHostOptions {
@@ -139,6 +157,11 @@ export interface PluginHostOptions {
 
 interface PendingToolCall {
   resolve: (outcome: ToolOutcome) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingIngressCall {
+  resolve: (outcome: IngressOutcome) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -226,6 +249,7 @@ export class PluginHost {
 
   private readonly crashCallbacks = new Set<(error: string) => void>();
   private readonly pendingCalls = new Map<string, PendingToolCall>();
+  private readonly pendingIngress = new Map<string, PendingIngressCall>();
   private ready: PromiseWithResolvers<RegisteredTool[]> | undefined;
   private exited: PromiseWithResolvers<null> | undefined;
 
@@ -434,6 +458,69 @@ export class PluginHost {
 
       this.pendingCalls.set(callId, { resolve, timer });
       this.send({ kind: "invoke-tool", callId, tool, input });
+    });
+  }
+
+  /**
+   * Delivers one inbound channel webhook request to the worker and waits for
+   * its `{status, body?}` answer.
+   *
+   * Gated on `channels:ingress`, checked here rather than left to the
+   * generic `capability-request` path — an ingress delivery isn't a request
+   * the worker *initiates*, so there's no `handleCapabilityRequest` call it
+   * would otherwise pass through. A plugin whose grant doesn't (or no
+   * longer) includes `channels:ingress` gets `reason: "not-granted"`
+   * immediately, exactly like an ungranted capability elsewhere in this
+   * class: never sent to the worker at all.
+   *
+   * Always resolves, never rejects — `IngressOutcome` carries every failure
+   * mode (`not-granted`, `not-running`, `timeout`) as a value, the same
+   * philosophy `invokeTool` uses for `ToolOutcome`, so a broken or slow
+   * plugin degrades the one HTTP request touching it rather than throwing
+   * into the route handler.
+   */
+  deliverIngress(
+    channel: string,
+    headers: Record<string, string>,
+    body: unknown,
+    rawBody: string,
+    timeoutMs: number = DEFAULT_INGRESS_TIMEOUT_MS,
+  ): Promise<IngressOutcome> {
+    if (!this.granted.has("channels:ingress")) {
+      return Promise.resolve({
+        ok: false,
+        reason: "not-granted",
+        error: `plugin ${this.pluginId}: capability not granted: channels:ingress`,
+      });
+    }
+    if (this.currentState !== "running") {
+      return Promise.resolve({
+        ok: false,
+        reason: "not-running",
+        error: `plugin ${this.pluginId} is not running (state: ${this.currentState})`,
+      });
+    }
+
+    const requestId = `ingress-${++this.callCounter}`;
+    return new Promise<IngressOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingIngress.delete(requestId);
+        resolve({
+          ok: false,
+          reason: "timeout",
+          error: `ingress to channel "${channel}" timed out after ${timeoutMs}ms`,
+        });
+      }, timeoutMs);
+
+      this.pendingIngress.set(requestId, { resolve, timer });
+      this.send({
+        kind: "ingress",
+        requestId,
+        channel,
+        headers,
+        body,
+        rawBody,
+      });
     });
   }
 
@@ -729,6 +816,20 @@ export class PluginHost {
           message.data.payload,
         );
         break;
+      case "ingress-result": {
+        const pending = this.pendingIngress.get(message.data.requestId);
+        if (!pending) {
+          break;
+        }
+        clearTimeout(pending.timer);
+        this.pendingIngress.delete(message.data.requestId);
+        pending.resolve({
+          ok: true,
+          status: message.data.status,
+          body: message.data.body,
+        });
+        break;
+      }
       case "log":
         if (this.allowLog()) {
           this.logger({
@@ -1020,6 +1121,11 @@ export class PluginHost {
       clearTimeout(pending.timer);
       this.pendingCalls.delete(callId);
       pending.resolve({ ok: false, error });
+    }
+    for (const [requestId, pending] of this.pendingIngress) {
+      clearTimeout(pending.timer);
+      this.pendingIngress.delete(requestId);
+      pending.resolve({ ok: false, reason: "not-running", error });
     }
   }
 }

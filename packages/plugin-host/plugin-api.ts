@@ -37,6 +37,26 @@ export interface PluginEventsApi {
   subscribe(callback: (event: PluginSessionEvent) => void): () => void;
 }
 
+/** Input to `api.tasks.create` — see `tasks:create`'s capability handler. */
+export interface PluginTaskCreateInput {
+  sessionId: string;
+  title: string;
+  goal: string;
+  autoStart?: boolean;
+}
+
+export interface PluginTaskCreateResult {
+  taskId: string;
+  chatId?: string;
+  /** Set when `autoStart` was requested but starting the task failed. */
+  error?: string;
+}
+
+export interface PluginTasksApi {
+  /** `tasks:create` — creates a task on the board from an inbound message. */
+  create(input: PluginTaskCreateInput): Promise<PluginTaskCreateResult>;
+}
+
 export interface PluginApi {
   readonly pluginId: string;
   /**
@@ -56,6 +76,8 @@ export interface PluginApi {
   events: PluginEventsApi;
   /** `ui:panel` — pushes state to the plugin's sandboxed panel. */
   panel(payload: unknown): Promise<unknown>;
+  /** `tasks:create` — creates tasks on the board from an inbound message. */
+  tasks: PluginTasksApi;
   /** Diagnostics, surfaced through the host's logger. */
   log(level: "info" | "warn" | "error", message: string): void;
 }
@@ -80,3 +102,37 @@ export interface PluginToolModule {
 
 /** The shape a `hooks/*` module must default-export. */
 export type PluginHookModule = (api: PluginApi) => void | Promise<void>;
+
+/** One inbound webhook request, as handed to a `channels/*` module. */
+export interface PluginChannelRequest {
+  headers: Record<string, string>;
+  /** Best-effort `JSON.parse` of `rawBody`; `undefined` when it isn't JSON. */
+  body: unknown;
+  /**
+   * The exact bytes Paco received, before any parsing. A channel that
+   * verifies a signature over the raw request body (Slack's v0 HMAC scheme,
+   * for example) MUST use this, not a re-serialization of `body` — that
+   * would not reproduce the bytes the sender actually signed.
+   */
+  rawBody: string;
+}
+
+export interface PluginChannelResponse {
+  status: number;
+  body?: unknown;
+}
+
+/**
+ * The shape a `channels/*` module must default-export. `name` picks the key
+ * this channel is addressed by in the ingress route
+ * (`/api/channels/[pluginId]/[channel]`); when omitted, the worker falls
+ * back to the slot file's own basename (see `worker-entry.ts`'s
+ * `loadChannels`).
+ */
+export interface PluginChannelModule {
+  name?: string;
+  handle(
+    request: PluginChannelRequest,
+    api: PluginApi,
+  ): PluginChannelResponse | Promise<PluginChannelResponse>;
+}

@@ -15,6 +15,7 @@ export const CAPABILITIES = [
   "storage:kv", // per-plugin key-value storage
   "ui:panel", // contribute a sandboxed iframe panel
   "tasks:create", // create a task on the board from an inbound message
+  "channels:ingress", // receive inbound webhook requests for a channels/ slot
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

@@ -74,6 +74,22 @@ export const hostToWorkerSchema = z.discriminatedUnion("kind", [
     error: z.string().optional(),
   }),
   z.object({ kind: z.literal("cancel-tool"), callId: z.string() }),
+  z.object({
+    kind: z.literal("ingress"),
+    requestId: z.string(),
+    /** Which `channels/*.ts` module should handle this, by its slot key. */
+    channel: z.string(),
+    headers: z.record(z.string(), z.string()),
+    /** Best-effort JSON.parse of `rawBody`; `undefined` when it isn't JSON. */
+    body: z.unknown(),
+    /**
+     * The exact bytes the caller sent, before any parsing. Required so a
+     * channel can verify a signature computed over the raw request body
+     * (e.g. Slack's v0 HMAC scheme) — re-serializing `body` would not
+     * reproduce the same bytes the sender signed.
+     */
+    rawBody: z.string(),
+  }),
   z.object({ kind: z.literal("shutdown") }),
 ]);
 
@@ -101,6 +117,12 @@ export const workerToHostSchema = z.discriminatedUnion("kind", [
     kind: z.literal("log"),
     level: z.enum(["info", "warn", "error"]),
     message: z.string(),
+  }),
+  z.object({
+    kind: z.literal("ingress-result"),
+    requestId: z.string(),
+    status: z.number(),
+    body: z.unknown().optional(),
   }),
 ]);
 

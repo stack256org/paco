@@ -6,6 +6,11 @@ import type { Capability, PluginManifest } from "@paco/plugin-kit";
 // server component and has nothing to do with what is being tested.
 mock.module("server-only", () => ({}));
 
+// `ensurePluginIngressSecret` seals through `lib/crypto/secret-box`, which
+// derives its key from APP_SECRET — same fixture value `secret-box.test.ts`
+// uses.
+process.env.APP_SECRET ??= "test-secret-for-secret-box-000000000000";
+
 type Row = {
   id: string;
   source: string;
@@ -15,6 +20,7 @@ type Row = {
   grantedCapabilities: unknown;
   consentedNetDomains: unknown;
   enabled: boolean;
+  ingressSecret: string | null;
   installedAt: Date;
   updatedAt: Date;
 };
@@ -60,6 +66,7 @@ function makeRow(partial: Partial<Row>): Row {
     grantedCapabilities: partial.grantedCapabilities ?? [],
     consentedNetDomains: partial.consentedNetDomains ?? [],
     enabled: partial.enabled ?? false,
+    ingressSecret: partial.ingressSecret ?? null,
     installedAt: partial.installedAt ?? now,
     updatedAt: partial.updatedAt ?? now,
   };
@@ -112,6 +119,7 @@ const fakeDb = {
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
 const {
+  ensurePluginIngressSecret,
   PluginGrantEscalationError,
   getPlugin,
   listPlugins,
@@ -120,6 +128,9 @@ const {
   setPluginGrants,
   upsertPlugin,
 } = await import("./plugins");
+// Also server-only; imported dynamically, after the mock above, for the
+// same reason `./plugins` is.
+const { open } = await import("@/lib/crypto/secret-box");
 
 function manifestWithCapabilities(
   capabilities: Capability[],
@@ -540,5 +551,59 @@ describe("consentedNetDomains", () => {
     expect(errorSpy).toHaveBeenCalled();
 
     errorSpy.mockRestore();
+  });
+});
+
+describe("ensurePluginIngressSecret", () => {
+  test("generates and seals a secret, returning it in the clear once", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["channels:ingress"]),
+      grantedCapabilities: [],
+    });
+
+    const secret = await ensurePluginIngressSecret("my-plugin");
+
+    expect(secret).toBeDefined();
+    if (!secret) {
+      return;
+    }
+    const row = await getPlugin("my-plugin");
+    expect(row?.ingressSecret).toBeTruthy();
+    // Never stored in the clear.
+    expect(row?.ingressSecret).not.toBe(secret);
+    expect(open(row?.ingressSecret ?? "")).toBe(secret);
+  });
+
+  test("is a no-op on a plugin that already has a secret, and does not return one", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["channels:ingress"]),
+      grantedCapabilities: [],
+    });
+    const first = await ensurePluginIngressSecret("my-plugin");
+    expect(first).toBeDefined();
+    if (!first) {
+      return;
+    }
+
+    const second = await ensurePluginIngressSecret("my-plugin");
+
+    expect(second).toBeUndefined();
+    const row = await getPlugin("my-plugin");
+    expect(open(row?.ingressSecret ?? "")).toBe(first);
+  });
+
+  test("throws for an unknown plugin id", async () => {
+    store = [];
+    await expect(ensurePluginIngressSecret("does-not-exist")).rejects.toThrow();
   });
 });

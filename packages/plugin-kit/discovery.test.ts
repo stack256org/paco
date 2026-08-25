@@ -41,7 +41,7 @@ async function writeManifest(
 describe("discoverPlugin", () => {
   test("discovers every populated slot with absolute, sorted paths", async () => {
     const rootDir = await makeTempDir();
-    await writeManifest(rootDir);
+    await writeManifest(rootDir, { capabilities: ["channels:ingress"] });
 
     await mkdir(path.join(rootDir, "tools"));
     await writeFile(path.join(rootDir, "tools", "a.ts"), "");
@@ -143,6 +143,39 @@ describe("discoverPlugin", () => {
 
     const result = await discoverPlugin(rootDir);
     expect(result.ok).toBe(false);
+  });
+
+  test("returns ok:false when a channels/ slot exists without channels:ingress", async () => {
+    const rootDir = await makeTempDir();
+    await writeManifest(rootDir);
+
+    await mkdir(path.join(rootDir, "channels"));
+    await writeFile(path.join(rootDir, "channels", "events.ts"), "");
+
+    const result = await discoverPlugin(rootDir);
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      return;
+    }
+    expect(result.error).toContain("channels/");
+    expect(result.error).toContain('"channels:ingress"');
+  });
+
+  test("discovers a channels/ slot when channels:ingress is requested", async () => {
+    const rootDir = await makeTempDir();
+    await writeManifest(rootDir, { capabilities: ["channels:ingress"] });
+
+    await mkdir(path.join(rootDir, "channels"));
+    await writeFile(path.join(rootDir, "channels", "events.ts"), "");
+
+    const result = await discoverPlugin(rootDir);
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.plugin.slots.channels).toEqual([
+      path.join(path.resolve(rootDir), "channels", "events.ts"),
+    ]);
   });
 
   test("sorts slot files alphabetically regardless of creation order", async () => {

@@ -280,6 +280,7 @@ function pluginRow(overrides: Partial<PluginRow> = {}): PluginRow {
     grantedCapabilities: ["storage:kv", "net:fetch", "messages:post"],
     consentedNetDomains: ["api.linear.app"],
     enabled: true,
+    ingressSecret: null,
     installedAt: now,
     updatedAt: now,
     ...overrides,

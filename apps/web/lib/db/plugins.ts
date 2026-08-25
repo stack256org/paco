@@ -1,5 +1,6 @@
 import "server-only";
 
+import { randomBytes } from "node:crypto";
 import {
   type Capability,
   capabilitySchema,
@@ -7,8 +8,12 @@ import {
 } from "@paco/plugin-kit";
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
+import { seal } from "@/lib/crypto/secret-box";
 import { db } from "@/lib/db/client";
 import { plugins, type NewPluginRow, type PluginRow } from "@/lib/db/schema";
+
+/** Byte length of a freshly generated ingress secret, before base64url encoding. */
+const INGRESS_SECRET_BYTES = 32;
 
 /**
  * Thrown by `setPluginGrants` when the requested grants are not a subset of
@@ -253,4 +258,36 @@ export async function setPluginGrants(
 
 export async function removePlugin(id: string): Promise<void> {
   await db.delete(plugins).where(eq(plugins.id, id));
+}
+
+/**
+ * Generates and stores a channel-ingress shared secret for a plugin, unless
+ * it already has one.
+ *
+ * Called from `grantAndEnableAction` (`app/settings/plugins/actions.ts`) —
+ * "generated at install/enable" per the ingress route's design — but never
+ * regenerates: `plugins.ingressSecret`'s doc comment explains why it must
+ * stay stable across re-enables (an operator's already-configured webhook
+ * must not silently break). Returns the PLAINTEXT secret only when one was
+ * just generated, so the caller can show it to the operator exactly once;
+ * `undefined` means the plugin already had one and there is nothing new to
+ * show.
+ */
+export async function ensurePluginIngressSecret(
+  id: string,
+): Promise<string | undefined> {
+  const row = await getRawPluginRow(id);
+  if (!row) {
+    throw new Error(`No plugin installed with id "${id}"`);
+  }
+  if (row.ingressSecret) {
+    return undefined;
+  }
+
+  const secret = randomBytes(INGRESS_SECRET_BYTES).toString("base64url");
+  await db
+    .update(plugins)
+    .set({ ingressSecret: seal(secret), updatedAt: new Date() })
+    .where(eq(plugins.id, id));
+  return secret;
 }
