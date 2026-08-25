@@ -25,7 +25,31 @@ export function dataDir(): string {
   );
 }
 
-/** Project-scope memory directory: git-versioned, inside the session repo. */
+/**
+ * Project-scope memory directory: inside the session's repository checkout,
+ * at `.paco/memory`.
+ *
+ * In the working tree, NOT in git history. This said "git-versioned" and was
+ * wrong: `distill.ts` writes the files and `load-for-turn.ts` reads them, and
+ * nothing anywhere stages, commits or pushes them. They accumulate as
+ * untracked files in one server-side checkout, are never shared with anyone,
+ * and go when the workspace does. Retrieval keeps working the whole time,
+ * which is why the gap is invisible from inside the product.
+ *
+ * Left in the working tree deliberately rather than made to auto-commit.
+ * The write target is the session repo, checked out on the default branch,
+ * which Paco never pushes — its only publish path is a pull request from a
+ * chat's worktree branch — so committing here would still share nothing
+ * without inventing a branch and push strategy for memory alone. Committing
+ * from a chat worktree instead would put distilled notes into the user's
+ * feature branch, and from there into the diff a human reviews, on every
+ * turn. Neither is a thing to do to someone's repository unattended.
+ *
+ * The path is a real path in the repository, so anyone who wants this
+ * shared and reviewable — which is a reasonable thing to want, and the whole
+ * point of project scope — can commit `.paco/memory` themselves. The
+ * `/settings/memory` copy says exactly that.
+ */
 export function projectMemoryDir(sessionWorkspaceRepoDir: string): string {
   return path.join(sessionWorkspaceRepoDir, ".paco", "memory");
 }

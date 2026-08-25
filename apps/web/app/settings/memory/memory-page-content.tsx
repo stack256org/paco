@@ -173,12 +173,14 @@ export function MemoryPageContent() {
           edit, or delete at any time.
         </p>
         <p className="mt-2 text-base-content/60 text-sm">
-          Project memory isn&apos;t shown here — it lives in the repo itself,
-          versioned alongside the code it&apos;s about, at{" "}
+          Project memory isn&apos;t shown here — it lives in the session&apos;s
+          own checkout, at{" "}
           <code className="rounded bg-base-200 px-1 py-0.5 text-xs">
             .paco/memory/
           </code>
-          .
+          . Paco writes and reads it there but never commits it, so it stays
+          untracked and local to that checkout. Commit it yourself if you want
+          it shared and reviewable alongside the code it&apos;s about.
         </p>
       </div>
 
