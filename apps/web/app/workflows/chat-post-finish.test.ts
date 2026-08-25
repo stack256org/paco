@@ -96,6 +96,19 @@ mock.module("@/lib/chat/auto-pr-direct", () => ({
   performAutoCreatePr: spies.performAutoCreatePr,
 }));
 
+let distillTurnResult: Promise<void> | Error = Promise.resolve();
+
+const distillTurnSpy = mock(() => {
+  if (distillTurnResult instanceof Error) {
+    return Promise.reject(distillTurnResult);
+  }
+  return distillTurnResult;
+});
+
+mock.module("@/lib/memory/distill", () => ({
+  distillTurn: distillTurnSpy,
+}));
+
 const {
   persistUserMessage,
   persistAssistantMessage,
@@ -106,6 +119,7 @@ const {
   hasAutoCommitChangesStep,
   runAutoCommitStep,
   runAutoCreatePrStep,
+  distillTurnMemoryStep,
 } = await import("./chat-post-finish");
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -143,6 +157,8 @@ beforeEach(() => {
   createChatMessageIfNotExistsResult = { id: "msg-1" };
   isFirstChatMessageResult = false;
   upsertChatMessageScopedResult = { status: "inserted" };
+  distillTurnSpy.mockClear();
+  distillTurnResult = Promise.resolve();
 });
 
 // ─── persistUserMessage ────────────────────────────────────────────
@@ -503,5 +519,60 @@ describe("runAutoCreatePrStep", () => {
         sandboxName: "session_session-1",
       } as never,
     });
+  });
+});
+
+// ─── distillTurnMemoryStep ─────────────────────────────────────────
+
+describe("distillTurnMemoryStep", () => {
+  test("starts distillation with the given params", async () => {
+    await distillTurnMemoryStep({
+      chatId: "chat-1",
+      sessionRepoDir: "/tmp/repo",
+      userId: "user-1",
+      turnId: "turn-1",
+    });
+
+    expect(distillTurnSpy).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      sessionRepoDir: "/tmp/repo",
+      userId: "user-1",
+      turnId: "turn-1",
+    });
+  });
+
+  test("resolves without waiting for distillTurn to finish", async () => {
+    let resolveDistill: () => void = () => undefined;
+    distillTurnResult = new Promise<void>((resolve) => {
+      resolveDistill = resolve;
+    });
+
+    // If the step incorrectly awaited distillTurn before returning, this
+    // would hang until the test's timeout rather than resolve here.
+    await distillTurnMemoryStep({
+      chatId: "chat-1",
+      sessionRepoDir: "/tmp/repo",
+      userId: "user-1",
+      turnId: "turn-1",
+    });
+
+    expect(distillTurnSpy).toHaveBeenCalledTimes(1);
+    resolveDistill();
+  });
+
+  test("does not throw when distillTurn rejects", async () => {
+    distillTurnResult = new Error("Distillation backend unavailable");
+
+    await expect(
+      distillTurnMemoryStep({
+        chatId: "chat-1",
+        sessionRepoDir: "/tmp/repo",
+        userId: "user-1",
+        turnId: "turn-1",
+      }),
+    ).resolves.toBeUndefined();
+
+    // Let the fire-and-forget rejection's `.catch` run before the test ends.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 });

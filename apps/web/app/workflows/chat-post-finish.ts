@@ -659,3 +659,32 @@ export async function runAutoCreatePrStep(params: {
     };
   }
 }
+
+/**
+ * Kick off post-turn memory distillation without waiting on it.
+ *
+ * Fire-and-forget: the turn has already finished, and distillation is a
+ * Haiku-tier structured-output call that must never delay or fail the turn
+ * it learns from (see the plan's memory invariants). The step resolves as
+ * soon as `distillTurn` has been *started*, not when it finishes.
+ *
+ * `distillTurn` itself never throws, but the call is still wrapped in a
+ * `catch` — a step that fires a promise and walks away must not depend on
+ * the callee's contract holding forever.
+ */
+export async function distillTurnMemoryStep(params: {
+  chatId: string;
+  sessionRepoDir: string;
+  userId: string;
+  turnId: string;
+}): Promise<void> {
+  "use step";
+  try {
+    const { distillTurn } = await import("@/lib/memory/distill");
+    void distillTurn(params).catch((error) => {
+      console.error("[workflow] Memory distillation failed:", error);
+    });
+  } catch (error) {
+    console.error("[workflow] Failed to start memory distillation:", error);
+  }
+}
