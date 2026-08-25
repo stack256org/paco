@@ -33,6 +33,16 @@
  * non-configurable, non-writable properties so plugin code cannot restore the
  * originals.
  *
+ * ## The third surface: `process` itself
+ *
+ * Closing both module routes is not enough, because some of what the module
+ * allowlist withholds is also sitting on `process`, reachable with no import
+ * at all. `process.report.getReport()` returns the host's IP addresses and
+ * MACs, its hostname, this worker's `--allow-fs-read` prefixes and its
+ * environment — everything the `os` exclusion below exists to withhold. The
+ * uid/gid family is `os.userInfo()` under another name. See
+ * `guardProcessReconnaissance`.
+ *
  * `module.registerHooks` (Node >= 22.15) is deliberate: the older
  * `module.register` runs hooks on a worker thread, which the permission model
  * blocks unless `--allow-worker` is passed — and passing that would hand
@@ -174,13 +184,10 @@ function removeNetworkGlobals(): void {
  * Installs `value` as a locked-down own property of `target`.
  *
  * Non-writable and non-configurable, so plugin code can neither reassign the
- * property nor `defineProperty` the original back over it.
+ * property nor `defineProperty` the original back over it. A data descriptor
+ * also replaces an accessor, which is what `process.report` is.
  */
-function lockProperty(
-  target: object,
-  name: string,
-  value: (...args: never[]) => unknown,
-): void {
+function lockValue(target: object, name: string, value: unknown): void {
   try {
     Object.defineProperty(target, name, {
       value,
@@ -192,6 +199,15 @@ function lockProperty(
     // Already non-configurable and not ours. Nothing further to do here; the
     // resolve hook and the permission model remain in place.
   }
+}
+
+/** `lockValue` for the common case of replacing a method with a guard. */
+function lockProperty(
+  target: object,
+  name: string,
+  value: (...args: never[]) => unknown,
+): void {
+  lockValue(target, name, value);
 }
 
 /**
@@ -224,8 +240,107 @@ function guardBuiltinModuleAccess(): void {
   }
 }
 
+/**
+ * Members of `process` that hand over the same information the `os` exclusion
+ * exists to withhold — plus the two that hand over more than information.
+ *
+ * The uid/gid family IS `os.userInfo()` by another name: `getuid`, `getgid`
+ * and `getgroups` name the account this worker runs as. The setters are here
+ * for the same reason `os` is excluded wholesale rather than filtered — a
+ * plugin has no business touching process credentials at all, and a
+ * non-root worker gains nothing by them anyway.
+ *
+ * `_getActiveHandles` and `_getActiveRequests` are worse than reconnaissance:
+ * they return the live libuv handle OBJECTS, so anything socket-backed the
+ * process happens to be holding is handed straight to plugin code. That is
+ * exactly the class of underscore-prefixed back door the module allowlist
+ * refuses (`_tls_wrap` and friends), reached without module resolution.
+ *
+ * `dlopen` loads a native addon, which executes outside every gate in this
+ * file. Node's permission model refuses it without `--allow-addons`, which
+ * the host never passes; this is the second lock on that door, in keeping
+ * with the rest of the file's refusal to depend on one gate.
+ *
+ * Each is replaced only if it currently exists, so a platform-specific
+ * member this Node does not have is not conjured into being for a library's
+ * feature detection to find and call.
+ */
+const DENIED_PROCESS_METHODS: readonly string[] = [
+  "getuid",
+  "getgid",
+  "geteuid",
+  "getegid",
+  "getgroups",
+  "setuid",
+  "setgid",
+  "seteuid",
+  "setegid",
+  "setgroups",
+  "initgroups",
+  "_getActiveHandles",
+  "_getActiveRequests",
+  "dlopen",
+];
+
+/**
+ * Closes the reconnaissance surface on `process` itself.
+ *
+ * `os` is excluded from the module allowlist because `os.networkInterfaces()`
+ * and `os.userInfo()` are pure reconnaissance that could later leave through
+ * a granted `net:fetch` domain. That exclusion was being walked around:
+ * `process.report.getReport()` — no import, no resolution, nothing for the
+ * hook to see — returns `header.networkInterfaces` (every host IP and MAC),
+ * `header.host` (the machine's hostname), `header.commandLine` (which spells
+ * out this worker's `--allow-fs-read` prefixes, i.e. a map of what it may
+ * read), `environmentVariables`, and several hundred `sharedObjects`
+ * filesystem paths. `writeReport()` puts the same document on disk, so
+ * denying only the getter would leave the second route open — the whole
+ * object goes.
+ *
+ * `execArgv` is emptied for the same reason `header.commandLine` is refused:
+ * it is the fs-read allowlist in plain text. Nothing in the worker reads it
+ * (`worker-entry.ts` takes its configuration from `process.env`, which the
+ * host builds from scratch rather than inheriting), and `child_process` —
+ * the one API that would use it — is denied.
+ *
+ * Deliberately NOT locked, and why:
+ *
+ * - `process.env`: the host already spawns the worker with an environment
+ *   built from scratch (`PATH`, `PACO_PLUGIN_ID`, `PACO_PLUGIN_STATE_DIR`) —
+ *   see `host.ts`. There is nothing in it to leak, and `worker-entry.ts`
+ *   reads `PACO_PLUGIN_STATE_DIR` from it.
+ * - `process.cwd()`: the host sets the child's cwd to the plugin's OWN
+ *   directory, which it already knows.
+ * - `process.permission.has(scope, path)`: an oracle that only confirms a
+ *   path the caller already supplied, and only what the caller could learn
+ *   anyway by attempting the operation. It enumerates nothing, which is the
+ *   line that puts `commandLine` and `execArgv` on the other side.
+ * - `process.platform` / `arch` / `version` / `execPath`, and
+ *   `navigator.platform` / `hardwareConcurrency`: platform and capacity, not
+ *   host identity. Node's own internals and most libraries read them, and
+ *   locking them buys nothing while breaking ordinary code.
+ * - `process.argv`: Node resolves the entry point through it, and it names
+ *   only this package's own path — not the fs-read map that made
+ *   `execArgv` worth emptying.
+ */
+function guardProcessReconnaissance(): void {
+  lockValue(process, "report", undefined);
+
+  for (const name of DENIED_PROCESS_METHODS) {
+    if (!(name in process)) {
+      continue;
+    }
+    lockProperty(process, name, (): never => {
+      throw denied(`process.${name}()`);
+    });
+  }
+
+  lockValue(process, "execArgv", Object.freeze([]));
+}
+
 removeNetworkGlobals();
 guardBuiltinModuleAccess();
+guardProcessReconnaissance();
 
 module.registerHooks({
   resolve(specifier, context, nextResolve) {
