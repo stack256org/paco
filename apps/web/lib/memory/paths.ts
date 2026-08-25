@@ -15,7 +15,7 @@ import * as path from "node:path";
  * rather than inventing a second env var for the same concept, and mirrors
  * `workspaceRoot()`'s home-relative fallback for local dev.
  */
-function dataDir(): string {
+export function dataDir(): string {
   return (
     process.env.PACO_HOME ??
     // See `workspaceRoot()` for why this needs `turbopackIgnore`: `os.homedir()`

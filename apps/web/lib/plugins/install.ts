@@ -2,7 +2,6 @@ import "server-only";
 
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -11,7 +10,8 @@ import {
   type PluginManifest,
 } from "@paco/plugin-kit";
 import { upsertPlugin } from "@/lib/db/plugins";
-import { hashDirectory } from "@/lib/plugins/content-hash";
+import { dataDir } from "@/lib/memory/paths";
+import { findSymlink, hashDirectory } from "@/lib/plugins/content-hash";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,19 +63,19 @@ export function buildCloneArgs(repo: string, ref?: string): string[] {
 /**
  * Root directory Paco installs plugins under.
  *
- * Mirrors the `PACO_HOME`-derived data dir convention in
- * `apps/web/lib/memory/paths.ts` (env var, falling back to `~/.paco`)
- * rather than introducing a second one, with `PACO_PLUGINS_DIR` as the
- * plugin-specific override the spec calls for.
+ * Reuses `dataDir()` (`apps/web/lib/memory/paths.ts`) — the same
+ * `PACO_HOME`-derived data dir memory already uses — rather than a second
+ * implementation of the same env-var-with-home-relative-fallback
+ * convention, with `PACO_PLUGINS_DIR` as the plugin-specific override the
+ * spec calls for. `path.resolve` anchors a relative `PACO_PLUGINS_DIR` to
+ * the process's cwd instead of leaving it to whatever relative-path
+ * resolution the first fs call happens to do.
  */
 function pluginsDir(): string {
   if (process.env.PACO_PLUGINS_DIR) {
-    return process.env.PACO_PLUGINS_DIR;
+    return path.resolve(process.env.PACO_PLUGINS_DIR);
   }
-  const dataDir =
-    process.env.PACO_HOME ??
-    path.join(/* turbopackIgnore: true */ os.homedir(), ".paco");
-  return path.join(dataDir, "plugins");
+  return path.join(dataDir(), "plugins");
 }
 
 /** Fetches `source` into `destDir`, which already exists as an empty directory. */
@@ -112,6 +112,15 @@ async function fetchInto(
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The `error.code` of a node `fs` error (e.g. `"ENOENT"`), if it has one. */
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return;
+  }
+  const { code } = error as { code: unknown };
+  return typeof code === "string" ? code : undefined;
 }
 
 /** Removes a directory tree, swallowing errors — best-effort cleanup only. */
@@ -166,6 +175,18 @@ export async function installPlugin(
       return fetched;
     }
 
+    // Fail closed on a symlink anywhere in the fetched tree, before it is
+    // hashed or moved into place: a symlink can point outside the
+    // plugin's own directory, so silently following or copying it would
+    // let an installed plugin read (or serve, once running) files it was
+    // never granted access to. This check does not depend on manifest
+    // validity — a symlink is rejected even if the manifest is otherwise
+    // fine.
+    const symlinkPath = await findSymlink(tempDir);
+    if (symlinkPath) {
+      return { ok: false, error: `plugin contains a symlink: ${symlinkPath}` };
+    }
+
     const discovered = await discoverPlugin(tempDir);
     if (!discovered.ok) {
       return { ok: false, error: discovered.error };
@@ -213,9 +234,19 @@ async function commitInstall(params: {
   try {
     await rename(finalDir, backupDir);
     hasBackup = true;
-  } catch {
-    // No existing install at finalDir (or it's otherwise inaccessible) —
-    // treat this as a fresh install rather than a re-install.
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") {
+      // finalDir exists but couldn't be renamed aside (permissions, a
+      // concurrent process, etc.) — bail out without touching anything.
+      // `finalDir` was never renamed, and `tempDir` is still just a temp
+      // directory the caller's `finally` will clean up.
+      return {
+        ok: false,
+        error: `Failed to back up the existing plugin before replacing it: ${describe(error)}`,
+      };
+    }
+    // ENOENT: no existing install at finalDir — a fresh install, not a
+    // re-install.
   }
 
   try {

@@ -4,6 +4,7 @@ import {
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import * as os from "node:os";
@@ -295,5 +296,48 @@ describe("installPlugin", () => {
 
     expect(result.ok).toBe(false);
     expect(execFileCalls).toHaveLength(0);
+  });
+
+  test("a local source containing a symlink is rejected, fail closed", async () => {
+    const source = await makeLocalSource();
+    await writeManifest(source);
+    await writeFile(path.join(source, "real.txt"), "hi");
+    await symlink(
+      path.join(source, "real.txt"),
+      path.join(source, "escape-hatch"),
+    );
+
+    const result = await installPlugin({ kind: "local", path: source });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/symlink/);
+    }
+    expect(upsertPluginCalls).toHaveLength(0);
+
+    // Nothing left on disk — the temp dir the symlink was copied into is
+    // cleaned up, and the plugin was never moved into place.
+    const rootEntries = await readdir(pluginsRoot);
+    expect(rootEntries).toEqual([]);
+  });
+
+  test("PACO_PLUGINS_DIR is resolved relative to the process cwd", async () => {
+    const relativeName = `paco-plugins-relative-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    process.env.PACO_PLUGINS_DIR = relativeName;
+    const expectedAbsoluteRoot = path.resolve(relativeName);
+
+    try {
+      const source = await makeLocalSource();
+      await writeManifest(source);
+
+      const result = await installPlugin({ kind: "local", path: source });
+
+      expect(result.ok).toBe(true);
+      const installedDir = path.join(expectedAbsoluteRoot, "sample-plugin");
+      const entries = await readdir(installedDir);
+      expect(entries).toEqual(["plugin.json"]);
+    } finally {
+      await rm(expectedAbsoluteRoot, { recursive: true, force: true });
+    }
   });
 });
