@@ -21,8 +21,23 @@
  *   exiting, so a test can exercise AcpClient.close()'s SIGTERM escalation.
  * - `ACP_STUB_IGNORE_SIGTERM=1` additionally ignores SIGTERM, so a test can
  *   exercise the final SIGKILL fallback.
+ * - `ACP_STUB_PID_FILE=<path>` writes this process's pid to `path` on
+ *   startup — added for backend.test.ts's abandonment case, which needs to
+ *   assert the underlying process actually died (not just that `result`
+ *   rejected) without OpenFxBackend exposing its internal AcpClient/child
+ *   process at all.
+ *
+ * Each step may also carry its own `delayMs`, overriding the script-level
+ * `stepDelayMs`/`slowStepDelayMs` for that one step (added for
+ * backend.test.ts's "hold a turn open" factory: a first step with
+ * `delayMs: 0` streams immediately, so a test proves a real chunk arrived,
+ * while later steps fall back to a long script-level delay so the turn
+ * stays cancellable for the rest of the ~10s window instead of finishing on
+ * its own). That delay is always interruptible by `session/cancel` — see
+ * `sleepInterruptible` — so a cancel lands as soon as it's received instead
+ * of only being noticed once the (possibly long) delay has fully elapsed.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 interface ScriptedPermission {
@@ -37,17 +52,17 @@ interface ScriptedPermission {
 }
 
 type ScriptedStep =
-  | { kind: "update"; update: unknown }
-  | { kind: "permission"; permission: ScriptedPermission }
+  | { kind: "update"; update: unknown; delayMs?: number }
+  | { kind: "permission"; permission: ScriptedPermission; delayMs?: number }
   // Writes a raw, non-JSON line verbatim — used to test that AcpClient
   // skips malformed lines instead of failing the whole session.
-  | { kind: "raw"; line: string }
+  | { kind: "raw"; line: string; delayMs?: number }
   // Writes a single line of exactly `bytes` bytes (generated here, not
   // carried through ACP_STUB_SCRIPT, since an env var that large risks
   // hitting OS argument/environment size limits) — used to test that
   // AcpClient skips a line over PROTOCOL.md §2's 8MB frame limit instead
   // of trying to parse or buffer it.
-  | { kind: "raw-oversized"; bytes: number };
+  | { kind: "raw-oversized"; bytes: number; delayMs?: number };
 
 interface StubScript {
   steps?: ScriptedStep[];
@@ -83,6 +98,11 @@ const slow = process.env.ACP_STUB_SLOW === "1";
 const hangOnClose = process.env.ACP_STUB_HANG_ON_CLOSE === "1";
 const ignoreSigterm = process.env.ACP_STUB_IGNORE_SIGTERM === "1";
 const exitBeforeResponse = process.env.ACP_STUB_EXIT_BEFORE_RESPONSE === "1";
+const pidFile = process.env.ACP_STUB_PID_FILE;
+
+if (pidFile) {
+  writeFileSync(pidFile, String(process.pid), "utf-8");
+}
 
 if (ignoreSigterm) {
   process.on("SIGTERM", () => {
@@ -102,6 +122,17 @@ if (hangOnClose) {
 
 let sessionCounter = 0;
 let cancelled = false;
+/**
+ * Resolved by `handleCancel` for the currently in-flight `session/prompt`,
+ * so a per-step delay (however long) is interrupted the moment
+ * `session/cancel` is received rather than only being noticed the next time
+ * the loop happens to check `cancelled` after a delay finishes. Reset fresh
+ * for each `session/prompt` in `handlePrompt`.
+ */
+let cancelSignal: {
+  promise: Promise<undefined>;
+  resolve: (value: undefined) => void;
+} | null = null;
 
 function writeLine(message: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -125,6 +156,15 @@ function sendUpdate(sessionId: string, update: unknown): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** `sleep`, but resolved early if `session/cancel` arrives first. */
+function sleepInterruptible(ms: number): Promise<void> {
+  const signal = cancelSignal;
+  if (!signal) {
+    return sleep(ms);
+  }
+  return Promise.race([sleep(ms), signal.promise]);
 }
 
 // Permission requests use negative ids so they never collide with the
@@ -170,8 +210,9 @@ async function runScriptedPrompt(sessionId: string): Promise<string> {
     if (cancelled) {
       break;
     }
-    if (delay > 0) {
-      await sleep(delay);
+    const stepDelay = step.delayMs ?? delay;
+    if (stepDelay > 0) {
+      await sleepInterruptible(stepDelay);
     }
     if (cancelled) {
       break;
@@ -241,6 +282,7 @@ function handlePrompt(id: unknown, params: unknown): void {
       ? params.sessionId
       : "unknown";
   cancelled = false;
+  cancelSignal = Promise.withResolvers<undefined>();
   runScriptedPrompt(sessionId).then((stopReason) => {
     respond(id, { stopReason });
   });
@@ -248,6 +290,7 @@ function handlePrompt(id: unknown, params: unknown): void {
 
 function handleCancel(id: unknown): void {
   cancelled = true;
+  cancelSignal?.resolve(undefined);
   // PROTOCOL.md §3: sent as a notification (no `id`) or a request; a
   // request gets an immediate `null` without waiting for the turn to stop.
   if (id !== undefined) {

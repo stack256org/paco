@@ -1,5 +1,11 @@
 export { AcpError } from "./acp-error.ts";
 export {
+  denyPermissionHandler,
+  OpenFxBackend,
+  type OpenFxBackendConfig,
+  type OpenFxBackendOptions,
+} from "./backend.ts";
+export {
   AcpChunkMapper,
   type AcpSessionUpdate,
   type AcpToolCallContentItem,
