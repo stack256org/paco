@@ -1,6 +1,7 @@
 "use server";
 
 import { rm } from "node:fs/promises";
+import { parseInstallSource } from "./install-source";
 import type { Capability } from "@paco/plugin-kit";
 import { requireAdmin } from "@/lib/admin/require-admin";
 import {
@@ -26,49 +27,6 @@ import { startPluginHost, stopPluginHost } from "@/lib/plugins/registry";
  * file uses (see `app/settings/agents/actions.ts`) — plugin management is an
  * administrative act, not a per-user preference.
  */
-
-/**
- * Parses the three source-string forms the install form accepts into the
- * `InstallSource` `installPlugin` expects:
- *
- * - `"owner/repo"` — a GitHub repo, default branch.
- * - `"owner/repo#ref"` — a GitHub repo pinned to a branch/tag/sha.
- * - `"local:/abs/path"` — a directory already on this machine.
- *
- * Deliberately light on validation: the exact character-class rules for a
- * GitHub repo/ref live in `buildCloneArgs` (`lib/plugins/install.ts`) and are
- * re-checked there regardless of what this function lets through, so
- * duplicating them here would only be a second place for that rule to drift.
- * This function only rejects shapes `installPlugin` could never make sense
- * of at all (an empty repo, a local path that isn't absolute).
- */
-export function parseInstallSource(
-  source: string,
-): { ok: true; source: InstallSource } | { ok: false; error: string } {
-  if (source.startsWith("local:")) {
-    const path = source.slice("local:".length);
-    if (!path.startsWith("/")) {
-      return {
-        ok: false,
-        error: `A local plugin source must be an absolute path, got "${path}"`,
-      };
-    }
-    return { ok: true, source: { kind: "local", path } };
-  }
-
-  const hashIndex = source.indexOf("#");
-  const repo = hashIndex === -1 ? source : source.slice(0, hashIndex);
-  const ref = hashIndex === -1 ? undefined : source.slice(hashIndex + 1);
-
-  if (repo.length === 0) {
-    return { ok: false, error: `No repo in source "${source}"` };
-  }
-  if (ref !== undefined && ref.length === 0) {
-    return { ok: false, error: `Empty ref in source "${source}"` };
-  }
-
-  return { ok: true, source: { kind: "github", repo, ref } };
-}
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

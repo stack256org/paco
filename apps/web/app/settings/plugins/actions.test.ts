@@ -255,9 +255,11 @@ const {
   disablePluginAction,
   grantAndEnableAction,
   installPluginAction,
-  parseInstallSource,
   removePluginAction,
 } = await import("./actions");
+// Not from "./actions": that module is `"use server"`, where a synchronous
+// export fails `next build`. See `install-source.ts`'s header.
+const { parseInstallSource } = await import("./install-source");
 
 function makeRow(id: string, capabilities: Capability[] = []): FakeRow {
   return {
@@ -334,6 +336,28 @@ describe("parseInstallSource", () => {
   test("rejects an empty repo", () => {
     const result = parseInstallSource("#v2");
     expect(result.ok).toBe(false);
+  });
+
+  test("round-trips the github: label installPlugin stores", () => {
+    // `plugins.sourceLabel` is written as `github:owner/repo#ref`, and the
+    // Plugins page's Update button feeds it straight back in. Without the
+    // scheme branch this fell through to the bare-repo case with
+    // `repo = "github:acme/widgets"`, failed GITHUB_REPO_PATTERN inside
+    // installPlugin, and Update was broken for every GitHub-installed
+    // plugin — while working fine for local: ones, which is why nothing
+    // noticed.
+    expect(parseInstallSource("github:acme/widgets#v2")).toEqual({
+      ok: true,
+      source: { kind: "github", repo: "acme/widgets", ref: "v2" },
+    });
+    expect(parseInstallSource("github:acme/widgets")).toEqual({
+      ok: true,
+      source: { kind: "github", repo: "acme/widgets", ref: undefined },
+    });
+  });
+
+  test("rejects a github: label with no repo", () => {
+    expect(parseInstallSource("github:").ok).toBe(false);
   });
 });
 
