@@ -69,10 +69,17 @@ async function pathExists(candidatePath: string): Promise<boolean> {
  *
  * Directory presence, not `git worktree list`, is the detection signal —
  * cheap, and exactly what `createCandidates`/`removeCandidates`
- * (`lib/design/candidates.ts`) create and delete. A worktree existing here
- * says nothing about whether its dev server has actually started yet;
- * `collectActivePreviewRoutes` still has to check the published port
- * separately before routing to it.
+ * (`lib/design/candidates.ts`) create and delete, which is why those two
+ * functions are also what re-runs this whole derivation.
+ *
+ * A worktree existing here says nothing about whether its dev server has
+ * actually started: Docker publishes every port in `DEFAULT_SANDBOX_PORTS`
+ * when the container is created, so the port lookup below cannot tell the
+ * difference either. A route is therefore written as soon as the worktree
+ * exists, and answers 502 until something binds the port behind it. That is
+ * deliberate — the alternative is no route at all for the whole window
+ * between the worktree appearing and the candidate's agent turn getting
+ * round to starting a server, which is most of a design turn.
  */
 async function listLiveCandidateIndexes(
   workspaceRoot: string,
@@ -171,10 +178,11 @@ async function collectCandidateRoutes(params: {
     const ports = await portsForContainerPort(candidateContainerPort(index));
     const upstreamPort = ports.get(containerName);
     if (!upstreamPort) {
-      // The worktree exists, but candidate n's dev server has not
-      // published `candidateContainerPort(n)` yet — not started, still
-      // starting, or (a misconfigured candidate) bound to the wrong port.
-      // Nothing to route to until it has.
+      // The container is not publishing this port at all — it is not
+      // running, or it was created before `DEFAULT_SANDBOX_PORTS` included
+      // it. There is no host port to route to, which is a different thing
+      // from "the dev server has not started yet": that case still gets a
+      // route, and answers 502 until it has.
       continue;
     }
 

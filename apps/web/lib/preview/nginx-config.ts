@@ -78,32 +78,30 @@ export const DESIGN_INSPECTOR_PATH = "/__paco/design-inspector.js";
  * container port instead of just `PREVIEW_PORT`'s.
  *
  * ---
- * **CONTRACT FOR WHOEVER WIRES UP THE DESIGN TURN** (plan Task 2,
- * `apps/web/lib/design/design-turn.ts` — not yet written as of this
- * comment): this function is only half of making a candidate's preview
- * reachable. The other half has to happen wherever a candidate's dev
- * server actually gets started, and nothing in this codebase enforces it —
- * there is no test that can, short of Task 2's own code existing to test.
+ * **CONTRACT WITH THE DESIGN TURN.** This function is only half of making a
+ * candidate's preview reachable. The other half happens wherever a
+ * candidate's dev server actually gets started, and nothing in this codebase
+ * enforces it: candidate `n`'s dev server MUST bind
+ * `candidateContainerPort(n)` — 5173 for candidate 1, 4321 for candidate 2,
+ * 8000 for candidate 3 — instead of whatever port its framework defaults to,
+ * and not the chat's own 3000, which would collide with the chat's preview.
  *
- * The design-turn's per-candidate system prompt (or whatever starts each
- * candidate's dev server on its behalf) MUST force candidate `n`'s dev
- * server to bind `candidateContainerPort(n)` — 5173 for candidate 1, 4321
- * for candidate 2, 8000 for candidate 3 — instead of whatever port that
- * framework defaults to. Concretely: pass `PORT=<candidateContainerPort(n)>`
- * (Next.js/Express/Remix) or the framework's own `--port` flag, the same
- * way the chat's own dev server is expected to bind `PREVIEW_PORT` (3000).
+ * The other side of that contract now exists and is written down:
+ * `buildPortContractInstruction` in `lib/design/design-turn.ts` restates it
+ * as an instruction in every candidate's own system prompt, which is the
+ * only place it can be enforced at all — a candidate's dev server is started
+ * by the candidate's own agent turn, so nothing downstream can distinguish
+ * "the dev server started, but on the wrong port" from "it has not started
+ * yet."
  *
- * If a candidate's dev server binds the wrong port (or the chat's own
- * 3000, colliding with the chat's preview), `collectActivePreviewRoutes`
- * (`nginx-reload.ts`) will find the candidate's worktree directory but
- * never a published port for it, silently skip that candidate's route
- * forever, and the design-mode UI will show that candidate as unreachable
- * with no error surfaced anywhere in this codebase — there is nothing here
- * that can detect "the dev server started, but on the wrong port" from
- * the outside. This comment, and this function's exact return values
- * (covered by `nginx-config.test.ts`'s `candidateContainerPort` suite),
- * are the whole of that contract until Task 2 exists to test its own side
- * of it.
+ * The failure is quiet by nature. Docker publishes all four ports at
+ * container creation, so nginx's block for candidate `n` is written the
+ * moment the worktree exists; if nothing ever binds the port behind it, the
+ * candidate's iframe gets a 502 from nginx and the design-mode UI shows that
+ * candidate as unreachable, with no error surfaced anywhere in this
+ * codebase. This comment, `buildPortContractInstruction`, and this
+ * function's exact return values (covered by `nginx-config.test.ts`'s
+ * `candidateContainerPort` suite) are the whole of the contract.
  * ---
  */
 export function candidateContainerPort(index: 1 | 2 | 3): number {
