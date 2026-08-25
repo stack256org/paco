@@ -70,6 +70,39 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** A fresh path for one test's `ACP_STUB_RECORD_FILE`. */
+function recordFilePath(): string {
+  return join(tmpdir(), `openfx-record-${Math.random().toString(36).slice(2)}`);
+}
+
+interface RecordedEntry {
+  method: string;
+  params?: unknown;
+}
+
+/** The JSON lines `ACP_STUB_RECORD_FILE` collected for one turn. */
+function recorded(path: string): RecordedEntry[] {
+  return readFileSync(path, "utf-8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as RecordedEntry);
+}
+
+/**
+ * Runs a turn to completion — the CONTRACT gates `result` on `chunks` being
+ * fully consumed, so a test that only wants the recorded wire traffic still
+ * has to drain both.
+ */
+async function drain(handle: {
+  chunks: AsyncIterable<unknown>;
+  result: Promise<unknown>;
+}): Promise<void> {
+  for await (const _chunk of handle.chunks) {
+    // Discarded: these tests assert on what went out, not what came back.
+  }
+  await handle.result;
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -398,7 +431,114 @@ describe("OpenFxBackend", () => {
       mcp: true,
       effort: false,
       subagents: true,
+      // Declared, not assumed: the three things an OpenFX turn genuinely
+      // cannot carry, so the caller and the UI can adapt instead of
+      // silently losing them (see each field's doc in interface.ts).
+      customAgents: false,
+      structuredOutput: false,
+      models: [],
     });
+  });
+
+  test("forwards mcpServers to session/new, with the name/args/env the server requires", async () => {
+    const recordFile = recordFilePath();
+    const backend = new OpenFxBackend(
+      stubConfig(
+        { steps: [], stopReason: "end_turn" },
+        { ACP_STUB_RECORD_FILE: recordFile },
+      ),
+    );
+
+    await drain(
+      backend.startTurn(
+        turnContext({
+          backendOptions: {
+            mcpServers: [
+              {
+                name: "paco-plugins",
+                command: "/usr/bin/node",
+                args: ["/opt/paco/plugin-mcp-server.ts"],
+                env: { PACO_INTERNAL_TOKEN: "secret" },
+              },
+            ],
+          } satisfies OpenFxBackendOptions,
+        }),
+      ),
+    );
+
+    const newSession = recorded(recordFile).find(
+      (entry) => entry.method === "session/new",
+    );
+    expect(newSession?.params).toEqual({
+      mcpServers: [
+        {
+          name: "paco-plugins",
+          command: "/usr/bin/node",
+          args: ["/opt/paco/plugin-mcp-server.ts"],
+          env: { PACO_INTERNAL_TOKEN: "secret" },
+        },
+      ],
+    });
+  });
+
+  test("sends systemContext as a leading text block ahead of the user prompt", async () => {
+    const recordFile = recordFilePath();
+    const backend = new OpenFxBackend(
+      stubConfig(
+        { steps: [], stopReason: "end_turn" },
+        { ACP_STUB_RECORD_FILE: recordFile },
+      ),
+    );
+
+    await drain(
+      backend.startTurn(
+        turnContext({
+          prompt: "build the thing",
+          backendOptions: {
+            systemContext: "## Running the app\ndocker exec -d …",
+          } satisfies OpenFxBackendOptions,
+        }),
+      ),
+    );
+
+    const prompt = recorded(recordFile).find(
+      (entry) => entry.method === "session/prompt",
+    );
+    expect(
+      (prompt?.params as { prompt?: unknown } | undefined)?.prompt,
+    ).toEqual([
+      { type: "text", text: "## Running the app\ndocker exec -d …" },
+      { type: "text", text: "build the thing" },
+    ]);
+  });
+
+  test("layers per-turn env over the constructor's env for the spawned process", async () => {
+    const recordFile = recordFilePath();
+    const backend = new OpenFxBackend(
+      stubConfig(
+        { steps: [], stopReason: "end_turn" },
+        { ACP_STUB_RECORD_FILE: recordFile, AI_GATEWAY_API_KEY: "gateway-key" },
+      ),
+    );
+
+    await drain(
+      backend.startTurn(
+        turnContext({
+          backendOptions: {
+            env: { GH_TOKEN: "gh-abc", GITHUB_TOKEN: "gh-abc" },
+          } satisfies OpenFxBackendOptions,
+        }),
+      ),
+    );
+
+    const spawn = recorded(recordFile).find(
+      (entry) => entry.method === "__spawn",
+    );
+    const env = (spawn as { env?: Record<string, string> } | undefined)?.env;
+    expect(env?.GH_TOKEN).toBe("gh-abc");
+    expect(env?.GITHUB_TOKEN).toBe("gh-abc");
+    // The constructor's provider credentials survive the per-turn layer.
+    expect(env?.AI_GATEWAY_API_KEY).toBe("gateway-key");
   });
 });
 

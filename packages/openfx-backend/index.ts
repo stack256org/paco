@@ -4,6 +4,7 @@ export {
   OpenFxBackend,
   type OpenFxBackendConfig,
   type OpenFxBackendOptions,
+  type OpenFxStdioMcpServer,
 } from "./backend.ts";
 export {
   AcpChunkMapper,

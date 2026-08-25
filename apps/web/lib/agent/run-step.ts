@@ -1,13 +1,20 @@
 import "server-only";
 
-import type { AgentBackend, TurnUsage } from "@paco/agent-backend";
+import type {
+  AgentBackend,
+  BackendCapabilities,
+  TurnUsage,
+} from "@paco/agent-backend";
 import {
   buildApprovalSettings,
   type ClaudeAgentDefinition,
   type ClaudeBackendOptions,
   DEFAULT_AGENTS,
 } from "@paco/claude-code";
-import type { OpenFxBackendOptions } from "@paco/openfx-backend";
+import type {
+  OpenFxBackendOptions,
+  OpenFxStdioMcpServer,
+} from "@paco/openfx-backend";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
 import { createOpenFxApprovalHandler } from "./approvals/openfx-approval";
 import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
@@ -74,6 +81,77 @@ function resolveAgents(
 }
 
 /**
+ * The model id to hand this backend, or nothing.
+ *
+ * `capabilities().models` is the backend's own answer to "which of the
+ * picker's ids do I accept": `undefined` means the app's catalog applies
+ * unchanged (Claude Code, whose tier aliases the catalog is written in), and
+ * an empty array means the backend resolves its own model and takes none.
+ * Forwarding regardless is how `--model opus` — a Claude tier alias — was
+ * being handed to the OpenFX binary, which has never heard of it.
+ */
+function resolveModelId(
+  capabilities: BackendCapabilities,
+  modelId: string | undefined,
+): string | undefined {
+  if (modelId === undefined || capabilities.models === undefined) {
+    return modelId;
+  }
+  return capabilities.models.includes(modelId) ? modelId : undefined;
+}
+
+/**
+ * The turn's `gh` credentials, as environment variables.
+ *
+ * Shared by both backends: without them the CLI falls back to the host's
+ * keyring login and the agent pushes and opens pull requests as whoever set
+ * up the machine, which is the exact thing AGENTS.md's GitHub section exists
+ * to prevent (`lib/github/gh.ts` pins every one of Paco's own calls the same
+ * way). In the environment and never in argv — `ps` shows one process's
+ * arguments to every user on the machine.
+ */
+function githubTokenEnv(token: string | undefined): Record<string, string> {
+  if (token === undefined) {
+    return {};
+  }
+  return { GH_TOKEN: token, GITHUB_TOKEN: token };
+}
+
+/**
+ * Paco's name-keyed MCP config, as the array OpenFX's parser wants.
+ *
+ * Two shapes, not one: the Claude Code CLI takes `--mcp-config`'s
+ * `{ "<name>": { command, args, env } }` record, while ACP's `session/new`
+ * takes a list whose entries each carry their own `name`
+ * (`openfx/src/acp/mcp_servers.zig:177-221`). The same source rejects a
+ * relative `command` outright (`CommandNotAbsolute`), which would fail the
+ * WHOLE session rather than just that one server — so a relative command is
+ * dropped with a warning instead, leaving the rest of the turn's servers
+ * working. In practice nothing hits that: `buildPluginMcpConfig` uses
+ * `process.execPath`.
+ */
+function toOpenFxMcpServers(
+  mcpServers: NonNullable<AgentCallOptions["mcpServers"]>,
+): OpenFxStdioMcpServer[] {
+  const servers: OpenFxStdioMcpServer[] = [];
+  for (const [name, server] of Object.entries(mcpServers)) {
+    if (!server.command.startsWith("/")) {
+      console.warn(
+        `[run-step] Skipping MCP server "${name}" for OpenFX: its command must be an absolute path, got "${server.command}".`,
+      );
+      continue;
+    }
+    servers.push({
+      name,
+      command: server.command,
+      args: server.args,
+      env: server.env,
+    });
+  }
+  return servers;
+}
+
+/**
  * Run one agent turn against the sandbox workspace.
  *
  * Each chunk is written out as it arrives and simultaneously fed to
@@ -133,7 +211,26 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
 
   const backend =
     params.backend ?? (await resolveBackend({ backend: params.chatBackend }));
-  const backendId = backend.capabilities().id;
+  const capabilities = backend.capabilities();
+  const backendId = capabilities.id;
+
+  /*
+   * A turn asking for shaped output on a backend that cannot produce it gets
+   * free text back and `structuredOutput: undefined` — which the caller
+   * (`lib/tasks/planner.ts`, `lib/tasks/reviewer-gate.ts`) reads as "the
+   * model answered badly" rather than "this backend was never able to
+   * answer". Nothing here can make ACP grow a JSON Schema parameter, so the
+   * least this can do is refuse to be silent about it; the real fix is for
+   * those callers to consult `capabilities().structuredOutput` before
+   * offering the feature at all.
+   */
+  if (options.structuredOutput && capabilities.structuredOutput === false) {
+    console.warn(
+      `[run-step] Backend "${backendId}" cannot constrain output with a JSON schema; this turn's structuredOutput will be undefined.`,
+    );
+  }
+
+  const modelId = resolveModelId(capabilities, options.model?.id);
 
   const hostCwd = resolveHostCwd(options);
 
@@ -147,7 +244,42 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
   const backendOptions: ClaudeBackendOptions | OpenFxBackendOptions =
     backendId === "openfx"
       ? ({
-          model: options.model?.id,
+          ...(modelId ? { model: modelId } : {}),
+          /*
+           * The same instructions the Claude branch passes as
+           * `appendSystemPrompt`. ACP has no system-prompt parameter, so
+           * `OpenFxBackendOptions.systemContext` rides in as a leading text
+           * block on `session/prompt` (see its doc for why that is a real
+           * mechanism and not a workaround). Dropping it — which is what
+           * used to happen — takes memory, skills, project instructions,
+           * the environment details and the "## Running the app" briefing
+           * with it, and an agent without that last one starts its dev
+           * server on the host, where the container's preview URL cannot
+           * reach it.
+           */
+          ...(appendSystemPrompt && { systemContext: appendSystemPrompt }),
+          /*
+           * One `openfx acp` process per turn, so per-turn env reaches the
+           * agent's own `gh`. Unlike the Claude branch there are no
+           * PACO_APPROVAL_* vars: approvals come back over the ACP
+           * connection itself, not through a spawned hook.
+           */
+          ...(params.githubToken
+            ? { env: githubTokenEnv(params.githubToken) }
+            : {}),
+          ...(options.mcpServers && {
+            mcpServers: toOpenFxMcpServers(options.mcpServers),
+          }),
+          /*
+           * Not passed, because OpenFX cannot take them — declared as
+           * `customAgents: false` / `structuredOutput: false` /
+           * `models: []` on its capabilities rather than left as a silent
+           * omission here: `agents` (no ACP method installs a roster),
+           * `jsonSchema` (no shaped output), `effort` (no ACP setter —
+           * PROTOCOL.md §7), `tools`/`disallowedTools`/`permissionMode`
+           * (tool policy is the `session/request_permission` handler
+           * below, not a flag), and `maxTurns`.
+           */
           // ACP delivers `session/request_permission` over the connection
           // this backend already owns, so the same `decideApproval` policy
           // Claude's PreToolUse hook uses is wired in-process here instead
@@ -167,12 +299,7 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
             ? { settings: buildApprovalSettings() }
             : {}),
           env: {
-            ...(params.githubToken
-              ? {
-                  GH_TOKEN: params.githubToken,
-                  GITHUB_TOKEN: params.githubToken,
-                }
-              : {}),
+            ...githubTokenEnv(params.githubToken),
             // Read by the PreToolUse hook, which runs as its own process and has
             // no other way to know where Paco is or who it is acting for.
             ...(params.approval && params.chatId
@@ -183,7 +310,7 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
                 }
               : {}),
           },
-          model: options.model?.id,
+          model: modelId,
           ...(options.model?.effort && { effort: options.model.effort }),
           agents: resolveAgents(options),
           ...(appendSystemPrompt && { appendSystemPrompt }),

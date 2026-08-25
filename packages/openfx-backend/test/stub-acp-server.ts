@@ -26,6 +26,13 @@
  *   assert the underlying process actually died (not just that `result`
  *   rejected) without OpenFxBackend exposing its internal AcpClient/child
  *   process at all.
+ * - `ACP_STUB_RECORD_FILE=<path>` appends one JSON line per inbound request
+ *   (`{method, params}`), preceded by a single `{"method":"__spawn","env":…}`
+ *   line carrying the spawned process's own environment. That is what lets
+ *   backend.test.ts assert what actually went out on the wire — the
+ *   `mcpServers` on `session/new`, the content blocks on `session/prompt` —
+ *   and what env the process was given, none of which OpenFxBackend exposes
+ *   to its caller.
  *
  * Each step may also carry its own `delayMs`, overriding the script-level
  * `stepDelayMs`/`slowStepDelayMs` for that one step (added for
@@ -37,7 +44,12 @@
  * `sleepInterruptible` — so a cancel lands as soon as it's received instead
  * of only being noticed once the (possibly long) delay has fully elapsed.
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createInterface } from "node:readline";
 
 interface ScriptedPermission {
@@ -99,10 +111,21 @@ const hangOnClose = process.env.ACP_STUB_HANG_ON_CLOSE === "1";
 const ignoreSigterm = process.env.ACP_STUB_IGNORE_SIGTERM === "1";
 const exitBeforeResponse = process.env.ACP_STUB_EXIT_BEFORE_RESPONSE === "1";
 const pidFile = process.env.ACP_STUB_PID_FILE;
+const recordFile = process.env.ACP_STUB_RECORD_FILE;
 
 if (pidFile) {
   writeFileSync(pidFile, String(process.pid), "utf-8");
 }
+
+/** Appends one JSON line to `ACP_STUB_RECORD_FILE`; a no-op when unset. */
+function record(entry: Record<string, unknown>): void {
+  if (!recordFile) {
+    return;
+  }
+  appendFileSync(recordFile, `${JSON.stringify(entry)}\n`, "utf-8");
+}
+
+record({ method: "__spawn", env: process.env });
 
 if (ignoreSigterm) {
   process.on("SIGTERM", () => {
@@ -317,6 +340,10 @@ function handleClientResponse(message: Record<string, unknown>): void {
 
 function handle(message: Record<string, unknown>): void {
   const { id, method, params } = message;
+
+  if (typeof method === "string") {
+    record({ method, params });
+  }
 
   if (typeof method !== "string") {
     // No `method` means this is a response to one of our own

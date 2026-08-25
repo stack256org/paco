@@ -17,9 +17,10 @@ interface ModelEffortBackendControlsProps {
   /**
    * What the chat's *current* backend actually supports — capability-driven
    * UI (Section 7 Task 5): the effort control below is hidden whenever
-   * `capabilities.effort` is `false`, rather than this component checking
-   * `backend === "openfx"` itself. A future backend that also lacks effort
-   * control hides the same way with no change here.
+   * `capabilities.effort` is `false`, and the model control whenever
+   * `capabilities.models` leaves nothing to choose, rather than this
+   * component checking `backend === "openfx"` itself. A future backend that
+   * also lacks either hides the same way with no change here.
    */
   capabilities: BackendCapabilities;
   disabled: boolean;
@@ -50,6 +51,20 @@ export function ModelEffortBackendControls({
   onBackendChange,
   onModelCloseAutoFocus,
 }: ModelEffortBackendControlsProps) {
+  /*
+   * The same rule `lib/model-catalog.ts#listAvailableModels` applies on the
+   * server, re-applied here because a chat's backend is switched from this
+   * very row: `modelOptions` was rendered for whichever backend the page
+   * loaded on. `capabilities.models` is the backend's own list of accepted
+   * ids — `undefined` means the whole catalog, an empty list means it
+   * resolves its own model (OpenFX) and there is nothing left to pick.
+   */
+  const accepted = capabilities.models;
+  const visibleModelOptions =
+    accepted === undefined
+      ? modelOptions
+      : modelOptions.filter((option) => accepted.includes(option.id));
+
   return (
     <div
       className={cn(
@@ -57,15 +72,17 @@ export function ModelEffortBackendControls({
         disabled && "pointer-events-none opacity-60",
       )}
     >
-      <ModelSelectorCompact
-        disabled={disabled}
-        modelOptions={modelOptions}
-        onChange={onModelChange}
-        {...(onModelCloseAutoFocus
-          ? { onCloseAutoFocus: onModelCloseAutoFocus }
-          : {})}
-        value={modelId}
-      />
+      {visibleModelOptions.length > 0 && (
+        <ModelSelectorCompact
+          disabled={disabled}
+          modelOptions={visibleModelOptions}
+          onChange={onModelChange}
+          {...(onModelCloseAutoFocus
+            ? { onCloseAutoFocus: onModelCloseAutoFocus }
+            : {})}
+          value={modelId}
+        />
+      )}
       {capabilities.effort && (
         <EffortSelectorCompact
           disabled={disabled}

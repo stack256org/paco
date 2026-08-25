@@ -11,6 +11,12 @@ const MODEL_OPTIONS: ModelOption[] = [
     shortLabel: "Sonnet",
     provider: "anthropic",
   },
+  {
+    id: "haiku",
+    label: "Claude Haiku",
+    shortLabel: "Haiku",
+    provider: "anthropic",
+  },
 ];
 
 const CLAUDE_CAPABILITIES: BackendCapabilities = {
@@ -29,6 +35,11 @@ const OPENFX_CAPABILITIES: BackendCapabilities = {
   mcp: true,
   effort: false,
   subagents: true,
+  customAgents: false,
+  structuredOutput: false,
+  // The binary resolves its own model; the picker's Claude tier aliases
+  // mean nothing to it.
+  models: [],
 };
 
 const noop = () => {
@@ -64,12 +75,41 @@ describe("ModelEffortBackendControls", () => {
     expect(html).not.toContain("Change how hard Paco thinks");
   });
 
-  test("always shows the model and backend controls regardless of capabilities", () => {
+  test("shows the model control for a backend that declares no model list", () => {
+    const html = render(CLAUDE_CAPABILITIES);
+
+    expect(html).toContain("Change model");
+  });
+
+  /**
+   * The picker was Claude-only: it offered opus/sonnet/haiku whatever the
+   * chat ran on, and the chosen alias went to OpenFX as `--model`. Hidden
+   * the same way the effort control already is, so a backend switch does not
+   * leave a control on screen that decides nothing.
+   */
+  test("hides the model control when the backend takes no model from the picker", () => {
+    const html = render(OPENFX_CAPABILITIES);
+
+    expect(html).not.toContain("Change model");
+  });
+
+  /**
+   * The trigger renders the selected value, not the option list (that lives
+   * in a popover this static render never opens), so what is observable
+   * here is whether the control survives the filter at all. The id-level
+   * rule itself is covered by `lib/model-catalog.test.ts`.
+   */
+  test("keeps the model control when the backend accepts some of the picker's models", () => {
+    const html = render({ ...CLAUDE_CAPABILITIES, models: ["haiku"] });
+
+    expect(html).toContain("Change model");
+  });
+
+  test("always shows the backend control regardless of capabilities", () => {
     const claudeHtml = render(CLAUDE_CAPABILITIES);
     const openfxHtml = render(OPENFX_CAPABILITIES);
 
     for (const html of [claudeHtml, openfxHtml]) {
-      expect(html).toContain("Change model");
       expect(html).toContain("Change agent backend");
     }
   });

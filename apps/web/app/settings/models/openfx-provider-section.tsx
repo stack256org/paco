@@ -22,8 +22,48 @@ type TestResult = {
 };
 
 /**
- * BYO OpenFX provider config: the endpoint, API key, and binary path a chat
- * whose backend is `"openfx"` runs against (Section 7 Task 5).
+ * What a chat gives up by running on OpenFX, one line per capability
+ * `OpenFxBackend.capabilities()` reports as unsupported.
+ *
+ * Written out here rather than read from the backend because this is a
+ * client component and `@paco/openfx-backend` spawns processes — but it is
+ * not free-floating copy: `openfx-provider-section.test.tsx` fails if this
+ * list and that capability object ever disagree, in either direction. The
+ * point is that choosing OpenFX stops being an invisible downgrade; the
+ * composer hides the effort and model controls for the same reason
+ * (`ModelEffortBackendControls`).
+ */
+export const OPENFX_LIMITATIONS: ReadonlyArray<{
+  capability: string;
+  text: string;
+}> = [
+  {
+    capability: "effort",
+    text: "Reasoning effort is not configurable — ACP has no setter for it, so the effort control is hidden on OpenFX chats.",
+  },
+  {
+    capability: "models",
+    text: "The model comes from the OpenFX binary's own config, not Paco's model picker, so the picker is hidden on OpenFX chats.",
+  },
+  {
+    capability: "customAgents",
+    text: "Paco's subagent roster and its per-agent model tiers do not apply; OpenFX delegates to its own internal subagents instead.",
+  },
+  {
+    capability: "structuredOutput",
+    text: "Turns that need a schema-shaped answer — task planning and the reviewer gate — cannot run on OpenFX.",
+  },
+];
+
+/**
+ * BYO OpenFX provider config: the API key and binary path a chat whose
+ * backend is `"openfx"` runs against (Section 7 Task 5).
+ *
+ * The endpoint field is rendered but permanently disabled, and the heading
+ * copy no longer offers it: PROTOCOL.md §1 found no flag or environment
+ * variable that moves where the `openfx` binary sends provider traffic, so
+ * it is stored for forward-compatibility only (`buildOpenFxBackendConfig`
+ * says the same on the server side) rather than promised here.
  *
  * Mirrors `SmtpSection` (`app/settings/admin/smtp-section.tsx`) exactly —
  * same load/save/error shape, same "the secret never comes back down"
@@ -138,8 +178,10 @@ export function OpenFxProviderSection() {
           OpenFX provider
         </h2>
         <p className="mt-1 text-base-content/60 text-sm">
-          Bring your own OpenFX endpoint, key, and binary — any chat can be
-          switched to run its turns through OpenFX instead of Claude Code.
+          Bring your own OpenFX key and binary — any chat can be switched to run
+          its turns through OpenFX instead of Claude Code. Memory, skills,
+          project instructions, GitHub access and plugin MCP servers all carry
+          over; what does not is listed below.
         </p>
       </div>
 
@@ -249,6 +291,18 @@ export function OpenFxProviderSection() {
             </button>
           </form>
         )}
+
+        <div className="border-base-content/10 border-t pt-4">
+          <h3 className="font-medium text-sm">What OpenFX chats give up</h3>
+          <ul className="mt-2 space-y-1 text-base-content/60 text-xs">
+            {OPENFX_LIMITATIONS.map((limitation) => (
+              <li className="flex gap-2" key={limitation.capability}>
+                <span aria-hidden="true">—</span>
+                <span>{limitation.text}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
 
         <div className="border-base-content/10 border-t pt-4">
           <h3 className="font-medium text-sm">Test the connection</h3>

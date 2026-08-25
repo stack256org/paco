@@ -135,8 +135,75 @@ function makeStructuredOutputOptions() {
   } as never;
 }
 
+/**
+ * The fixture for the OpenFX parity tests: every field that used to be built
+ * and then dropped on the floor whenever a chat was switched to OpenFX.
+ */
+function makeOpenFxOptions() {
+  return {
+    sandbox: {
+      state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
+      environmentDetails: "Container: paco-sandbox-1",
+      currentBranch: "chat/abc",
+    },
+    model: { id: "opus" },
+    customInstructions: "Always run the linter.",
+    memorySection: "## Memory\n\n- The user prefers pnpm.",
+    mcpServers: {
+      "paco-plugins": {
+        command: "/usr/bin/node",
+        args: ["/opt/paco/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    },
+  } as never;
+}
+
 interface SpyBackend extends AgentBackend {
   lastCtx?: TurnContext;
+}
+
+/**
+ * A spy reporting OpenFX's real capability set — including the three fields
+ * that say what it cannot carry, which is what the parity tests below turn
+ * on.
+ */
+function createOpenFxSpyBackend(): SpyBackend {
+  const spy: SpyBackend = {
+    lastCtx: undefined,
+    capabilities(): BackendCapabilities {
+      return {
+        id: "openfx",
+        resume: true,
+        steering: "restart",
+        mcp: true,
+        effort: false,
+        subagents: true,
+        customAgents: false,
+        structuredOutput: false,
+        models: [],
+      };
+    },
+    startTurn(ctx: TurnContext): TurnHandle {
+      spy.lastCtx = ctx;
+      return {
+        chunks: (async function* () {
+          // no chunks: this backend only exists to record its TurnContext
+        })(),
+        result: Promise.resolve({
+          finishReason: "stop",
+          isError: false,
+          usage: zeroUsage(),
+          resumeToken: "openfx-session-1",
+        }),
+        steer: () => Promise.resolve(),
+        interrupt: () => {
+          // no-op: not exercised here
+        },
+      };
+    },
+  };
+  return spy;
 }
 
 /**
@@ -144,9 +211,6 @@ interface SpyBackend extends AgentBackend {
  * what `runAgentTurn` forwards to a backend — the thing missing before this
  * test, per review: a dropped option (e.g. `model`) would otherwise go
  * unnoticed since no test inspected the call args.
- *
- * A plain object rather than a class: the mock above already defines one
- * class, and lint caps a file at one.
  */
 function createSpyBackend(): SpyBackend {
   const spy: SpyBackend = {
@@ -389,6 +453,123 @@ describe("runAgentTurn", () => {
     // not via PACO_APPROVAL_URL/env vars.
     expect(typeof backendOptions.onApprovalRequest).toBe("function");
     expect(backendOptions.env).toBeUndefined();
+  });
+
+  /**
+   * Section 7's Critical: `appendSystemPrompt` was built unconditionally and
+   * spread in only on the `claude-code` branch, so flipping a chat to OpenFX
+   * silently dropped memory, skills, project instructions, the environment
+   * details and the "## Running the app" briefing — the last of which is why
+   * an agent starts its dev server on the host and the preview comes up
+   * blank.
+   */
+  test("an OpenFX turn carries the memory section, instructions and environment briefing as systemContext", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy = createOpenFxSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: makeOpenFxOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      onChunk: async () => {
+        // no-op: this test only inspects the recorded TurnContext
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    const systemContext = backendOptions.systemContext as string;
+    expect(systemContext).toContain("The user prefers pnpm.");
+    expect(systemContext).toContain("Always run the linter.");
+    expect(systemContext).toContain("Container: paco-sandbox-1");
+    expect(systemContext).toContain("## Running the app");
+  });
+
+  test("an OpenFX turn carries the plugin mcpServers, in the shape OpenFX's parser requires", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy = createOpenFxSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: makeOpenFxOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    // An array, each entry carrying the `name` OpenFX rejects a server
+    // without — not the Claude Code CLI's name-keyed record.
+    expect(backendOptions.mcpServers).toEqual([
+      {
+        name: "paco-plugins",
+        command: "/usr/bin/node",
+        args: ["/opt/paco/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    ]);
+  });
+
+  test("an OpenFX turn carries the user's GitHub token, so `gh` is not the host keyring's account", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy = createOpenFxSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "open a pull request",
+      options: makeOpenFxOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      githubToken: "gh-token-abc",
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    const env = backendOptions.env as Record<string, string>;
+    expect(env.GH_TOKEN).toBe("gh-token-abc");
+    expect(env.GITHUB_TOKEN).toBe("gh-token-abc");
+  });
+
+  test("a backend reporting models: [] is not handed the picker's Claude tier alias", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy = createOpenFxSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: makeOpenFxOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    // "opus" means nothing to `openfx --model`; the binary resolves its own.
+    expect(backendOptions.model).toBeUndefined();
   });
 
   test("surfaces a backend's structuredOutput on the step result", async () => {

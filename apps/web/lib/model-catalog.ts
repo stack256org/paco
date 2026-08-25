@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { BackendCapabilities } from "@paco/agent-backend";
 import type { AvailableModel } from "./models";
 
 /**
@@ -45,13 +46,33 @@ const CLAUDE_MODELS: AvailableModel[] = [
 ];
 
 /**
- * The models offered in the picker, minus any the operator disabled.
+ * The models offered in the picker for a given backend.
+ *
+ * The catalog above is written in Claude Code's tier aliases, so it is only
+ * the right answer for a backend that accepts them. `capabilities.models` is
+ * each backend's own answer to that: `undefined` means the whole catalog
+ * applies (Claude Code), a list means exactly those ids, and an empty list
+ * means the backend resolves its own model and there is nothing to pick —
+ * OpenFX, whose binary takes its model from its own config
+ * (`OpenFxBackend.capabilities()`). Passing no capabilities at all keeps the
+ * catalog whole, for callers with no backend in hand (the spend estimate's
+ * cost table, which just needs every price it knows).
+ *
+ * The composer applies this same rule client-side against
+ * `ModelOption[]` — see `ModelEffortBackendControls` — because a chat's
+ * backend can be switched after this page was rendered.
  *
  * Synchronous on purpose: nothing is fetched. It reads as an odd shape for a
  * "catalog", which is precisely why it should not pretend to be async.
  */
-export function listAvailableModels(): AvailableModel[] {
-  return CLAUDE_MODELS;
+export function listAvailableModels(
+  capabilities?: Pick<BackendCapabilities, "models">,
+): AvailableModel[] {
+  const accepted = capabilities?.models;
+  if (accepted === undefined) {
+    return CLAUDE_MODELS;
+  }
+  return CLAUDE_MODELS.filter((model) => accepted.includes(model.id));
 }
 
 /** Whether an id names a model this build actually offers. */

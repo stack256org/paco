@@ -18,6 +18,42 @@ export interface BackendCapabilities {
   effort: boolean;
   /** Does the backend run its own subagent roster? */
   subagents: boolean;
+  /**
+   * Can the CALLER install its own subagent roster (Paco's Section 3
+   * agents, with their per-agent model tiers)?
+   *
+   * Distinct from `subagents`, which only says the backend delegates at
+   * all: OpenFX runs a roster of its own but its protocol carries no way
+   * to define one, so it reports `subagents: true, customAgents: false`.
+   *
+   * Optional, and `undefined` means "yes" — the assumption every backend
+   * written before this field existed was built on, and the one
+   * `ClaudeCodeBackend` still satisfies. A backend that cannot must say
+   * `false` explicitly; that is what stops a caller's roster from being
+   * dropped without a trace.
+   */
+  customAgents?: boolean;
+  /**
+   * Can a turn's output be constrained by a JSON Schema (the planner's and
+   * the reviewer's shaped answers)?
+   *
+   * `undefined` means yes, as with `customAgents`. A backend reporting
+   * `false` returns free text no matter what schema it is handed, so a
+   * caller that needs structure must check this rather than discover it as
+   * an `undefined` result.
+   */
+  structuredOutput?: boolean;
+  /**
+   * The model ids this backend accepts from Paco's picker.
+   *
+   * `undefined` means the app's own catalog applies unchanged (Claude
+   * Code, whose tier aliases the catalog is written in). An EMPTY array
+   * means the backend resolves its own model and takes none from the
+   * picker — the honest answer for OpenFX, where `--model opus` would be a
+   * Claude alias handed to a binary that has never heard of it, and where
+   * the model comes from the binary's own config instead.
+   */
+  models?: readonly string[];
 }
 
 export interface TurnContext {

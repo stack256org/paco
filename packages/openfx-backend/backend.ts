@@ -10,8 +10,8 @@ import {
 import type { UIMessageChunk } from "ai";
 import {
   AcpClient,
+  type ContentBlock,
   type InitializeParams,
-  type McpServerConfig,
   type PermissionDecision,
   type PermissionHandler,
   type PermissionRequestParams,
@@ -25,11 +25,75 @@ import { AcpChunkMapper } from "./chunk-mapper.ts";
  * `TurnContext.backendOptions` (interface.ts leaves that bag
  * backend-specific — this is this backend's shape).
  */
+/**
+ * One stdio MCP server for a turn's session.
+ *
+ * Every field is REQUIRED, which `acp-client.ts`'s more permissive
+ * `McpServerConfig` does not say: OpenFX's own parser rejects an entry
+ * missing any of them — `MissingServerName`, `MissingCommand`,
+ * `CommandNotAbsolute`, `MissingArgs`, `MissingEnv`
+ * (`openfx/src/acp/mcp_servers.zig:177-221` `parseServer`, error strings at
+ * `:160-167`). `name` in particular is absent from `McpServerConfig`
+ * altogether, so a caller typing against that would build a server list
+ * OpenFX answers `session/new` with an error for.
+ *
+ * There is deliberately no `type` field: `parseServer` treats a present
+ * `type` as selecting a REMOTE transport and accepts only `"http"`/`"sse"`
+ * — sending `type: "stdio"` is an `InvalidTransport` error, not a no-op.
+ * Remote MCP servers are a separate shape this backend has no caller for
+ * yet.
+ */
+export interface OpenFxStdioMcpServer {
+  /** Non-empty; how the server's tools are namespaced. */
+  name: string;
+  /** Must be an ABSOLUTE path — a bare command name is rejected. */
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
 export interface OpenFxBackendOptions {
   /** MCP servers for this turn's session — PROTOCOL.md §7 `capabilities().mcp`. */
-  mcpServers?: McpServerConfig[];
+  mcpServers?: OpenFxStdioMcpServer[];
   /** `--model` override for this turn's process — PROTOCOL.md §1. */
   model?: string;
+  /**
+   * Instructions to put in front of this turn's user prompt: the caller's
+   * memory section, skills, project instructions, environment briefing —
+   * everything `ClaudeBackendOptions.appendSystemPrompt` carries there.
+   *
+   * ACP has no system-prompt parameter anywhere in its catalog (PROTOCOL.md
+   * §3: `session/new` reads only `mcpServers`, `session/prompt` only
+   * `sessionId`/`prompt`/`_meta`), so this rides in as a leading `text`
+   * content block. That is a real mechanism rather than a workaround:
+   * `parsePromptInput` concatenates every `text` block into one prompt,
+   * newline-separated, in array order
+   * (`openfx/src/acp/prompt.zig:846-862`). A `resource` block was the other
+   * candidate and is worse — its `uri` is run through `localFileTargetPath`
+   * and a non-file URI is recorded as an `unsafe_target` omission
+   * (`prompt.zig:863-900`).
+   *
+   * Sent on every turn, including resumed ones: the caller rebuilds it per
+   * turn (the memory section is scored fresh against the new prompt), and
+   * unlike Claude Code's `--append-system-prompt` — re-applied per process
+   * and never part of the transcript — this lands IN the session history,
+   * so a long chat carries one copy per turn. That cost is accepted rather
+   * than dropping the instructions: without them an OpenFX agent has no
+   * memory, no skills, and no "## Running the app" briefing, and starts its
+   * dev server on the host where the preview cannot reach it.
+   */
+  systemContext?: string;
+  /**
+   * Environment variables for THIS turn's process, layered over
+   * `OpenFxBackendConfig.env` (the instance-wide provider credentials).
+   *
+   * One `openfx acp` process per turn (PROTOCOL.md §1) is what makes
+   * per-turn env meaningful at all: it is how a turn's own `GH_TOKEN`/
+   * `GITHUB_TOKEN` reach the agent's `gh`, instead of `gh` falling back to
+   * the host keyring and acting as whoever ran `gh auth login` on the
+   * machine.
+   */
+  env?: Record<string, string>;
   /**
    * Answers this turn's `session/request_permission` round trips
    * (PROTOCOL.md §5).
@@ -92,6 +156,27 @@ const INITIALIZE_PARAMS: InitializeParams = {
     terminal: false,
   },
 };
+
+/**
+ * The turn's content blocks: the caller's instructions first, then the user
+ * prompt.
+ *
+ * Two `text` blocks rather than one concatenated string so the boundary
+ * survives on the wire and stays readable in a log; OpenFX joins them with
+ * a newline in array order anyway (`openfx/src/acp/prompt.zig:846-862`).
+ */
+function promptBlocks(
+  systemContext: string | undefined,
+  prompt: string,
+): ContentBlock[] {
+  if (systemContext === undefined || systemContext === "") {
+    return [{ type: "text", text: prompt }];
+  }
+  return [
+    { type: "text", text: systemContext },
+    { type: "text", text: prompt },
+  ];
+}
 
 function abortError(): Error {
   const error = new Error("OpenFX turn was aborted");
@@ -208,6 +293,22 @@ export class OpenFxBackend implements AgentBackend {
       mcp: true,
       effort: false,
       subagents: true,
+      // `subagents: true` above says OpenFX RUNS a roster; this says the
+      // client cannot INSTALL one. Nothing in PROTOCOL.md §3's catalog
+      // carries agent definitions — `session/new` reads only `mcpServers`,
+      // and `session/set_config_option` recognises only
+      // "model"/"provider"/"mode" — so Paco's Section 3 roster (and its
+      // per-agent model tiers) has no way in.
+      customAgents: false,
+      // No JSON-Schema-constrained output anywhere in the catalog: a turn
+      // returns `{stopReason}` and streamed text, nothing shaped.
+      structuredOutput: false,
+      // Paco's picker offers Claude tier aliases (opus/sonnet/haiku), which
+      // mean nothing to `openfx --model`. The binary resolves its own model
+      // from its config/`OPENFX_MODEL` (PROTOCOL.md §1), so this backend
+      // takes no model from the picker rather than forwarding an id it
+      // would reject.
+      models: [],
     };
   }
 
@@ -226,7 +327,9 @@ export class OpenFxBackend implements AgentBackend {
       cwd: ctx.cwd,
       executable: this.config.executable,
       extraArgs: this.config.extraArgs,
-      env: this.config.env,
+      // Per-turn env last, so a turn's own `GH_TOKEN` wins over anything
+      // the instance-wide config set under the same name.
+      env: { ...this.config.env, ...backendOptions.env },
       model: backendOptions.model,
       closeTimeoutsMs: this.config.closeTimeoutsMs,
     });
@@ -308,7 +411,7 @@ export class OpenFxBackend implements AgentBackend {
 
         const promptPromise = client.prompt({
           sessionId,
-          prompt: [{ type: "text", text: ctx.prompt }],
+          prompt: promptBlocks(backendOptions.systemContext, ctx.prompt),
         });
         if (cancelledByUs) {
           // Covers both the narrow window between the check above and this
