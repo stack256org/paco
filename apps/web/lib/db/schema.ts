@@ -637,3 +637,36 @@ export const rosterAgents = pgTable(
 
 export type RosterAgent = typeof rosterAgents.$inferSelect;
 export type NewRosterAgent = typeof rosterAgents.$inferInsert;
+
+/**
+ * An installed third-party plugin (spec Section 2).
+ *
+ * `id` is the manifest name — a plugin re-installed at the same name
+ * overwrites its row rather than accumulating duplicates. `manifest` is the
+ * parsed `PluginManifest` stored verbatim, and `grantedCapabilities` is
+ * always a subset of `manifest.capabilities`: `setPluginGrants`
+ * (`apps/web/lib/db/plugins.ts`) enforces that on every write, throwing
+ * `PluginGrantEscalationError` rather than letting a plugin grant itself
+ * something it never declared wanting.
+ *
+ * `enabled` defaults to `false` — installing a plugin only ever registers
+ * it; running it (and therefore starting its host process, per the spec's
+ * security invariants) is a deliberate second step, so install alone can
+ * never be mistaken for consent to run.
+ */
+export const plugins = pgTable("plugins", {
+  id: text("id").primaryKey(),
+  /** "github:owner/repo#ref" or "local:<path>". */
+  source: text("source").notNull(),
+  version: text("version").notNull(),
+  /** sha256 over the installed tree. */
+  contentHash: text("content_hash").notNull(),
+  manifest: jsonb("manifest").notNull(),
+  grantedCapabilities: jsonb("granted_capabilities").notNull(),
+  enabled: boolean("enabled").notNull().default(false),
+  installedAt: timestamp("installed_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PluginRow = typeof plugins.$inferSelect;
+export type NewPluginRow = typeof plugins.$inferInsert;

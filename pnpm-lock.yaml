@@ -51,6 +51,9 @@ importers:
       '@paco/claude-code':
         specifier: workspace:*
         version: link:../../packages/claude-code
+      '@paco/plugin-kit':
+        specifier: workspace:*
+        version: link:../../packages/plugin-kit
       '@paco/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox

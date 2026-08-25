@@ -1,0 +1,307 @@
+import { describe, expect, mock, test } from "bun:test";
+import { plugins } from "@/lib/db/schema";
+
+// The module under test is server-only; the marker package throws outside a
+// server component and has nothing to do with what is being tested.
+mock.module("server-only", () => ({}));
+
+type Row = {
+  id: string;
+  source: string;
+  version: string;
+  contentHash: string;
+  manifest: unknown;
+  grantedCapabilities: unknown;
+  enabled: boolean;
+  installedAt: Date;
+  updatedAt: Date;
+};
+type Predicate = (row: Row) => boolean;
+
+/**
+ * Same trick as `session-events.test.ts` and `roster.test.ts`: a tiny
+ * in-memory store plus real column objects from the schema, so a mocked
+ * `eq` can filter it the way Drizzle would filter real rows, without
+ * standing up a real Postgres.
+ */
+const COLUMN_KEYS = new Map<unknown, keyof Row>([[plugins.id, "id"]]);
+
+function keyFor(column: unknown): keyof Row {
+  const key = COLUMN_KEYS.get(column);
+  if (!key) {
+    throw new Error("Fake db: unmapped column referenced in a test");
+  }
+  return key;
+}
+
+const actualDrizzle = await import("drizzle-orm");
+
+mock.module("drizzle-orm", () => ({
+  ...actualDrizzle,
+  eq:
+    (column: unknown, value: unknown): Predicate =>
+    (row) =>
+      row[keyFor(column)] === value,
+  asc: (_column: unknown) => undefined,
+}));
+
+let store: Row[] = [];
+
+function makeRow(partial: Partial<Row>): Row {
+  const now = new Date();
+  return {
+    id: partial.id ?? "row-id",
+    source: partial.source ?? "local:/tmp/plugin",
+    version: partial.version ?? "1.0.0",
+    contentHash: partial.contentHash ?? "hash",
+    manifest: partial.manifest,
+    grantedCapabilities: partial.grantedCapabilities ?? [],
+    enabled: partial.enabled ?? false,
+    installedAt: partial.installedAt ?? now,
+    updatedAt: partial.updatedAt ?? now,
+  };
+}
+
+const fakeDb = {
+  select: (_columns?: Record<string, unknown>) => ({
+    from: (_table: unknown) => ({
+      where: (predicate: Predicate) => {
+        const matched = store.filter(predicate);
+        return Promise.resolve(matched.map((row) => ({ ...row })));
+      },
+      orderBy: (_order: unknown) =>
+        Promise.resolve(
+          [...store]
+            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+            .map((row) => ({ ...row })),
+        ),
+    }),
+  }),
+  insert: (_table: unknown) => ({
+    values: (values: Partial<Row> | Array<Partial<Row>>) => {
+      const rows = Array.isArray(values) ? values : [values];
+      for (const value of rows) {
+        store.push(makeRow(value));
+      }
+      return Promise.resolve();
+    },
+  }),
+  update: (_table: unknown) => ({
+    set: (patch: Partial<Row>) => ({
+      where: (predicate: Predicate) => {
+        for (const row of store) {
+          if (predicate(row)) {
+            Object.assign(row, patch);
+          }
+        }
+        return Promise.resolve();
+      },
+    }),
+  }),
+  delete: (_table: unknown) => ({
+    where: (predicate: Predicate) => {
+      store = store.filter((row) => !predicate(row));
+      return Promise.resolve();
+    },
+  }),
+};
+
+mock.module("@/lib/db/client", () => ({ db: fakeDb }));
+
+const {
+  PluginGrantEscalationError,
+  getPlugin,
+  listPlugins,
+  removePlugin,
+  setPluginEnabled,
+  setPluginGrants,
+  upsertPlugin,
+} = await import("./plugins");
+
+function manifestWithCapabilities(capabilities: string[]) {
+  return {
+    name: "my-plugin",
+    version: "1.0.0",
+    description: "Does a thing.",
+    pacoApi: 1,
+    capabilities,
+  };
+}
+
+describe("upsertPlugin / getPlugin", () => {
+  test("round-trips a plugin row", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "sha256:abc",
+      manifest: manifestWithCapabilities(["events:subscribe"]),
+      grantedCapabilities: [],
+    });
+
+    const row = await getPlugin("my-plugin");
+    expect(row).toBeDefined();
+    expect(row?.id).toBe("my-plugin");
+    expect(row?.source).toBe("local:/tmp/my-plugin");
+    expect(row?.version).toBe("1.0.0");
+    expect(row?.contentHash).toBe("sha256:abc");
+    expect(row?.manifest).toEqual(
+      manifestWithCapabilities(["events:subscribe"]),
+    );
+  });
+
+  test("enabled defaults to false: install is consent-gated", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "sha256:abc",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.enabled).toBe(false);
+  });
+
+  test("upserting the same id again updates in place, not duplicates", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "sha256:abc",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "2.0.0",
+      contentHash: "sha256:def",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+
+    const all = await listPlugins();
+    expect(all).toHaveLength(1);
+    expect(all[0]?.version).toBe("2.0.0");
+  });
+
+  test("getPlugin returns undefined for an unknown id", async () => {
+    store = [];
+    const row = await getPlugin("nope");
+    expect(row).toBeUndefined();
+  });
+});
+
+describe("listPlugins", () => {
+  test("lists plugins ordered by id", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "zeta",
+      source: "local:/tmp/zeta",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+    await upsertPlugin({
+      id: "alpha",
+      source: "local:/tmp/alpha",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+
+    const all = await listPlugins();
+    expect(all.map((row) => row.id)).toEqual(["alpha", "zeta"]);
+  });
+});
+
+describe("setPluginEnabled", () => {
+  test("flips enabled without touching other fields", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+
+    await setPluginEnabled("my-plugin", true);
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.enabled).toBe(true);
+    expect(row?.version).toBe("1.0.0");
+  });
+});
+
+describe("setPluginGrants", () => {
+  test("accepts grants that are a subset of the manifest's capabilities", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["events:subscribe", "storage:kv"]),
+      grantedCapabilities: [],
+    });
+
+    await setPluginGrants("my-plugin", ["events:subscribe"]);
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.grantedCapabilities).toEqual(["events:subscribe"]);
+  });
+
+  test("throws PluginGrantEscalationError for a capability outside the manifest", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["events:subscribe"]),
+      grantedCapabilities: [],
+    });
+
+    await expect(
+      setPluginGrants("my-plugin", ["events:subscribe", "net:fetch"]),
+    ).rejects.toThrow(PluginGrantEscalationError);
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.grantedCapabilities).toEqual([]);
+  });
+
+  test("throws for an unknown plugin id", async () => {
+    store = [];
+    await expect(
+      setPluginGrants("does-not-exist", ["events:subscribe"]),
+    ).rejects.toThrow();
+  });
+});
+
+describe("removePlugin", () => {
+  test("removes the row", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities([]),
+      grantedCapabilities: [],
+    });
+
+    await removePlugin("my-plugin");
+
+    expect(await getPlugin("my-plugin")).toBeUndefined();
+    expect(await listPlugins()).toHaveLength(0);
+  });
+});

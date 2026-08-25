@@ -29,6 +29,13 @@
       "when": 1787665923600,
       "tag": "0003_jittery_ender_wiggin",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787666327779,
+      "tag": "0004_bizarre_serpent_society",
+      "breakpoints": true
     }
   ]
 }
