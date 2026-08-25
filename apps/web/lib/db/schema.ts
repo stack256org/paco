@@ -1,3 +1,4 @@
+import type { ClaudeAgentDefinition } from "@paco/claude-code";
 import type { Capability, PluginManifest } from "@paco/plugin-kit";
 import type { SandboxState } from "@paco/sandbox";
 import { sql } from "drizzle-orm";
@@ -779,3 +780,59 @@ export const tasks = pgTable(
 
 export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
+
+/** An eval run's terminal states, plus `running` while its turn is in flight. */
+export const EVAL_RUN_STATUSES = [
+  "running",
+  "passed",
+  "failed",
+  "error",
+] as const;
+export type EvalRunStatus = (typeof EVAL_RUN_STATUSES)[number];
+
+/**
+ * One execution of a repo-defined eval scenario against a throwaway chat
+ * (spec Section 3 Task 9).
+ *
+ * Scenarios themselves are not stored — they live as `<sessionRepo>/evals/*.json`
+ * files (`lib/evals/discovery.ts`) — this table only records what happened
+ * when one ran: `scenarioName` names it, `details` carries the per-assertion
+ * results (or the harness error, when `status` is `"error"`) as untyped
+ * JSONB re-validated on read rather than a typed column, the same
+ * "JSONB, revalidate on read" choice `rosterAgents.definition` makes — see
+ * `lib/db/eval-runs.ts` for the shape it is expected to hold.
+ *
+ * `rosterSnapshot` is the organisation's roster (`lib/db/roster.ts`'s
+ * `getRoster`) at the moment the scenario ran, kept alongside the result so
+ * a later roster edit can be checked against whether it made evals worse —
+ * the whole point of the feature — without needing separate roster history.
+ */
+export const evalRuns = pgTable(
+  "eval_runs",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    scenarioName: text("scenario_name").notNull(),
+    status: text("status", { enum: EVAL_RUN_STATUSES })
+      .notNull()
+      .default("running"),
+    details: jsonb("details"),
+    rosterSnapshot: jsonb("roster_snapshot")
+      .$type<Record<string, ClaudeAgentDefinition>>()
+      .notNull(),
+    startedAt: timestamp("started_at").defaultNow().notNull(),
+    finishedAt: timestamp("finished_at"),
+  },
+  (table) => [
+    index("eval_runs_org_id_idx").on(table.organizationId),
+    index("eval_runs_session_id_idx").on(table.sessionId),
+  ],
+);
+
+export type EvalRun = typeof evalRuns.$inferSelect;
+export type NewEvalRun = typeof evalRuns.$inferInsert;

@@ -50,6 +50,13 @@
       "when": 1787667749355,
       "tag": "0006_bored_thundra",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787669861730,
+      "tag": "0007_pink_cardiac",
+      "breakpoints": true
     }
   ]
 }
