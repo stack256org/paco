@@ -21,6 +21,7 @@ import { listSessionEvents } from "@/lib/db/session-events";
 import { createChat, deleteChat, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import type { EvalAssertion, EvalScenario } from "@/lib/evals/discovery";
+import { removeChatWorktree } from "@/lib/sandbox/chat-worktree-removal";
 
 /** `runEvalScenario`'s result: the finished (or errored) `evalRuns` row. */
 export type EvalRunRow = EvalRun;
@@ -237,29 +238,101 @@ async function evaluateCommandSucceeds(
   }
 }
 
-function evaluateTranscriptMatches(
+/**
+ * How long the sandboxed `grep -E` a `transcript-matches` assertion runs as
+ * may take before it is killed.
+ *
+ * Short on purpose: this is matching one regex against one turn's transcript
+ * — normally sub-millisecond work — so 5s is already a generous margin
+ * before treating it as runaway, not a budget anyone should expect to need.
+ */
+const TRANSCRIPT_MATCH_TIMEOUT_MS = 5_000;
+
+/**
+ * Checks a `transcript-matches` assertion by running `grep -E` inside the
+ * sandbox, never a JS `RegExp` on the web server process.
+ *
+ * A repo-defined pattern is trusted the way a scenario's `prompt` or
+ * `command` already is, but a regex is a sharper kind of trust: a
+ * pathological one (nested quantifiers over a long non-matching string) can
+ * make a backtracking engine burn CPU exponentially on purely well-formed
+ * input, no malice required. `command-succeeds` already keeps exactly this
+ * class of risk off the server by running inside the sandbox with a timeout
+ * — this reuses that same isolation rather than inventing a second one, and
+ * two things about `grep -E` make it a materially safer engine to point at
+ * untrusted patterns than JS's backtracking `RegExp` in the first place: GNU
+ * grep's ERE matcher is DFA/NFA-based, not backtracking, so it does not
+ * suffer catastrophic backtracking the way JS's engine can; the sandbox exec
+ * timeout is still a hard backstop underneath that.
+ *
+ * The transcript and pattern are written to temp files inside the worktree
+ * (the same host directory that is the sandbox's cwd for `exec`) rather than
+ * interpolated into the shell command, so a pattern containing quotes or
+ * shell metacharacters can never break — or inject into — the command line.
+ * Both files are removed in `finally`, win or lose.
+ */
+async function evaluateTranscriptMatches(
   assertion: Extract<EvalAssertion, { kind: "transcript-matches" }>,
   ctx: AssertionContext,
-): EvalAssertionResult {
+): Promise<EvalAssertionResult> {
   const description = `transcript matches: ${assertion.pattern}`;
+  const runId = nanoid();
+  const transcriptFilename = `paco-eval-transcript-${runId}.txt`;
+  const patternFilename = `paco-eval-pattern-${runId}.txt`;
+  const transcriptPath = path.join(ctx.hostWorktree, transcriptFilename);
+  const patternPath = path.join(ctx.hostWorktree, patternFilename);
+
   try {
-    const regex = new RegExp(assertion.pattern);
-    if (regex.test(ctx.transcript)) {
+    await fs.writeFile(transcriptPath, ctx.transcript, "utf8");
+    await fs.writeFile(patternPath, `${assertion.pattern}\n`, "utf8");
+
+    const { connectSandbox } = await import("@paco/sandbox");
+    const sandbox = await connectSandbox(ctx.sandboxState);
+    const result = await sandbox.exec(
+      `grep -Eqf ${JSON.stringify(patternFilename)} ${JSON.stringify(transcriptFilename)}`,
+      ctx.hostWorktree,
+      TRANSCRIPT_MATCH_TIMEOUT_MS,
+    );
+
+    if (result.exitCode === 0) {
       return { kind: assertion.kind, description, passed: true };
+    }
+    if (result.exitCode === null) {
+      return {
+        kind: assertion.kind,
+        description,
+        passed: false,
+        message: "pattern match timed out",
+      };
+    }
+    if (result.exitCode === 1) {
+      return {
+        kind: assertion.kind,
+        description,
+        passed: false,
+        message: "the transcript did not match the pattern",
+      };
     }
     return {
       kind: assertion.kind,
       description,
       passed: false,
-      message: "the transcript did not match the pattern",
+      message:
+        result.stderr.trim() ||
+        `invalid pattern (grep exited with code ${result.exitCode})`,
     };
   } catch (error) {
     return {
       kind: assertion.kind,
       description,
       passed: false,
-      message: `invalid pattern: ${assertionMessage(error)}`,
+      message: assertionMessage(error),
     };
+  } finally {
+    await Promise.all([
+      fs.rm(transcriptPath, { force: true }).catch(() => undefined),
+      fs.rm(patternPath, { force: true }).catch(() => undefined),
+    ]);
   }
 }
 
@@ -276,7 +349,7 @@ async function evaluateAssertion(
     case "command-succeeds":
       return await evaluateCommandSucceeds(assertion, ctx);
     case "transcript-matches":
-      return evaluateTranscriptMatches(assertion, ctx);
+      return await evaluateTranscriptMatches(assertion, ctx);
     default:
       return assertion satisfies never;
   }
@@ -412,11 +485,35 @@ export async function runEvalScenario(
     });
   } finally {
     if (chatId) {
+      const cleanupChatId = chatId;
       try {
-        await deleteChat(chatId);
+        // The files go before the row here too — same invariant the chat
+        // DELETE route enforces (`lib/sandbox/chat-worktree-removal.ts`).
+        // Re-fetching the session gets the sandbox state as it stands right
+        // now, not whatever this function last saw before the turn ran.
+        const cleanupSession = await getSessionById(sessionId);
+        const removal = await removeChatWorktree(
+          cleanupSession?.sandboxState,
+          cleanupChatId,
+        );
+
+        if (removal.kind === "removed" || removal.kind === "already-absent") {
+          await deleteChat(cleanupChatId);
+        } else {
+          // Leave the row: it is the only thing left pointing at whatever
+          // worktree may still be on disk. Deleting it here would recreate
+          // exactly the invisible-orphan bug this cleanup exists to prevent
+          // — the chat can still be removed later, through the same retry
+          // path a user's own chat delete goes through.
+          const reason =
+            removal.kind === "failed" ? ` (${removal.reason})` : "";
+          console.error(
+            `[evals] leaving throwaway chat "${cleanupChatId}" undeleted: worktree removal ${removal.kind}${reason}`,
+          );
+        }
       } catch (cleanupError) {
         console.error(
-          `[evals] failed to clean up throwaway chat "${chatId}":`,
+          `[evals] failed to clean up throwaway chat "${cleanupChatId}":`,
           cleanupError,
         );
       }

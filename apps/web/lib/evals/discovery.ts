@@ -5,6 +5,19 @@ import * as path from "node:path";
 import { z } from "zod";
 
 /**
+ * The longest a `transcript-matches` pattern may be.
+ *
+ * The pattern is repo-supplied text, not user input Paco already trusts the
+ * way it trusts a scenario's `prompt` or `command`, but a regex is a
+ * different kind of trust: a pathological one (nested quantifiers over a
+ * long non-matching string) can burn CPU exponentially regardless of who
+ * wrote it. Capping length here is the cheap first line of defense; the
+ * expensive one — running the match off the web server process, inside the
+ * sandbox, with a hard timeout — lives in `lib/evals/runner.ts`.
+ */
+const TRANSCRIPT_PATTERN_MAX_LENGTH = 512;
+
+/**
  * One check a scenario's turn must satisfy, evaluated by `lib/evals/runner.ts`.
  *
  * `file-exists`/`file-contains` run against the throwaway chat's worktree on
@@ -12,7 +25,8 @@ import { z } from "zod";
  * (`packages/sandbox`'s `exec`, 60s timeout) so it sees the same container
  * the agent worked in; `transcript-matches` is a regex over the turn's
  * assistant text, derived from `session_events` the same way the chat UI
- * would replay it.
+ * would replay it — also run inside the sandbox (via `grep -E`, 5s timeout),
+ * never as a JS `RegExp` on the web server, see `lib/evals/runner.ts`.
  */
 export const evalAssertionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("file-exists"), path: z.string().min(1) }),
@@ -24,7 +38,7 @@ export const evalAssertionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("command-succeeds"), command: z.string().min(1) }),
   z.object({
     kind: z.literal("transcript-matches"),
-    pattern: z.string().min(1),
+    pattern: z.string().min(1).max(TRANSCRIPT_PATTERN_MAX_LENGTH),
   }),
 ]);
 

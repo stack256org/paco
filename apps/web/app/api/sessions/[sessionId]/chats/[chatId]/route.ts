@@ -1,15 +1,12 @@
-import { chatDir, connectSandbox, repoDir } from "@paco/sandbox";
 import {
   requireAuthenticatedUser,
   requireOwnedSessionChat,
 } from "@/app/api/sessions/_lib/session-context";
-import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
 import {
   CHAT_DELETE_BLOCKED,
   CHAT_DELETE_NEEDS_WORKSPACE,
-  classifyWorktreeRemoval,
+  removeChatWorktree,
 } from "@/lib/sandbox/chat-worktree-removal";
-import { canOperateOnSandbox } from "@/lib/sandbox/utils";
 import type { WebAgentUIMessage } from "@/app/types";
 import {
   deleteChat,
@@ -169,51 +166,33 @@ export async function DELETE(_req: Request, context: RouteContext) {
   /*
    * The files go before the row, not after.
    *
-   * `removeChatWorktree` has existed since worktrees did and was called from
-   * nothing but an integration test, so every deleted chat left its worktree
-   * on disk — unreachable, and missed by the orphan sweep, which looks for
-   * whole workspaces rather than worktrees inside one.
+   * `removeChatWorktree` (`lib/sandbox/chat-worktree-removal.ts`) has existed
+   * since worktrees did and was called from nothing but an integration test,
+   * so every deleted chat left its worktree on disk — unreachable, and
+   * missed by the orphan sweep, which looks for whole workspaces rather than
+   * worktrees inside one.
    *
    * Removing first means a failure leaves the chat visible and deletable
    * again, instead of producing a directory with nothing pointing at it. The
    * branch is deliberately kept: deleting a chat should free disk, not discard
    * commits.
    */
-  const state = chatContext.sessionRecord.sandboxState;
+  const removal = await removeChatWorktree(
+    chatContext.sessionRecord.sandboxState,
+    chatId,
+  );
 
-  if (!canOperateOnSandbox(state)) {
+  if (removal.kind === "not-running") {
     return Response.json(
       { error: CHAT_DELETE_NEEDS_WORKSPACE },
       { status: 409 },
     );
   }
 
-  try {
-    const sandbox = await connectSandbox(state);
-    const workspaceRoot = hostWorkspaceFor(state);
-    const repo = repoDir(workspaceRoot);
-
-    const removal = classifyWorktreeRemoval(
-      await sandbox.exec(
-        `git worktree remove --force ${JSON.stringify(chatDir(workspaceRoot, chatId))}`,
-        repo,
-        30_000,
-      ),
+  if (removal.kind === "failed") {
+    console.error(
+      `[chat ${chatId}] worktree removal failed: ${removal.reason}`,
     );
-
-    if (removal.kind === "failed") {
-      console.error(
-        `[chat ${chatId}] worktree removal failed: ${removal.reason}`,
-      );
-      return Response.json({ error: CHAT_DELETE_BLOCKED }, { status: 409 });
-    }
-
-    // Drops the administrative entry the removed worktree left in the
-    // repository, so a chat id can be reused and `git worktree list` stays
-    // truthful.
-    await sandbox.exec("git worktree prune", repo, 30_000);
-  } catch (error) {
-    console.error(`[chat ${chatId}] worktree removal errored:`, error);
     return Response.json({ error: CHAT_DELETE_BLOCKED }, { status: 409 });
   }
 

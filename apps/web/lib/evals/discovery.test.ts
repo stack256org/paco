@@ -122,4 +122,42 @@ describe("discoverEvalScenarios", () => {
     const result = await discoverEvalScenarios(repoDir);
     expect(result).toEqual({ scenarios: [], errors: [] });
   });
+
+  test("rejects a transcript-matches pattern longer than 512 characters", async () => {
+    // A regex this long is already a smell on its own, but the real point is
+    // bounding it before it ever reaches `runner.ts`'s sandboxed `grep -E` —
+    // see that file's `evaluateTranscriptMatches` for the runtime half of
+    // this defense (the match itself never runs as a JS `RegExp`, and always
+    // has a hard timeout).
+    await writeEvalFile(
+      "long-pattern.json",
+      JSON.stringify({
+        name: "long-pattern",
+        prompt: "do the thing",
+        assertions: [{ kind: "transcript-matches", pattern: "a".repeat(513) }],
+      }),
+    );
+
+    const result = await discoverEvalScenarios(repoDir);
+
+    expect(result.scenarios).toEqual([]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("long-pattern.json");
+  });
+
+  test("accepts a transcript-matches pattern at exactly the length limit", async () => {
+    await writeEvalFile(
+      "max-pattern.json",
+      JSON.stringify({
+        name: "max-pattern",
+        prompt: "do the thing",
+        assertions: [{ kind: "transcript-matches", pattern: "a".repeat(512) }],
+      }),
+    );
+
+    const result = await discoverEvalScenarios(repoDir);
+
+    expect(result.errors).toEqual([]);
+    expect(result.scenarios).toHaveLength(1);
+  });
 });

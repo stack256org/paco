@@ -54,6 +54,28 @@ const getRunMock = mock((_runId: string) => ({
 }));
 mock.module("workflow/api", () => ({ getRun: getRunMock }));
 
+// ── `@/lib/sandbox/chat-worktree-removal` ───────────────────────────
+
+type WorktreeRemovalOutcome =
+  | { kind: "removed" }
+  | { kind: "already-absent" }
+  | { kind: "not-running" }
+  | { kind: "failed"; reason: string };
+
+/** Records call order across the two cleanup mocks, so tests can assert
+ * the worktree is removed strictly before the row is deleted. */
+let callOrder: string[] = [];
+let worktreeRemovalOutcome: WorktreeRemovalOutcome = { kind: "removed" };
+const removeChatWorktreeMock = mock(
+  (_sandboxState: unknown, chatId: string) => {
+    callOrder.push(`removeChatWorktree:${chatId}`);
+    return Promise.resolve(worktreeRemovalOutcome);
+  },
+);
+mock.module("@/lib/sandbox/chat-worktree-removal", () => ({
+  removeChatWorktree: removeChatWorktreeMock,
+}));
+
 // ── `@/lib/db/session-events` + `@/lib/chat/derive-from-events` ─────
 
 let sessionEventsThrows: Error | undefined;
@@ -167,7 +189,10 @@ const createChatMock = mock(
       activeStreamId: null as string | null,
     }),
 );
-const deleteChatMock = mock((_chatId: string) => Promise.resolve());
+const deleteChatMock = mock((chatId: string) => {
+  callOrder.push(`deleteChat:${chatId}`);
+  return Promise.resolve();
+});
 mock.module("@/lib/db/sessions", () => ({
   createChat: createChatMock,
   deleteChat: deleteChatMock,
@@ -186,9 +211,27 @@ mock.module("@/lib/db/user-preferences", () => ({
 // ── `@paco/sandbox` ────────────────────────────────────────────────
 
 let sandboxExecSuccess = true;
+/**
+ * `null` on the grep timeout test to simulate `sandbox.exec` returning the
+ * same shape a real timed-out `docker exec` does (`exitCode: null`, a
+ * "timed out" stderr) — see `sandbox.ts`'s `runDockerCli`.
+ */
+let transcriptGrepExitCode: number | null = 0;
 const sandboxExecMock = mock(
-  (_command: string, _cwd: string, _timeout: number) =>
-    Promise.resolve(
+  (command: string, _cwd: string, _timeout: number) => {
+    if (command.startsWith("grep ")) {
+      return Promise.resolve({
+        success: transcriptGrepExitCode === 0,
+        exitCode: transcriptGrepExitCode,
+        stdout: "",
+        stderr:
+          transcriptGrepExitCode === null
+            ? "Command timed out after 5000ms"
+            : "",
+        truncated: false,
+      });
+    }
+    return Promise.resolve(
       sandboxExecSuccess
         ? {
             success: true,
@@ -204,7 +247,8 @@ const sandboxExecMock = mock(
             stderr: "boom",
             truncated: false,
           },
-    ),
+    );
+  },
 );
 const connectSandboxMock = mock(() =>
   Promise.resolve({ exec: sandboxExecMock }),
@@ -236,7 +280,10 @@ beforeEach(async () => {
     sandboxState: { sandboxName: "s1" },
   };
   sandboxExecSuccess = true;
+  transcriptGrepExitCode = 0;
   finishCalls = [];
+  callOrder = [];
+  worktreeRemovalOutcome = { kind: "removed" };
 
   hostChatWorktreeMock.mockClear();
   submitChatMessageMock.mockClear();
@@ -252,6 +299,7 @@ beforeEach(async () => {
   getUserPreferencesMock.mockClear();
   sandboxExecMock.mockClear();
   connectSandboxMock.mockClear();
+  removeChatWorktreeMock.mockClear();
 });
 
 afterEach(async () => {
@@ -288,6 +336,13 @@ describe("runEvalScenario", () => {
     ).toBe(true);
     expect(deleteChatMock).toHaveBeenCalledTimes(1);
     expect(deleteChatMock).toHaveBeenCalledWith("eval-chat-1");
+    // The worktree removal helper must run before the row is deleted —
+    // deleting the row first would leave an invisible, unreachable worktree
+    // behind if removal ever failed (see `chat-worktree-removal.ts`).
+    expect(callOrder).toEqual([
+      "removeChatWorktree:eval-chat-1",
+      "deleteChat:eval-chat-1",
+    ]);
   });
 
   test("one failing assertion yields status failed naming it", async () => {
@@ -319,6 +374,10 @@ describe("runEvalScenario", () => {
     expect(fileExists?.message).toContain("ok.txt");
     expect(transcriptMatch?.passed).toBe(true);
     expect(deleteChatMock).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual([
+      "removeChatWorktree:eval-chat-1",
+      "deleteChat:eval-chat-1",
+    ]);
   });
 
   test("a harness failure (turn never started) yields status error", async () => {
@@ -367,5 +426,57 @@ describe("runEvalScenario", () => {
     expect(result.status).toBe("error");
     expect(finishCalls[0]?.details.harnessError).toContain("timed out");
     expect(deleteChatMock).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual([
+      "removeChatWorktree:eval-chat-1",
+      "deleteChat:eval-chat-1",
+    ]);
+  });
+
+  test("a transcript-matches assertion that times out fails the run, not the harness", async () => {
+    // Simulates a pathological pattern: the sandboxed `grep -E` hits its own
+    // hard timeout (`exitCode: null`, see `sandbox.ts`'s `runDockerCli`)
+    // instead of the JS process ever evaluating the regex itself.
+    transcriptGrepExitCode = null;
+
+    const scenario = makeScenario({
+      assertions: [{ kind: "transcript-matches", pattern: "(a+)+b" }],
+    });
+
+    const result = await runEvalScenario({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      scenario,
+    });
+
+    expect(result.status).toBe("failed");
+    const assertions = finishCalls[0]?.details.assertions as Array<{
+      kind: string;
+      passed: boolean;
+      message?: string;
+    }>;
+    expect(assertions).toHaveLength(1);
+    expect(assertions[0]?.passed).toBe(false);
+    expect(assertions[0]?.message).toContain("timed out");
+    expect(deleteChatMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps the throwaway chat row when its worktree could not be removed", async () => {
+    worktreeRemovalOutcome = {
+      kind: "failed",
+      reason: "contains modified or untracked files",
+    };
+    await fs.writeFile(path.join(worktreeDir, "ok.txt"), "OK", "utf8");
+
+    await runEvalScenario({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      scenario: makeScenario(),
+    });
+
+    expect(removeChatWorktreeMock).toHaveBeenCalledTimes(1);
+    // Deleting the row here would recreate the exact invisible-orphan bug
+    // this cleanup exists to prevent, since nothing would point at whatever
+    // is still on disk.
+    expect(deleteChatMock).not.toHaveBeenCalled();
   });
 });
