@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { BlockList } from "node:net";
 import { checkFetchAllowed, type CapabilityHandlers } from "@paco/plugin-host";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
+import { Agent, type Dispatcher } from "undici";
 import { z } from "zod";
 import type { WebAgentUIMessage } from "@/app/types";
 import { appUrl } from "@/lib/app-url";
@@ -18,6 +19,11 @@ const NET_FETCH_BODY_CAP_BYTES = 1_000_000; // 1MB
 /** Manual-redirect hops a single `net:fetch` call will follow. */
 const NET_FETCH_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** `storage:kv` limits (Task 6 fix round 2): a runaway plugin cannot grow
+ * one key past this, list past a page, or a key name past this length. */
+const KV_KEY_MAX_LENGTH = 256;
+const KV_VALUE_MAX_BYTES = 64 * 1024;
+const KV_LIST_LIMIT = 1000;
 
 /**
  * Loopback, link-local, and RFC1918/RFC4193 private ranges — the addresses a
@@ -66,12 +72,47 @@ export function buildCapabilityHandlers(
 
 // --- storage:kv ------------------------------------------------------------
 
+const kvKeySchema = z.string().min(1).max(KV_KEY_MAX_LENGTH);
+
+/**
+ * A value is accepted only if it is JSON-serializable (it is about to be
+ * stored as jsonb — a circular structure or a `bigint` fails at the
+ * database, not here, if this doesn't catch it first) and its serialized
+ * form fits the 64 KiB cap.
+ */
+const kvValueSchema = z.unknown().refine(
+  (value) => {
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      return false;
+    }
+    const byteLength =
+      serialized === undefined ? 0 : Buffer.byteLength(serialized, "utf-8");
+    return byteLength <= KV_VALUE_MAX_BYTES;
+  },
+  {
+    message: `value must be JSON-serializable and at most ${KV_VALUE_MAX_BYTES} bytes serialized`,
+  },
+);
+
 const kvPayloadSchema = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("get"), key: z.string() }),
-  z.object({ op: z.literal("set"), key: z.string(), value: z.unknown() }),
-  z.object({ op: z.literal("delete"), key: z.string() }),
-  z.object({ op: z.literal("list") }),
+  z.object({ op: z.literal("get"), key: kvKeySchema }),
+  z.object({ op: z.literal("set"), key: kvKeySchema, value: kvValueSchema }),
+  z.object({ op: z.literal("delete"), key: kvKeySchema }),
+  z.object({
+    op: z.literal("list"),
+    /** Last key from a previous page; omit to start from the beginning. */
+    afterKey: kvKeySchema.optional(),
+  }),
 ]);
+
+export interface KvListResult {
+  items: Array<{ key: string; value: unknown }>;
+  /** Present iff the page was full — pass back as `afterKey` for the next one. */
+  nextAfterKey?: string;
+}
 
 async function handleStorageKv(
   pluginId: string,
@@ -92,23 +133,23 @@ async function handleStorageKv(
       return row ? row.value : null;
     }
     case "set": {
-      const [existing] = await db
-        .select({ key: pluginKv.key })
-        .from(pluginKv)
-        .where(and(eq(pluginKv.pluginId, pluginId), eq(pluginKv.key, op.key)));
-      const updatedAt = new Date();
-      if (existing) {
-        await db
-          .update(pluginKv)
-          .set({ value: op.value, updatedAt })
-          .where(
-            and(eq(pluginKv.pluginId, pluginId), eq(pluginKv.key, op.key)),
-          );
-      } else {
-        await db
-          .insert(pluginKv)
-          .values({ pluginId, key: op.key, value: op.value, updatedAt });
-      }
+      // A single upsert, not a select-then-branch: two concurrent `set`
+      // calls for the same key raced the old select-then-insert-or-update
+      // shape into either a duplicate-key error or a lost update. The
+      // database's own conflict handling is the only thing that can make
+      // this atomic.
+      await db
+        .insert(pluginKv)
+        .values({
+          pluginId,
+          key: op.key,
+          value: op.value,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: [pluginKv.pluginId, pluginKv.key],
+          set: { value: op.value, updatedAt: new Date() },
+        });
       return { ok: true };
     }
     case "delete": {
@@ -118,11 +159,23 @@ async function handleStorageKv(
       return { ok: true };
     }
     case "list": {
+      const conditions = [eq(pluginKv.pluginId, pluginId)];
+      if (op.afterKey !== undefined) {
+        conditions.push(gt(pluginKv.key, op.afterKey));
+      }
+
       const rows = await db
         .select({ key: pluginKv.key, value: pluginKv.value })
         .from(pluginKv)
-        .where(eq(pluginKv.pluginId, pluginId));
-      return rows;
+        .where(and(...conditions))
+        .orderBy(asc(pluginKv.key))
+        .limit(KV_LIST_LIMIT);
+
+      const result: KvListResult = { items: rows };
+      if (rows.length === KV_LIST_LIMIT) {
+        result.nextAfterKey = rows.at(-1)?.key;
+      }
+      return result;
     }
     default: {
       const exhaustive: never = op;
@@ -149,16 +202,21 @@ export interface NetFetchResult {
 }
 
 /**
- * Resolves `hostname` and rejects if any returned address is loopback,
- * link-local, or a private range.
+ * Resolves `hostname` and returns ONE validated address to pin the
+ * connection to, rejecting if any returned address is loopback, link-local,
+ * or a private range.
  *
- * This is what actually stops SSRF into the host's own network: an
- * allowlisted *hostname* says nothing about where it resolves at request
- * time — DNS rebinding, a misconfigured internal record, or a redirect can
- * all point a granted domain at `127.0.0.1` or `169.254.169.254`. Checked
- * fresh on every hop (see `fetchFollowingRedirects`), not just the first.
+ * Returning the address (not just validating it) is what closes the
+ * DNS-rebind gap: if this function only said "yes, resolves publicly" and
+ * `fetch` re-resolved the hostname itself when it actually connects, an
+ * attacker-controlled DNS record could answer differently the second time —
+ * publicly-routable here, `169.254.169.254` a moment later. The caller pins
+ * the socket to exactly this address (`pinnedDispatcher`) so there is no
+ * second, independent lookup to race.
  */
-async function assertResolvesToPublicAddress(hostname: string): Promise<void> {
+async function resolveValidatedAddress(
+  hostname: string,
+): Promise<{ address: string; family: 4 | 6 }> {
   let addresses: Array<{ address: string; family: number }>;
   try {
     addresses = await dnsLookup(hostname, { all: true });
@@ -171,6 +229,12 @@ async function assertResolvesToPublicAddress(hostname: string): Promise<void> {
     );
   }
 
+  if (addresses.length === 0) {
+    throw new Error(
+      `net:fetch: host ${hostname} did not resolve to any address`,
+    );
+  }
+
   for (const { address, family } of addresses) {
     if (PRIVATE_RANGES.check(address, family === 6 ? "ipv6" : "ipv4")) {
       throw new Error(
@@ -178,11 +242,22 @@ async function assertResolvesToPublicAddress(hostname: string): Promise<void> {
       );
     }
   }
+
+  const [first] = addresses;
+  return { address: first.address, family: first.family === 6 ? 6 : 4 };
+}
+
+interface ValidatedNetFetchTarget {
+  hostname: string;
+  address: string;
+  family: 4 | 6;
 }
 
 /**
  * Every check a `net:fetch` target — the original URL, or a redirect's
- * `Location` — must pass before a request is allowed to reach it.
+ * `Location` — must pass before a request is allowed to reach it, plus the
+ * exact address that check resolved, for the caller to pin the connection
+ * to.
  *
  * `checkFetchAllowed` (`@paco/plugin-host`) is the same allowlist function
  * the host itself runs: http(s) only, no IP-literal host (an allowlist is a
@@ -191,19 +266,43 @@ async function assertResolvesToPublicAddress(hostname: string): Promise<void> {
  * with no subdomain/parent-domain matching either way. Importing it instead
  * of a local copy is what keeps this handler and the host's own check from
  * drifting apart. What it deliberately does not — and cannot — check is
- * where the allowed hostname actually resolves; `assertResolvesToPublicAddress`
+ * where the allowed hostname actually resolves; `resolveValidatedAddress`
  * is this handler's own addition for that.
  */
 async function assertNetFetchTargetAllowed(
   target: URL,
   netDomains: string[],
-): Promise<void> {
+): Promise<ValidatedNetFetchTarget> {
   const decision = checkFetchAllowed(target.toString(), netDomains);
   if (!decision.allowed) {
     throw new Error(decision.reason);
   }
 
-  await assertResolvesToPublicAddress(decision.hostname);
+  const { address, family } = await resolveValidatedAddress(decision.hostname);
+  return { hostname: decision.hostname, address, family };
+}
+
+/**
+ * Builds a per-request undici dispatcher whose socket connects to exactly
+ * `address` — an override of undici's `connect.lookup`, which otherwise
+ * asks the OS resolver again at connect time, is the only way to make the
+ * validated address in `resolveValidatedAddress` the one actually dialed.
+ * The request's Host header and TLS SNI still come from `target`'s
+ * hostname (undici derives both from the URL, not from `connect.lookup`),
+ * so this narrows *what IP is dialed*, not what the server sees.
+ *
+ * One dispatcher per hop, closed as soon as that hop's response is no
+ * longer needed (`fetchFollowingRedirects`/`handleNetFetch`) — an undici
+ * `Agent` holds pooled connections open until told otherwise.
+ */
+function pinnedDispatcher(address: string, family: 4 | 6): Dispatcher {
+  return new Agent({
+    connect: {
+      lookup: (_hostname, _options, callback) => {
+        callback(null, address, family);
+      },
+    },
+  });
 }
 
 interface NetFetchRequestInit {
@@ -214,30 +313,61 @@ interface NetFetchRequestInit {
 }
 
 /**
+ * `dispatcher` is a Node/undici extension to `fetch`'s options — lib.dom's
+ * `RequestInit` (what this project's tsconfig pulls `fetch`'s types from)
+ * has no idea it exists. This is a type-only widening for the one call site
+ * that needs it; the Node/undici runtime honors `dispatcher` regardless of
+ * what lib.dom declares.
+ */
+type FetchInitWithDispatcher = RequestInit & { dispatcher: Dispatcher };
+
+interface NetFetchAttempt {
+  response: Response;
+  dispatcher: Dispatcher;
+}
+
+/**
  * Fetches with `redirect: "manual"` and walks any redirect chain itself,
- * re-running every allowlist/SSRF check (`assertNetFetchTargetAllowed`) on
- * each `Location` before following it. Letting `fetch` auto-follow
+ * re-running every allowlist/SSRF/pinning check (`assertNetFetchTargetAllowed`)
+ * on each `Location` before following it. Letting `fetch` auto-follow
  * redirects would mean the allowlist only ever sees the first hop — a
  * granted domain redirecting to an ungranted one, or to an internal
  * address, would sail straight through.
+ *
+ * Returns the dispatcher that produced the final response alongside it:
+ * that dispatcher must stay open until the response body has been read
+ * (`handleNetFetch`), while every earlier hop's dispatcher — whose body is
+ * never consumed — is closed here as soon as its redirect is resolved.
  */
 async function fetchFollowingRedirects(
   initialTarget: URL,
   netDomains: string[],
   init: NetFetchRequestInit,
-): Promise<Response> {
+): Promise<NetFetchAttempt> {
   let target = initialTarget;
+  let previousDispatcher: Dispatcher | undefined;
 
   for (let hop = 0; hop <= NET_FETCH_MAX_REDIRECTS; hop++) {
-    await assertNetFetchTargetAllowed(target, netDomains);
+    const validated = await assertNetFetchTargetAllowed(target, netDomains);
 
-    const response = await fetch(target, { ...init, redirect: "manual" });
+    if (previousDispatcher) {
+      await previousDispatcher.close();
+    }
+    const dispatcher = pinnedDispatcher(validated.address, validated.family);
+    previousDispatcher = dispatcher;
+
+    const response = await fetch(target, {
+      ...init,
+      redirect: "manual",
+      dispatcher,
+    } as FetchInitWithDispatcher);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
-      return response;
+      return { response, dispatcher };
     }
 
     if (hop === NET_FETCH_MAX_REDIRECTS) {
+      await dispatcher.close();
       throw new Error(
         `net:fetch: exceeded ${NET_FETCH_MAX_REDIRECTS} redirects`,
       );
@@ -245,6 +375,7 @@ async function fetchFollowingRedirects(
 
     const location = response.headers.get("location");
     if (!location) {
+      await dispatcher.close();
       throw new Error(
         "net:fetch: redirect response is missing a Location header",
       );
@@ -253,6 +384,7 @@ async function fetchFollowingRedirects(
     try {
       target = new URL(location, target);
     } catch {
+      await dispatcher.close();
       throw new Error(
         `net:fetch: redirect to an unparsable location ${location}`,
       );
@@ -304,9 +436,9 @@ async function handleNetFetch(
     throw new Error(`net:fetch: unparsable url ${url}`);
   }
 
-  let response: Response;
+  let attempt: NetFetchAttempt;
   try {
-    response = await fetchFollowingRedirects(target, netDomains, {
+    attempt = await fetchFollowingRedirects(target, netDomains, {
       method: method ?? "GET",
       headers,
       body,
@@ -322,13 +454,21 @@ async function handleNetFetch(
     throw error;
   }
 
-  const bodyText = await readBodyTextCapped(response, NET_FETCH_BODY_CAP_BYTES);
-  const responseHeaders: Record<string, string> = {};
-  response.headers.forEach((value, key) => {
-    responseHeaders[key] = value;
-  });
+  const { response, dispatcher } = attempt;
+  try {
+    const bodyText = await readBodyTextCapped(
+      response,
+      NET_FETCH_BODY_CAP_BYTES,
+    );
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
 
-  return { status: response.status, headers: responseHeaders, bodyText };
+    return { status: response.status, headers: responseHeaders, bodyText };
+  } finally {
+    await dispatcher.close();
+  }
 }
 
 /** Reads a response body as text, truncated to `capBytes`. */
@@ -413,6 +553,12 @@ async function handleMessagesPost(
     id: `plugin-${pluginId}-${randomUUID()}`,
     role: "user",
     parts: [{ type: "text", text }],
+    // Attribution: the chat transcript otherwise has no way to tell a
+    // plugin-posted message apart from one the person using the chat typed
+    // themselves. `postedBy` rides along in the message's own metadata —
+    // stored verbatim by the existing persistence path — and the chat UI
+    // (session-chat-content.tsx) reads it back to show a small badge.
+    metadata: { postedBy: { kind: "plugin", pluginId } },
   };
 
   const outcome = await submitChatMessage({

@@ -30,16 +30,23 @@ function keyFor(column: unknown): keyof KvRow {
 
 const actualDrizzle = await import("drizzle-orm");
 
+type Order = { direction: "asc" | "desc" };
+
 mock.module("drizzle-orm", () => ({
   ...actualDrizzle,
   eq:
     (column: unknown, value: unknown): Predicate =>
     (row) =>
       row[keyFor(column)] === value,
+  gt:
+    (column: unknown, value: unknown): Predicate =>
+    (row) =>
+      (row[keyFor(column)] as string) > (value as string),
   and:
     (...predicates: Predicate[]): Predicate =>
     (row) =>
       predicates.every((predicate) => predicate(row)),
+  asc: (_column: unknown): Order => ({ direction: "asc" }),
 }));
 
 let kvStore: KvRow[] = [];
@@ -53,22 +60,53 @@ function makeKvRow(partial: Partial<KvRow>): KvRow {
   };
 }
 
+let insertCalls = 0;
+let updateCalls = 0;
+
 const fakeDb = {
   select: (_columns?: Record<string, unknown>) => ({
     from: (_table: unknown) => ({
-      where: (predicate: Predicate) =>
-        Promise.resolve(kvStore.filter(predicate).map((row) => ({ ...row }))),
+      where: (predicate: Predicate) => {
+        const filtered = () =>
+          kvStore.filter(predicate).map((row) => ({ ...row }));
+        return Object.assign(Promise.resolve(filtered()), {
+          orderBy: (_order?: Order) => {
+            const sorted = () =>
+              [...filtered()].sort((a, b) =>
+                a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
+              );
+            return Object.assign(Promise.resolve(sorted()), {
+              limit: (n: number) => Promise.resolve(sorted().slice(0, n)),
+            });
+          },
+        });
+      },
     }),
   }),
   insert: (_table: unknown) => ({
     values: (value: Partial<KvRow>) => {
-      kvStore.push(makeKvRow(value));
-      return Promise.resolve();
+      insertCalls++;
+      const row = makeKvRow(value);
+      return {
+        onConflictDoUpdate: (opts: { set: Partial<KvRow> }) => {
+          const existing = kvStore.find(
+            (candidate) =>
+              candidate.pluginId === row.pluginId && candidate.key === row.key,
+          );
+          if (existing) {
+            Object.assign(existing, opts.set);
+          } else {
+            kvStore.push(row);
+          }
+          return Promise.resolve();
+        },
+      };
     },
   }),
   update: (_table: unknown) => ({
     set: (patch: Partial<KvRow>) => ({
       where: (predicate: Predicate) => {
+        updateCalls++;
         for (const row of kvStore) {
           if (predicate(row)) {
             Object.assign(row, patch);
@@ -136,6 +174,42 @@ const dnsLookupSpy = mock(async (hostname: string) => {
 
 mock.module("node:dns/promises", () => ({
   lookup: dnsLookupSpy,
+}));
+
+/**
+ * `net:fetch` pins its outbound connection to the exact address
+ * `resolveValidatedAddress` validated, via an undici `Agent` whose
+ * `connect.lookup` ignores whatever hostname it's asked to resolve and
+ * always answers with that one address (see `pinnedDispatcher` in
+ * capability-handlers.ts). Recording every `Agent` constructor call lets
+ * a test invoke that captured `lookup` function directly and prove it does
+ * not re-resolve.
+ */
+interface FakeAgentOptions {
+  connect?: {
+    lookup?: (
+      hostname: string,
+      options: unknown,
+      callback: (error: Error | null, address: string, family: number) => void,
+    ) => void;
+  };
+}
+
+let agentConstructorCalls: FakeAgentOptions[] = [];
+let agentCloseCalls = 0;
+
+class FakeDispatcher {
+  constructor(opts: FakeAgentOptions) {
+    agentConstructorCalls.push(opts);
+  }
+  close(): Promise<void> {
+    agentCloseCalls++;
+    return Promise.resolve();
+  }
+}
+
+mock.module("undici", () => ({
+  Agent: FakeDispatcher,
 }));
 
 const { buildCapabilityHandlers } = await import("./capability-handlers");
@@ -223,13 +297,112 @@ describe("storage:kv", () => {
     await kv("plugin-a", { op: "set", key: "two", value: 2 });
     await kv("plugin-b", { op: "set", key: "one", value: "not-a" });
 
-    const listed = (await kv("plugin-a", { op: "list" })) as Array<{
-      key: string;
-      value: unknown;
-    }>;
+    const listed = (await kv("plugin-a", { op: "list" })) as {
+      items: Array<{ key: string; value: unknown }>;
+      nextAfterKey?: string;
+    };
 
-    expect(listed.map((row) => row.key).sort()).toEqual(["one", "two"]);
-    expect(listed.every((row) => row.value !== "not-a")).toBe(true);
+    expect(listed.items.map((row) => row.key).sort()).toEqual(["one", "two"]);
+    expect(listed.items.every((row) => row.value !== "not-a")).toBe(true);
+    expect(listed.nextAfterKey).toBeUndefined();
+  });
+
+  test("list pages results, capped at 1000, with an afterKey cursor", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    const keys = Array.from(
+      { length: 1005 },
+      (_, i) => `key-${String(i).padStart(4, "0")}`,
+    );
+    for (const key of keys) {
+      await kv("plugin-a", { op: "set", key, value: 1 });
+    }
+
+    const firstPage = (await kv("plugin-a", { op: "list" })) as {
+      items: Array<{ key: string; value: unknown }>;
+      nextAfterKey?: string;
+    };
+    expect(firstPage.items).toHaveLength(1000);
+    expect(firstPage.nextAfterKey).toBe(firstPage.items.at(-1)?.key);
+
+    const secondPage = (await kv("plugin-a", {
+      op: "list",
+      afterKey: firstPage.nextAfterKey,
+    })) as {
+      items: Array<{ key: string; value: unknown }>;
+      nextAfterKey?: string;
+    };
+    expect(secondPage.items).toHaveLength(5);
+    expect(secondPage.nextAfterKey).toBeUndefined();
+  });
+
+  test("rejects a key longer than 256 characters", async () => {
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await expect(
+      kv("plugin-a", { op: "get", key: "k".repeat(257) }),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a value larger than 64 KiB serialized", async () => {
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await expect(
+      kv("plugin-a", {
+        op: "set",
+        key: "big",
+        value: "x".repeat(64 * 1024 + 1),
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("accepts a value right at the 64 KiB boundary", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    // JSON-quoted, so the serialized size is the string length plus 2.
+    const value = "x".repeat(64 * 1024 - 2);
+    await expect(
+      kv("plugin-a", { op: "set", key: "boundary", value }),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  test("set is a single atomic upsert: no select-then-branch, and a second set on the same key updates in place", async () => {
+    kvStore = [];
+    insertCalls = 0;
+    updateCalls = 0;
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await kv("plugin-a", { op: "set", key: "counter", value: 1 });
+    await kv("plugin-a", { op: "set", key: "counter", value: 2 });
+
+    expect(await kv("plugin-a", { op: "get", key: "counter" })).toBe(2);
+    // Every `set` — insert or update — goes through `insert().onConflictDoUpdate()`;
+    // `db.update()` is never called directly by the handler.
+    expect(updateCalls).toBe(0);
+    expect(insertCalls).toBe(2);
+    expect(kvStore.filter((row) => row.key === "counter")).toHaveLength(1);
   });
 
   test("delete removes only the calling plugin's row", async () => {
@@ -541,6 +714,112 @@ describe("net:fetch", () => {
       restoreFetch();
     }
   });
+
+  test("pins the connection to the resolved address, ignoring whatever a later lookup would say", async () => {
+    dnsAddresses = {
+      "api.linear.app": [{ address: "203.0.113.5", family: 4 }],
+    };
+    agentConstructorCalls = [];
+    let capturedDispatcher: unknown;
+    withFetch(async (_input, init) => {
+      capturedDispatcher = (init as { dispatcher?: unknown } | undefined)
+        ?.dispatcher;
+      return new Response("ok", { status: 200 });
+    });
+
+    try {
+      const handlers = buildCapabilityHandlers(pluginRow());
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await netFetch("plugin-a", { url: "https://api.linear.app/graphql" });
+
+      expect(agentConstructorCalls).toHaveLength(1);
+      expect(capturedDispatcher).toBeInstanceOf(FakeDispatcher);
+
+      const lookup = agentConstructorCalls[0]?.connect?.lookup;
+      if (!lookup) {
+        throw new Error("Agent was not constructed with a connect.lookup");
+      }
+
+      // Even if undici's own connect logic asked to resolve a completely
+      // different (attacker-controlled) hostname, or the DNS record changed
+      // between the earlier check and now, the pinned lookup ignores the
+      // hostname argument entirely and always answers with the address
+      // `resolveValidatedAddress` already validated. That is what makes a
+      // second, independent resolution — the DNS-rebind attack — impossible
+      // here: there is no second resolution.
+      const results: Array<[Error | null, string, number]> = [];
+      lookup("evil.attacker.example", {}, (err, address, family) => {
+        results.push([err, address, family]);
+      });
+
+      expect(results).toEqual([[null, "203.0.113.5", 4]]);
+    } finally {
+      restoreFetch();
+      dnsAddresses = {};
+    }
+  });
+
+  test("closes the pinned dispatcher after a successful fetch", async () => {
+    dnsAddresses = {};
+    agentCloseCalls = 0;
+    withFetch(async () => new Response("ok", { status: 200 }));
+
+    try {
+      const handlers = buildCapabilityHandlers(pluginRow());
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await netFetch("plugin-a", { url: "https://api.linear.app/graphql" });
+
+      expect(agentCloseCalls).toBe(1);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("closes each hop's dispatcher when following a redirect, not just the final one", async () => {
+    dnsAddresses = {};
+    agentCloseCalls = 0;
+    withFetch(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "https://api.linear.app/start") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn.linear.app/end" },
+        });
+      }
+      return new Response("redirected-body", { status: 200 });
+    });
+
+    try {
+      const handlers = buildCapabilityHandlers(
+        pluginRow({
+          manifest: manifest({
+            netDomains: ["api.linear.app", "cdn.linear.app"],
+          }),
+        }),
+      );
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await netFetch("plugin-a", { url: "https://api.linear.app/start" });
+
+      // One dispatcher for the redirect hop, one for the final response —
+      // both closed: the first because its body is never read, the second
+      // once `readBodyTextCapped` finishes with it.
+      expect(agentCloseCalls).toBe(2);
+    } finally {
+      restoreFetch();
+    }
+  });
 });
 
 describe("messages:post", () => {
@@ -582,6 +861,38 @@ describe("messages:post", () => {
     expect(call.activeStreamId).toBeNull();
     expect(call.messages).toHaveLength(1);
     expect(call.messages[0]?.role).toBe("user");
+  });
+
+  test("attributes the posted message to the plugin via metadata.postedBy", async () => {
+    chatRow = { sessionId: "session-1", activeStreamId: null };
+    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    submitOutcome = {
+      kind: "streaming",
+      runId: "run-42",
+      stream: new ReadableStream(),
+    };
+    submitChatMessageSpy.mockClear();
+
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const messagesPost = handlers["messages:post"];
+    if (!messagesPost) {
+      throw new Error("messages:post handler missing");
+    }
+
+    await messagesPost("linear-sync", {
+      chatId: "chat-1",
+      text: "hello from a plugin",
+    });
+
+    const call = submitChatMessageSpy.mock.calls[0]?.[0] as {
+      messages: Array<{
+        metadata?: { postedBy?: { kind: "plugin"; pluginId: string } };
+      }>;
+    };
+    expect(call.messages[0]?.metadata?.postedBy).toEqual({
+      kind: "plugin",
+      pluginId: "linear-sync",
+    });
   });
 
   test("rejects a chatId with no backing chat", async () => {

@@ -480,6 +480,26 @@ export async function getChatById(chatId: string) {
 }
 
 /**
+ * Every chat whose owning session has not been archived.
+ *
+ * Backs the plugin event fan-out's (`lib/plugins/event-fanout.ts`)
+ * no-filter registration: a plugin host registered without an explicit
+ * `chatFilter` receives events for every chat still "live" in this sense,
+ * re-enumerated on each poll tick rather than cached, so a session archived
+ * mid-run drops out on the very next tick instead of lingering until the
+ * host restarts.
+ */
+export async function listActiveChatIds(): Promise<string[]> {
+  const rows = await db
+    .select({ id: chats.id })
+    .from(chats)
+    .innerJoin(sessions, eq(chats.sessionId, sessions.id))
+    .where(ne(sessions.status, "archived"));
+
+  return rows.map((row) => row.id);
+}
+
+/**
  * Get all chats for a session, ordered by most recent activity first.
  * Activity is tracked on chats.updatedAt and updated when new messages arrive.
  */

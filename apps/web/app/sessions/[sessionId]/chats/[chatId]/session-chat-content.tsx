@@ -56,6 +56,7 @@ import { SlashCommandDropdown } from "@/components/slash-command-dropdown";
 import { SnippetChip } from "@/components/snippet-chip";
 import { AssistantMessageGroups } from "@/components/assistant-message-groups";
 import { MessageModelPill } from "@/components/message-model-pill";
+import { PluginPostedBadge } from "@/components/plugin-posted-badge";
 import {
   PinnedTodoPanel,
   getLatestTodos,
@@ -2561,6 +2562,15 @@ export function SessionChatContent({
                                               {p.text}
                                             </p>
                                           </div>
+                                          {group.index === 0 &&
+                                            m.metadata?.postedBy?.kind ===
+                                              "plugin" && (
+                                              <PluginPostedBadge
+                                                pluginId={
+                                                  m.metadata.postedBy.pluginId
+                                                }
+                                              />
+                                            )}
                                           {group.index === 0 && (
                                             <MessageActions
                                               actions={[

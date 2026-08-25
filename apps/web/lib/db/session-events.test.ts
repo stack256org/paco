@@ -31,6 +31,8 @@ function keyFor(column: unknown): keyof Row {
 
 const actualDrizzle = await import("drizzle-orm");
 
+type Order = { direction: "asc" | "desc" };
+
 mock.module("drizzle-orm", () => ({
   ...actualDrizzle,
   eq:
@@ -45,7 +47,8 @@ mock.module("drizzle-orm", () => ({
     (...predicates: Predicate[]): Predicate =>
     (row) =>
       predicates.every((predicate) => predicate(row)),
-  asc: (_column: unknown) => undefined,
+  asc: (_column: unknown): Order => ({ direction: "asc" }),
+  desc: (_column: unknown): Order => ({ direction: "desc" }),
 }));
 
 /** A chat id with no row behind it, so a real FK would reject it. */
@@ -72,11 +75,22 @@ const fakeDb = {
   select: (_columns: unknown) => ({
     from: (_table: unknown) => ({
       where: (predicate: Predicate) => ({
-        orderBy: async (_order: unknown) =>
-          store
-            .filter(predicate)
-            .sort((a, b) => a.id - b.id)
-            .map((row) => ({ id: row.id, payload: row.payload })),
+        orderBy: (order?: Order) => {
+          const rows = () =>
+            store
+              .filter(predicate)
+              .sort((a, b) =>
+                order?.direction === "desc" ? b.id - a.id : a.id - b.id,
+              )
+              .map((row) => ({ id: row.id, payload: row.payload }));
+
+          // `latestSessionEventId` chains `.limit(1)`; `listSessionEvents`
+          // just awaits the orderBy call directly — a resolved promise with
+          // a `limit` method tacked on supports both call shapes.
+          return Object.assign(Promise.resolve(rows()), {
+            limit: (n: number) => Promise.resolve(rows().slice(0, n)),
+          });
+        },
       }),
     }),
   }),
@@ -87,6 +101,7 @@ mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 const {
   appendSessionEvents,
   appendSessionEventsStrict,
+  latestSessionEventId,
   listSessionEvents,
   listUnconsumedSteerEvents,
 } = await import("./session-events");
@@ -166,5 +181,29 @@ describe("session events", () => {
         { type: "steer/buffered", messageId: "x", text: "y" },
       ]),
     ).rejects.toThrow();
+  });
+});
+
+describe("latestSessionEventId", () => {
+  test("returns undefined for a chat with no events", async () => {
+    expect(await latestSessionEventId("chat-with-no-events")).toBeUndefined();
+  });
+
+  test("returns the highest id recorded for the chat, ignoring other chats", async () => {
+    const chatId = "chat-5";
+    await appendSessionEvents(chatId, [
+      { type: "steer/buffered", messageId: "a", text: "one" },
+    ]);
+    await appendSessionEvents(chatId, [
+      { type: "steer/buffered", messageId: "b", text: "two" },
+    ]);
+    await appendSessionEvents("chat-6", [
+      { type: "steer/buffered", messageId: "c", text: "three" },
+    ]);
+
+    const rows = await listSessionEvents(chatId);
+    const expectedLatestId = rows.at(-1)?.id;
+
+    expect(await latestSessionEventId(chatId)).toBe(expectedLatestId);
   });
 });

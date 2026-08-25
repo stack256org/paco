@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 import type { PluginHost } from "@paco/plugin-host";
 
 // The module under test is server-only; the marker package throws outside a
@@ -14,8 +14,10 @@ let listSessionEventsCalls: Array<{
   afterId: number | undefined;
 }> = [];
 
-function pushEvent(chatId: string, event: unknown): void {
-  store.push({ id: nextId++, chatId, event });
+function pushEvent(chatId: string, event: unknown): number {
+  const id = nextId++;
+  store.push({ id, chatId, event });
+  return id;
 }
 
 const listSessionEventsSpy = mock(
@@ -32,8 +34,23 @@ const listSessionEventsSpy = mock(
   },
 );
 
+const latestSessionEventIdSpy = mock(async (chatId: string) => {
+  const rows = store
+    .filter((row) => row.chatId === chatId)
+    .sort((a, b) => a.id - b.id);
+  return rows.at(-1)?.id;
+});
+
 mock.module("@/lib/db/session-events", () => ({
+  latestSessionEventId: latestSessionEventIdSpy,
   listSessionEvents: listSessionEventsSpy,
+}));
+
+let activeChatIds: string[] = [];
+const listActiveChatIdsSpy = mock(async () => activeChatIds);
+
+mock.module("@/lib/db/sessions", () => ({
+  listActiveChatIds: listActiveChatIdsSpy,
 }));
 
 const { SessionEventFanout } = await import("./event-fanout");
@@ -47,57 +64,88 @@ function fakeHost(): PluginHost & { deliverEvent: ReturnType<typeof mock> } {
 }
 
 describe("SessionEventFanout", () => {
-  test("delivers new events to a registered host and advances its cursor", async () => {
+  beforeEach(() => {
+    listSessionEventsSpy.mockClear();
+    latestSessionEventIdSpy.mockClear();
+    listActiveChatIdsSpy.mockClear();
+  });
+
+  test("a newly registered host does not replay a chat's prior history", async () => {
     store = [];
     nextId = 1;
     listSessionEventsCalls = [];
-    pushEvent("chat-1", { type: "turn/start", turnId: "t1" });
+    pushEvent("chat-1", { type: "turn/start", turnId: "t1" }); // pre-existing, before registration
 
     const fanout = new SessionEventFanout(1000);
     const host = fakeHost();
     fanout.register(host, ["chat-1"]);
 
+    // First poll only seeds the cursor to "now" — nothing delivered, and
+    // it doesn't even need to query listSessionEvents to know that.
     await fanout.poll();
+    expect(host.deliverEvent).not.toHaveBeenCalled();
+    expect(listSessionEventsSpy).not.toHaveBeenCalled();
+    expect(latestSessionEventIdSpy).toHaveBeenCalledWith("chat-1");
 
-    expect(host.deliverEvent).toHaveBeenCalledTimes(1);
-    expect(host.deliverEvent).toHaveBeenCalledWith(1, "chat-1", {
-      type: "turn/start",
-      turnId: "t1",
-    });
-
-    // A second poll with no new rows must not re-deliver the first event —
-    // the cursor advanced past it.
-    await fanout.poll();
-    expect(host.deliverEvent).toHaveBeenCalledTimes(1);
-
+    // A genuinely new event, landing after registration, is delivered.
     pushEvent("chat-1", { type: "turn/end", turnId: "t1" });
     await fanout.poll();
-    expect(host.deliverEvent).toHaveBeenCalledTimes(2);
-    expect(host.deliverEvent).toHaveBeenLastCalledWith(2, "chat-1", {
+    expect(host.deliverEvent).toHaveBeenCalledTimes(1);
+    expect(host.deliverEvent).toHaveBeenCalledWith(2, "chat-1", {
       type: "turn/end",
       turnId: "t1",
     });
 
+    // A third poll with no new rows must not re-deliver anything.
+    await fanout.poll();
+    expect(host.deliverEvent).toHaveBeenCalledTimes(1);
+
     const cursorCalls = listSessionEventsCalls.filter(
       (call) => call.chatId === "chat-1",
     );
-    expect(cursorCalls[0]?.afterId).toBeUndefined();
-    expect(cursorCalls[1]?.afterId).toBe(1);
-    expect(cursorCalls[2]?.afterId).toBe(1);
+    expect(cursorCalls[0]?.afterId).toBe(1);
+    expect(cursorCalls[1]?.afterId).toBe(2);
+  });
+
+  test("an explicit sinceId replays from that id on the first poll", async () => {
+    store = [];
+    nextId = 1;
+    pushEvent("chat-1", { type: "turn/start", turnId: "t1" });
+    pushEvent("chat-1", { type: "turn/end", turnId: "t1" });
+
+    const fanout = new SessionEventFanout(1000);
+    const host = fakeHost();
+    fanout.register(host, ["chat-1"], { sinceId: 0 });
+
+    await fanout.poll();
+
+    expect(host.deliverEvent).toHaveBeenCalledTimes(2);
+    expect(host.deliverEvent).toHaveBeenNthCalledWith(1, 1, "chat-1", {
+      type: "turn/start",
+      turnId: "t1",
+    });
+    expect(host.deliverEvent).toHaveBeenNthCalledWith(2, 2, "chat-1", {
+      type: "turn/end",
+      turnId: "t1",
+    });
+    // A sinceId replay never needs to ask for "the latest id" — the caller
+    // already named the starting point.
+    expect(latestSessionEventIdSpy).not.toHaveBeenCalled();
   });
 
   test("two hosts with different chat filters only see their own chat's events", async () => {
     store = [];
     nextId = 1;
-    pushEvent("chat-a", { type: "turn/start", turnId: "ta" });
-    pushEvent("chat-b", { type: "turn/start", turnId: "tb" });
 
     const fanout = new SessionEventFanout(1000);
     const hostA = fakeHost();
     const hostB = fakeHost();
     fanout.register(hostA, ["chat-a"]);
     fanout.register(hostB, ["chat-b"]);
+    await fanout.poll(); // seed both
 
+    pushEvent("chat-a", { type: "turn/start", turnId: "ta" });
+    pushEvent("chat-b", { type: "turn/start", turnId: "tb" });
     await fanout.poll();
 
     expect(hostA.deliverEvent).toHaveBeenCalledTimes(1);
@@ -114,35 +162,63 @@ describe("SessionEventFanout", () => {
     );
   });
 
-  test("a host without a chat filter receives events for every chat another registration tracks", async () => {
+  test("a host without a chat filter receives events from every active chat", async () => {
     store = [];
     nextId = 1;
-    pushEvent("chat-a", { type: "turn/start", turnId: "ta" });
+    activeChatIds = ["chat-a", "chat-b"];
 
     const fanout = new SessionEventFanout(1000);
-    const trackedHost = fakeHost();
-    const untrackedHost = fakeHost();
-    fanout.register(trackedHost, ["chat-a"]);
-    fanout.register(untrackedHost);
+    const host = fakeHost();
+    fanout.register(host); // no chatFilter
+    await fanout.poll(); // seed
 
+    pushEvent("chat-a", { type: "turn/start", turnId: "ta" });
+    pushEvent("chat-b", { type: "turn/start", turnId: "tb" });
     await fanout.poll();
 
-    expect(untrackedHost.deliverEvent).toHaveBeenCalledTimes(1);
-    expect(untrackedHost.deliverEvent).toHaveBeenCalledWith(
+    expect(host.deliverEvent).toHaveBeenCalledTimes(2);
+    expect(listActiveChatIdsSpy).toHaveBeenCalled();
+
+    activeChatIds = [];
+  });
+
+  test("a chat whose session is archived is excluded from the no-filter contract", async () => {
+    store = [];
+    nextId = 1;
+    // `listActiveChatIds` (lib/db/sessions.ts) is the source of truth for
+    // "active" — an archived session's chat simply never appears in its
+    // result, so the fan-out never even considers it.
+    activeChatIds = ["chat-live"];
+
+    const fanout = new SessionEventFanout(1000);
+    const host = fakeHost();
+    fanout.register(host);
+    await fanout.poll(); // seed
+
+    pushEvent("chat-live", { type: "turn/start", turnId: "live" });
+    pushEvent("chat-archived", { type: "turn/start", turnId: "archived" });
+    await fanout.poll();
+
+    expect(host.deliverEvent).toHaveBeenCalledTimes(1);
+    expect(host.deliverEvent).toHaveBeenCalledWith(
       expect.any(Number),
-      "chat-a",
-      { type: "turn/start", turnId: "ta" },
+      "chat-live",
+      { type: "turn/start", turnId: "live" },
     );
+
+    activeChatIds = [];
   });
 
   test("unregister stops a host from receiving further events", async () => {
     store = [];
     nextId = 1;
-    pushEvent("chat-1", { type: "turn/start", turnId: "t1" });
 
     const fanout = new SessionEventFanout(1000);
     const host = fakeHost();
     fanout.register(host, ["chat-1"]);
+    await fanout.poll(); // seed
+
+    pushEvent("chat-1", { type: "turn/start", turnId: "t1" });
     await fanout.poll();
     expect(host.deliverEvent).toHaveBeenCalledTimes(1);
 

@@ -1,7 +1,7 @@
 import "server-only";
 
 import { isSessionEvent, type SessionEvent } from "@paco/agent-backend";
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, asc, desc, eq, gt } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { sessionEvents } from "@/lib/db/schema";
 
@@ -93,4 +93,27 @@ export async function listUnconsumedSteerEvents(
     }
   }
   return pending;
+}
+
+/**
+ * The highest event id currently recorded for a chat, or `undefined` if it
+ * has none yet.
+ *
+ * Backs the plugin event fan-out's (`lib/plugins/event-fanout.ts`) cursor
+ * seeding: a plugin subscribing to a chat should see new events from the
+ * moment it subscribes, not the chat's entire history, so the fan-out seeds
+ * a fresh cursor to this value instead of leaving it `undefined` (which
+ * `listSessionEvents` treats as "from the beginning").
+ */
+export async function latestSessionEventId(
+  chatId: string,
+): Promise<number | undefined> {
+  const rows = await db
+    .select({ id: sessionEvents.id })
+    .from(sessionEvents)
+    .where(eq(sessionEvents.chatId, chatId))
+    .orderBy(desc(sessionEvents.id))
+    .limit(1);
+
+  return rows[0]?.id;
 }

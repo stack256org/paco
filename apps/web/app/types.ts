@@ -39,6 +39,13 @@ export type WebAgentMessageMetadata = {
   checkpointSha?: string;
   /** Whether the checkpoint captured uncommitted work in a commit of its own. */
   checkpointCommitted?: boolean;
+  /**
+   * Set when this message was posted by a plugin's `messages:post`
+   * capability (`lib/plugins/capability-handlers.ts`) rather than typed by
+   * the person using the chat. The chat UI reads this to show a small
+   * "via <pluginId>" badge on the message.
+   */
+  postedBy?: { kind: "plugin"; pluginId: string };
 };
 
 type WebAgentGitDataStatus = "pending" | "success" | "error" | "skipped";
