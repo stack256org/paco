@@ -126,6 +126,40 @@ describe("createCandidates", () => {
       expect(branchList.trim()).not.toBe("");
     }
   });
+
+  test("self-heals a stale branch and directory left by an aborted run", async () => {
+    const { root, repo, chatId, chatBranch } = await makeFixture("stale1");
+
+    // Simulate an earlier run that got as far as creating the branch and a
+    // directory at candidate 1's path, then died before (or without)
+    // registering a proper worktree there.
+    await git(repo, ["branch", `design/${chatId}/1`, chatBranch]);
+    const staleDir = path.join(root, "designs", chatId, "1");
+    await fs.mkdir(staleDir, { recursive: true });
+    await fs.writeFile(path.join(staleDir, "leftover.txt"), "stale\n");
+
+    const candidates = await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+
+    expect(candidates).toHaveLength(2);
+    const first = candidates[0];
+    if (!first) {
+      throw new Error("expected at least one candidate");
+    }
+
+    expect(await exists(path.join(first.worktreeDir, "leftover.txt"))).toBe(
+      false,
+    );
+    expect(await exists(path.join(first.worktreeDir, "chat.txt"))).toBe(true);
+    const head = (
+      await git(first.worktreeDir, ["symbolic-ref", "--short", "HEAD"])
+    ).trim();
+    expect(head).toBe(first.branch);
+  });
 });
 
 describe("removeCandidates", () => {
@@ -286,5 +320,69 @@ describe("acceptCandidate", () => {
 
     // Refused, so nothing was cleaned up.
     expect(await exists(winner.worktreeDir)).toBe(true);
+  });
+
+  test("refuses a merge conflict, aborts cleanly, and leaves candidates for retry", async () => {
+    const { root, repo, chatId, chatBranch, chatWorktree } =
+      await makeFixture("conflict1");
+    const candidates = await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+    const winner = candidates[0];
+    if (!winner) {
+      throw new Error("expected at least one candidate");
+    }
+
+    // The candidate and the chat branch both edit the same line of the same
+    // file, so merging one into the other conflicts.
+    await fs.writeFile(
+      path.join(winner.worktreeDir, "chat.txt"),
+      "candidate's edit\n",
+    );
+    await git(winner.worktreeDir, ["add", "."]);
+    await git(winner.worktreeDir, ["config", "user.email", "test@example.com"]);
+    await git(winner.worktreeDir, ["config", "user.name", "Test"]);
+    await git(winner.worktreeDir, ["commit", "-q", "-m", "Candidate edit"]);
+
+    await fs.writeFile(
+      path.join(chatWorktree, "chat.txt"),
+      "chat's own edit\n",
+    );
+    await git(chatWorktree, ["commit", "-qam", "Chat edit"]);
+
+    const result = await acceptCandidate({
+      sessionWorkspace: root,
+      chatId,
+      index: winner.index,
+      chatBranch,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("expected acceptCandidate to refuse");
+    }
+    expect(result.error.toLowerCase()).toContain("conflict");
+
+    // The abort left a clean worktree, still on the chat's branch.
+    const status = (await git(chatWorktree, ["status", "--porcelain"])).trim();
+    expect(status).toBe("");
+    const head = (
+      await git(chatWorktree, ["symbolic-ref", "--short", "HEAD"])
+    ).trim();
+    expect(head).toBe(chatBranch);
+
+    // Not cleaned up: the user needs the candidates to retry or inspect.
+    for (const candidate of candidates) {
+      expect(await exists(candidate.worktreeDir)).toBe(true);
+    }
+    const branchList = await git(repo, [
+      "branch",
+      "--list",
+      `design/${chatId}/*`,
+    ]);
+    expect(branchList.trim()).not.toBe("");
   });
 });

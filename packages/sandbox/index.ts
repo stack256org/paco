@@ -75,6 +75,7 @@ export {
 
 // worktree layout: one repository per session, one worktree per chat
 export {
+  assertPathSegment,
   CHATS_DIRNAME,
   type ChatWorktree,
   chatBranchName,

@@ -14,6 +14,7 @@ export {
   workspaceRoot,
 } from "./connect.ts";
 export {
+  assertPathSegment,
   CHATS_DIRNAME,
   chatBranchName,
   chatDir,

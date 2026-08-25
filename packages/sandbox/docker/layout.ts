@@ -36,11 +36,11 @@ export const CHATS_DIRNAME = "chats";
  * throws rather than sanitising: a chat id that needs cleaning up means an id
  * arrived from somewhere it should not have.
  */
-function assertPathSegment(chatId: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(chatId)) {
-    throw new Error(`Unsafe chat id for a path segment: ${chatId}`);
+export function assertPathSegment(pathSegment: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(pathSegment)) {
+    throw new Error(`Unsafe chat id for a path segment: ${pathSegment}`);
   }
-  return chatId;
+  return pathSegment;
 }
 
 /** The repository, as an absolute path under a workspace root. */

@@ -1,9 +1,10 @@
 import "server-only";
 
 import { execFile } from "node:child_process";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
-import { chatDir, repoDir } from "@paco/sandbox";
+import { assertPathSegment, chatDir, repoDir } from "@paco/sandbox";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,28 +26,14 @@ export interface DesignCandidate {
 /** Directory holding design-candidate worktrees, relative to the workspace root. */
 const DESIGNS_DIRNAME = "designs";
 
-/** Same shape as the chat-id guard in `packages/sandbox/docker/layout.ts`. */
-const CHAT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-
-/**
- * Reject anything that could escape the workspace when used as a path
- * segment. Chat ids are generated, so this should never fire.
- */
-function assertChatId(chatId: string): string {
-  if (!CHAT_ID_PATTERN.test(chatId)) {
-    throw new Error(`Unsafe chat id for a path segment: ${chatId}`);
-  }
-  return chatId;
-}
-
 /** The branch a design candidate works on: `design/<chatId>/<n>`. */
 function designBranch(chatId: string, index: number): string {
-  return `design/${assertChatId(chatId)}/${index}`;
+  return `design/${assertPathSegment(chatId)}/${index}`;
 }
 
 /** The prefix shared by every design-candidate branch for one chat. */
 function designBranchPrefix(chatId: string): string {
-  return `design/${assertChatId(chatId)}/`;
+  return `design/${assertPathSegment(chatId)}/`;
 }
 
 /** A design candidate's worktree, as an absolute path under the workspace root. */
@@ -55,10 +42,10 @@ function designWorktreeDir(
   chatId: string,
   index: number,
 ): string {
-  return path.join(
+  return path.posix.join(
     sessionWorkspace,
     DESIGNS_DIRNAME,
-    assertChatId(chatId),
+    assertPathSegment(chatId),
     String(index),
   );
 }
@@ -105,13 +92,49 @@ function gitOutput(result: GitResult): string {
 }
 
 /**
+ * Remove one candidate's worktree and branch, tolerating every way it could
+ * already be gone (or never have been a proper worktree at all).
+ *
+ * Shared by `removeCandidates` (routine cleanup) and `createCandidates`
+ * (self-healing a stale candidate before recreating it): both need "make
+ * sure index `n` is gone" rather than "assume it was created correctly last
+ * time."
+ *
+ * `git worktree remove` only handles a directory git actually registered.
+ * An aborted earlier run can leave a directory behind that was never
+ * registered (or whose registration was already pruned), and `worktree add`
+ * refuses to reuse a non-empty target — so this also removes the directory
+ * directly, best-effort, after asking git.
+ */
+async function removeCandidateAt(params: {
+  sessionWorkspace: string;
+  chatId: string;
+  index: number;
+  repo: string;
+}): Promise<void> {
+  const { sessionWorkspace, chatId, index, repo } = params;
+  const worktreeDir = designWorktreeDir(sessionWorkspace, chatId, index);
+
+  await git(["worktree", "remove", "--force", worktreeDir], repo);
+  await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {
+    // Best-effort: if this fails, the `worktree add` below will surface it.
+  });
+  await git(["branch", "-D", designBranch(chatId, index)], repo);
+}
+
+/**
  * Create `count` candidate worktrees, each on its own `design/<chatId>/<n>`
  * branch, branched from `baseBranch` (the chat's own branch).
  *
- * Not transactional: if one candidate fails partway through, the ones
- * already created are left in place rather than rolled back — call
- * `removeCandidates` to clean up, which tolerates exactly that half-created
- * state.
+ * Self-heals a stale candidate first: an earlier run that was aborted
+ * partway through can leave a `design/<chatId>/<n>` branch, worktree
+ * directory, or both, behind at the same path/name a fresh run needs — so
+ * each index is cleared with the same logic `removeCandidates` uses before
+ * `worktree add` runs.
+ *
+ * Not transactional beyond that: if one candidate fails partway through,
+ * the ones already created are left in place rather than rolled back — call
+ * `removeCandidates` to clean up, which tolerates that half-created state.
  */
 export async function createCandidates(params: {
   sessionWorkspace: string;
@@ -131,6 +154,8 @@ export async function createCandidates(params: {
     const index = i as 1 | 2 | 3;
     const branch = designBranch(chatId, index);
     const worktreeDir = designWorktreeDir(sessionWorkspace, chatId, index);
+
+    await removeCandidateAt({ sessionWorkspace, chatId, index, repo });
 
     const result = await git(
       ["worktree", "add", "-b", branch, worktreeDir, baseBranch],
@@ -153,9 +178,8 @@ export async function createCandidates(params: {
  *
  * Idempotent and safe when none exist: pruning and branch listing are no-ops
  * on a chat with no candidates, and removing a candidate whose directory was
- * deleted by hand (without `git worktree remove`) is handled by pruning
- * first, which drops git's record of a worktree whose directory is gone —
- * the removal attempt below then simply finds nothing registered there.
+ * deleted by hand (without `git worktree remove`) is one of the cases
+ * `removeCandidateAt` tolerates directly.
  *
  * Iterates every index a candidate could ever have (1..3) and asks git to
  * remove each one directly, rather than discovering candidates by matching
@@ -164,6 +188,11 @@ export async function createCandidates(params: {
  * a string comparison against the path as constructed here can miss a real
  * match. Passing the same path straight to `worktree remove` does not have
  * that problem — git resolves it the same way on the way in.
+ *
+ * The trailing `branch --list` sweep is a safety net for any
+ * `design/<chatId>/*` branch not covered by the fixed index range above
+ * (there should not be one, since candidates never go beyond index 3, but a
+ * branch is cheap to double-check for and expensive to leak).
  */
 export async function removeCandidates(params: {
   sessionWorkspace: string;
@@ -178,8 +207,7 @@ export async function removeCandidates(params: {
   await git(["worktree", "prune"], repo);
 
   for (const index of ALL_CANDIDATE_INDICES) {
-    const worktreeDir = designWorktreeDir(sessionWorkspace, chatId, index);
-    await git(["worktree", "remove", "--force", worktreeDir], repo);
+    await removeCandidateAt({ sessionWorkspace, chatId, index, repo });
   }
   await git(["worktree", "prune"], repo);
 
@@ -193,7 +221,10 @@ export async function removeCandidates(params: {
 
   const branches = branchList.stdout
     .split("\n")
-    .map((line) => line.replace(/^\*?\s*/, "").trim())
+    // `git branch --list` prefixes the checked-out branch with `*` and a
+    // branch checked out in another worktree with `+`; neither is part of
+    // the name.
+    .map((line) => line.replace(/^[*+]?\s*/, "").trim())
     .filter(Boolean);
 
   for (const branch of branches) {
@@ -208,6 +239,11 @@ export async function removeCandidates(params: {
  * Refuses when the chat's worktree has uncommitted changes: merging on top
  * of them would mix the candidate's commit with whatever was already there,
  * uncommitted and unreviewed.
+ *
+ * A merge conflict also refuses: the merge is aborted, leaving the chat
+ * worktree clean and still on `chatBranch`, and candidates are deliberately
+ * NOT removed — the user needs them (or their diff) to retry or resolve by
+ * hand, so cleanup only happens once a merge actually lands.
  */
 export async function acceptCandidate(params: {
   sessionWorkspace: string;
@@ -249,8 +285,10 @@ export async function acceptCandidate(params: {
     chatWorktree,
   );
   if (!merge.success) {
-    // Best-effort: leaves a clean worktree behind rather than a conflicted
-    // merge the caller never asked for.
+    // Best-effort: leaves a clean worktree, still on chatBranch, behind
+    // rather than a conflicted merge the caller never asked for. Candidates
+    // are left in place (no `removeCandidates` call) so the user can retry
+    // or inspect the conflict.
     await git(["merge", "--abort"], chatWorktree);
     return {
       ok: false,
