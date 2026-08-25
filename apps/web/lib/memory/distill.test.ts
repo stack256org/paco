@@ -7,11 +7,22 @@ import type { UIMessage } from "ai";
 
 // ── Mutable spy state ──────────────────────────────────────────────
 
-let listSessionEventsResult: Array<{ id: number; event: SessionEvent }> = [];
+let turnEventsResult: Array<{ id: number; event: SessionEvent }> = [];
 let deriveAssistantMessageResult: UIMessage | undefined;
 
 const spies = {
-  listSessionEvents: mock(() => Promise.resolve(listSessionEventsResult)),
+  /**
+   * The whole-chat reader. `distillTurn` must never reach for it: a chat's
+   * log holds one row per streamed chunk, so reading all of it once per turn
+   * costs more the longer the chat lives. It is stubbed to an empty log so a
+   * regression shows up as a skipped distillation, not as a passing test.
+   */
+  listSessionEvents: mock(() =>
+    Promise.resolve([] as Array<{ id: number; event: SessionEvent }>),
+  ),
+  listTurnSessionEvents: mock((_chatId: string, _turnId: string) =>
+    Promise.resolve(turnEventsResult),
+  ),
   deriveAssistantMessage: mock(() =>
     Promise.resolve(deriveAssistantMessageResult),
   ),
@@ -28,6 +39,7 @@ const spies = {
 
 mock.module("@/lib/db/session-events", () => ({
   listSessionEvents: spies.listSessionEvents,
+  listTurnSessionEvents: spies.listTurnSessionEvents,
 }));
 
 mock.module("@/lib/chat/derive-from-events", () => ({
@@ -121,9 +133,10 @@ beforeEach(async () => {
   originalPacoHome = process.env.PACO_HOME;
   process.env.PACO_HOME = dataDir;
 
-  listSessionEventsResult = [];
+  turnEventsResult = [];
   deriveAssistantMessageResult = undefined;
   spies.listSessionEvents.mockClear();
+  spies.listTurnSessionEvents.mockClear();
   spies.deriveAssistantMessage.mockClear();
   spies.generateObject.mockClear();
   spies.generateObject.mockImplementation(() =>
@@ -154,7 +167,7 @@ function call() {
 
 describe("distillTurn skip rules", () => {
   test("skips when the user prompt is under 20 chars", async () => {
-    listSessionEventsResult = [
+    turnEventsResult = [
       turnStartEvent({ prompt: "fix it" }),
       assistantChunkEvent(),
       usageEvent(600),
@@ -166,7 +179,7 @@ describe("distillTurn skip rules", () => {
   });
 
   test("skips when the turn produced no assistant/chunk events", async () => {
-    listSessionEventsResult = [turnStartEvent(), usageEvent(600)];
+    turnEventsResult = [turnStartEvent(), usageEvent(600)];
 
     await call();
 
@@ -174,7 +187,7 @@ describe("distillTurn skip rules", () => {
   });
 
   test("skips when the turn's total output tokens are under 500", async () => {
-    listSessionEventsResult = [
+    turnEventsResult = [
       turnStartEvent(),
       assistantChunkEvent(),
       usageEvent(200),
@@ -186,14 +199,14 @@ describe("distillTurn skip rules", () => {
   });
 
   test("never throws when skip conditions leave events empty", async () => {
-    listSessionEventsResult = [];
+    turnEventsResult = [];
     await expect(call()).resolves.toBeUndefined();
   });
 });
 
 describe("distillTurn happy path", () => {
   test("writes project and user memory from the structured output", async () => {
-    listSessionEventsResult = bigTurnEvents();
+    turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
       Promise.resolve({
@@ -230,7 +243,7 @@ describe("distillTurn happy path", () => {
   });
 
   test("writes nothing when the model returns empty arrays", async () => {
-    listSessionEventsResult = bigTurnEvents();
+    turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
       Promise.resolve({ project: [], user: [] }),
@@ -249,7 +262,7 @@ describe("distillTurn happy path", () => {
 
 describe("distillTurn prompt-injection framing", () => {
   test("delimits the transcript as data and frames it as untrusted in the instructions, even when it contains an injection attempt", async () => {
-    listSessionEventsResult = bigTurnEvents();
+    turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = {
       id: `distill-${TURN_ID}`,
       role: "assistant",
@@ -292,7 +305,7 @@ describe("distillTurn prompt-injection framing", () => {
 
 describe("distillTurn error handling", () => {
   test("swallows a throw from the structured-output call", async () => {
-    listSessionEventsResult = bigTurnEvents();
+    turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
       Promise.reject(new Error("CLI unavailable")),
@@ -307,7 +320,7 @@ describe("distillTurn error handling", () => {
   });
 
   test("swallows malformed structured output that fails schema validation", async () => {
-    listSessionEventsResult = bigTurnEvents();
+    turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
       Promise.resolve({ project: "not-an-array", user: [] }),
@@ -327,5 +340,18 @@ describe("distillTurn error handling", () => {
     );
 
     await expect(call()).resolves.toBeUndefined();
+  });
+});
+
+describe("distillTurn reads only the turn it is distilling", () => {
+  test("asks for the turn's slice and never the chat's whole log", async () => {
+    turnEventsResult = bigTurnEvents();
+    deriveAssistantMessageResult = assistantMessage();
+
+    await call();
+
+    expect(spies.listTurnSessionEvents).toHaveBeenCalledWith("chat-1", TURN_ID);
+    expect(spies.listSessionEvents).not.toHaveBeenCalled();
+    expect(spies.generateObject).toHaveBeenCalled();
   });
 });

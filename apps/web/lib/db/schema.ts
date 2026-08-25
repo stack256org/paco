@@ -460,6 +460,23 @@ export const sessionEvents = pgTable(
   },
   (table) => [
     index("session_events_chat_id_id_idx").on(table.chatId, table.id),
+    /**
+     * Serves every read that wants a *kind* of event rather than all of them
+     * — the steer poll (`listUnconsumedSteerEvents`, once a second for the
+     * whole of a steerable turn) and the turn-boundary lookup behind
+     * `listTurnSessionEvents`.
+     *
+     * Both are needle-in-haystack queries: the recorder writes one row per
+     * streamed chunk, so `assistant/chunk` swamps every other type, and
+     * without `type` in the index those queries degrade into a scan of the
+     * chat's entire history with the jsonb `payload` dragged along. `id`
+     * trails the key so the ordered range comes back without a sort.
+     */
+    index("session_events_chat_id_type_id_idx").on(
+      table.chatId,
+      table.type,
+      table.id,
+    ),
   ],
 );
 

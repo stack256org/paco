@@ -3,7 +3,7 @@ import { generateObject as generateStructuredOutput } from "@paco/claude-code";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import { z } from "zod";
 import { deriveAssistantMessage } from "@/lib/chat/derive-from-events";
-import { listSessionEvents } from "@/lib/db/session-events";
+import { listTurnSessionEvents } from "@/lib/db/session-events";
 import { projectMemoryDir, userMemoryDir } from "@/lib/memory/paths";
 import { writeMemory } from "@/lib/memory/store";
 
@@ -130,7 +130,16 @@ export async function distillTurn(params: {
   turnId: string;
 }): Promise<void> {
   try {
-    const rows = await listSessionEvents(params.chatId);
+    /*
+     * The turn's own slice, not the chat's history.
+     *
+     * Everything below filters on `params.turnId` anyway, so reading the
+     * whole log only ever bought rows this function throws away — and the
+     * log holds one row per streamed chunk, many carrying full tool outputs,
+     * so that read grew without bound as the chat aged while the useful part
+     * of it stayed the size of a single turn.
+     */
+    const rows = await listTurnSessionEvents(params.chatId, params.turnId);
     const events = rows.map((row) => row.event);
 
     const turnStart = events.find(
