@@ -166,6 +166,26 @@ const runAgentTurnSpy = mock((_params: RunAgentTurnCall) =>
 );
 mock.module("@/lib/agent/run-step", () => ({ runAgentTurn: runAgentTurnSpy }));
 
+/**
+ * The backend the chat runs on, as far as its capabilities go.
+ * `structuredOutput: false` is OpenFX: it returns free text whatever schema
+ * it is handed (`packages/agent-backend/interface.ts`).
+ */
+let backendStructuredOutput: boolean | undefined;
+const resolveBackendSpy = mock(() =>
+  Promise.resolve({
+    capabilities: () => ({
+      id: backendStructuredOutput === false ? "openfx" : "claude-code",
+      ...(backendStructuredOutput === undefined
+        ? {}
+        : { structuredOutput: backendStructuredOutput }),
+    }),
+  }),
+);
+mock.module("@/lib/agent/backend-factory", () => ({
+  resolveBackend: resolveBackendSpy,
+}));
+
 const sandboxExecSpy = mock(() =>
   Promise.resolve({ success: true, stdout: " file.ts | 2 +-\n" }),
 );
@@ -229,6 +249,8 @@ beforeEach(() => {
   getChatByIdSpy.mockClear();
   submitChatMessageSpy.mockClear();
   runAgentTurnSpy.mockClear();
+  resolveBackendSpy.mockClear();
+  backendStructuredOutput = undefined;
   sandboxExecSpy.mockClear();
   connectSandboxSpy.mockClear();
 
@@ -395,6 +417,49 @@ describe("runReviewerGate", () => {
     }
 
     expect(errorSpy).toHaveBeenCalled();
+  });
+
+  test("a backend that cannot produce structured output blocks the task instead of reviewing it", async () => {
+    backendStructuredOutput = false;
+    const task = makeTask();
+
+    const outcome = await runReviewerGate(task, "chat-1");
+
+    // Not "pass": a review that cannot run has not approved anything, and
+    // silently letting the work through is the one outcome a safety gate
+    // must never produce. Not "failed" either — the work is not known to be
+    // bad, the reviewer is unavailable — so the task parks for a human.
+    expect(outcome).toBe("fail");
+    expect(transitionTargets()).toEqual(["blocked"]);
+    expect(transitionCalls[0]?.patch?.resultSummary).toContain(
+      "structured output",
+    );
+    // And the reviewer turn is never run: it would burn a whole agent turn
+    // to produce an answer known in advance to be unusable.
+    expect(runAgentTurnSpy).not.toHaveBeenCalled();
+  });
+
+  test("a backend that does support structured output reviews as normal", async () => {
+    backendStructuredOutput = true;
+    turnResult = { isError: false, structuredOutput: { verdict: "pass" } };
+    const task = makeTask();
+
+    const outcome = await runReviewerGate(task, "chat-1");
+
+    expect(outcome).toBe("pass");
+    expect(runAgentTurnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("a backend that says nothing about structured output is trusted with it", async () => {
+    // `undefined` means yes — the assumption every backend written before
+    // the field existed was built on.
+    backendStructuredOutput = undefined;
+    turnResult = { isError: false, structuredOutput: { verdict: "pass" } };
+
+    const outcome = await runReviewerGate(makeTask(), "chat-1");
+
+    expect(outcome).toBe("pass");
+    expect(runAgentTurnSpy).toHaveBeenCalledTimes(1);
   });
 
   test("an illegal transition is not swallowed as a race — it surfaces", async () => {

@@ -20,6 +20,7 @@ function task(overrides: Partial<TaskBoardItem> = {}): TaskBoardItem {
     assignedAgent: null,
     origin: "user",
     reviewerRejections: 0,
+    resultSummary: null,
     isLeaf: true,
     ...overrides,
   };
@@ -164,6 +165,24 @@ describe("TaskColumns", () => {
     expect(renderColumns([task({ status: "running" })])).not.toContain(
       "Unblock",
     );
+  });
+
+  test("shows why a task blocked, so the operator is not left guessing", () => {
+    const html = renderColumns([
+      task({
+        status: "blocked",
+        resultSummary:
+          'Not reviewed: backend "openfx" cannot produce structured output.',
+      }),
+    ]);
+
+    expect(html).toContain("cannot produce structured output");
+  });
+
+  test("shows no summary line for a task that has none", () => {
+    const html = renderColumns([task({ resultSummary: null })]);
+
+    expect(html).not.toContain("task-result-summary");
   });
 
   test("renders loading skeletons rather than empty columns while tasks is null", () => {

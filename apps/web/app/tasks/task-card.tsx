@@ -75,6 +75,16 @@ export function TaskCard({
       <div className="card-body gap-2 p-3">
         <p className="text-sm font-medium leading-snug">{task.title}</p>
 
+        {task.resultSummary ? (
+          <p
+            className="line-clamp-3 text-base-content/60 text-xs"
+            data-testid="task-result-summary"
+            title={task.resultSummary}
+          >
+            {task.resultSummary}
+          </p>
+        ) : null}
+
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="badge badge-soft badge-xs gap-1" title="Session">
             {task.sessionTitle}

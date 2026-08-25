@@ -80,6 +80,13 @@ export type TaskBoardItem = {
   assignedAgent: string | null;
   origin: TaskOrigin;
   reviewerRejections: number;
+  /**
+   * Why the task ended where it did — the reviewer's approval, the problems
+   * that blocked it, the error that failed it. Shown on the card: a blocked
+   * card whose reason lives only in a server log is one an operator cannot
+   * act on, which is the whole reason it is blocked.
+   */
+  resultSummary: string | null;
   /** A task with children is a planner grouping node, never startable itself. */
   isLeaf: boolean;
 };
@@ -132,6 +139,7 @@ export async function listOrgTasksAction(): Promise<TaskBoardItem[]> {
     assignedAgent: row.assignedAgent,
     origin: row.origin,
     reviewerRejections: row.reviewerRejections,
+    resultSummary: row.resultSummary,
     isLeaf: !parentIds.has(row.id),
   }));
 }

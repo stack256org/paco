@@ -5,7 +5,10 @@ import type { UIMessage } from "ai";
 import { z } from "zod";
 import { submitChatMessage } from "@/lib/chat/submit-message";
 import { approvalToken } from "@/lib/agent/approvals/token";
-import type { BackendSelectionInput } from "@/lib/agent/backend-factory";
+import {
+  type BackendSelectionInput,
+  resolveBackend,
+} from "@/lib/agent/backend-factory";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
 import { appUrl } from "@/lib/app-url";
@@ -461,14 +464,59 @@ export async function runReviewerGate(
     return "fail";
   }
 
-  await applyTransition(task.organizationId, task.id, "review");
-
   // Read for its `backend` only — which backend this chat's turns run on,
   // so the review runs there too. Best-effort: a chat row that cannot be
   // read is not a reason to abandon a review that otherwise has everything
   // it needs, so this falls through to `runAgentTurn`'s own default rather
   // than failing the gate.
   const chat = await getChatById(chatId);
+
+  /*
+   * Can this chat's backend actually produce a verdict?
+   *
+   * The reviewer answers through `structuredOutput`, and a backend that
+   * reports `structuredOutput: false` (OpenFX) returns free text no matter
+   * what schema it is handed — `runAgentTurn` warns and hands back
+   * `undefined`. Running the turn anyway would spend a full agent turn to
+   * reach an answer that is unusable by construction, and this gate would
+   * then read that `undefined` as "the reviewer said the work is bad" and
+   * reject it, three times over, before blocking.
+   *
+   * So the check happens BEFORE the turn, and the task blocks for a human.
+   * Each of the alternatives is worse:
+   *
+   * - Skipping the gate and passing the task is the one outcome a safety
+   *   gate must never produce silently. A review that did not run has not
+   *   approved anything.
+   * - Failing the task says the WORK is bad. It is not known to be bad;
+   *   the reviewer was unavailable. `failed` also offers Retry, which
+   *   re-runs the whole task straight back into the same wall.
+   * - Parsing a verdict out of free text degrades a gate whose input is
+   *   explicitly untrusted (see `buildReviewerPrompt`) into one that can be
+   *   talked out of a rejection by the diff it is reviewing.
+   *
+   * `blocked` says what is true: the work is done, nobody has reviewed it,
+   * and a person must. `resultSummary` names the backend so the operator is
+   * not left guessing — the board shows it on the card.
+   *
+   * Resolved here rather than threaded out of `runAgentTurn`: `params.backend`
+   * there is a test seam ("production never sets this"), so this asks the
+   * factory the same question the turn will ask it.
+   */
+  const backend = await resolveBackend({ backend: chat?.backend });
+  const backendCapabilities = backend.capabilities();
+  if (backendCapabilities.structuredOutput === false) {
+    await applyTransition(task.organizationId, task.id, "blocked", {
+      resultSummary:
+        `Not reviewed: backend "${backendCapabilities.id}" cannot produce structured output, so the reviewer cannot return a verdict. Review this work yourself before unblocking.`.slice(
+          0,
+          RESULT_SUMMARY_MAX_LENGTH,
+        ),
+    });
+    return "fail";
+  }
+
+  await applyTransition(task.organizationId, task.id, "review");
 
   const { verdict, problems, summary } = await runReviewerTurn(
     task,
