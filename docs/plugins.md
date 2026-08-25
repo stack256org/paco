@@ -110,18 +110,31 @@ above) — ask the agent to run it, or invoke it directly, with:
 {
   "botToken": "xoxb-...",
   "signingSecret": "...",
-  "defaultSessionId": "<a Paco session id>",
   "appUrl": "https://paco.example.com",
-  "channelMap": { "C0SLACKCHANNEL": "<a different session id>" }
+  "channelMap": { "C0SLACKCHANNEL": "<a Paco session id>" },
+  "allowedUserIds": ["U0ALICE"]
 }
 ```
 
 - `botToken` is validated against Slack's `auth.test` before anything is
   stored — a bad token is reported back and nothing is written.
-- `signingSecret`, the bot token, and `defaultSessionId` are stored in this
-  plugin's `storage:kv`, scoped to it alone.
-- `channelMap` is optional: a mention in a listed Slack channel routes to
-  that session instead of `defaultSessionId`.
+- That same `auth.test` call names the **workspace** the token belongs to,
+  and this installation is bound to it. Slack signs every workspace's
+  webhook with the same app signing secret, so a valid signature says
+  "from Slack", not "from your Slack" — an event carrying any other
+  `team_id`, or none, is refused with `403`. If Slack returns no `team_id`,
+  setup fails and stores nothing rather than leaving the channel accepting
+  events it cannot vet.
+- `channelMap` is **required, with at least one entry**. It is the channel
+  authorization: a mention in a channel that is not listed starts nothing
+  and says so. There is deliberately no catch-all session — an `app_mention`
+  ends in a task with `autoStart: true`, i.e. an agent turn on the
+  operator's own host, and inviting a bot into a channel is not an
+  authorization decision the operator ever made. Mapping the channel is.
+- `allowedUserIds` is optional and narrows further: with it, only those
+  Slack users can start work; without it, any member of a mapped channel
+  can. Mentions authored by a bot (`bot_id`) are always ignored, silently,
+  so two bots cannot mention each other into an unbounded run of turns.
 - The result includes **`webhookUrl`** —
   `<appUrl>/api/channels/slack/events` — which is what goes into Slack next.
 
@@ -138,6 +151,7 @@ add `app_mention`. Save.
 | --- | --- | --- |
 | Slack signing secret | `slack_setup`'s `signingSecret` input | Verifies Slack's own request signature. Never sent to Slack. |
 | Slack bot token | `slack_setup`'s `botToken` input | Used to call `chat.postMessage`/`auth.test`. Never sent anywhere but `slack.com`. |
+| Slack workspace id | derived, from `auth.test`'s `team_id` | Not an input. Bounds which workspace's events this installation will act on. |
 | Paco ingress secret | *(not used by this channel)* | The `events` channel is declared `self-verified`, so Slack's own request signature is the gate. See below. |
 | Webhook URL | Slack's Event Subscriptions **Request URL** field | Returned by `slack_setup`; also constructable by hand as `<appUrl>/api/channels/slack/events`. |
 
@@ -163,6 +177,11 @@ captured request cannot be replayed. That check is the only thing between
 the public internet and this plugin's handler, which is why it fails closed
 on a missing header, a malformed signature, an unset signing secret, or an
 unparseable timestamp.
+
+It is authentication, though, not authorization: it proves Slack sent the
+request, and nothing about which workspace, channel or person it came from.
+Those three are checked separately — see the `team_id` binding, `channelMap`
+and `allowedUserIds` under `slack_setup` above.
 
 The raw body matters: Slack signs the exact bytes it sent, so the ingress
 protocol carries `rawBody` alongside the parsed payload. Re-serialising the

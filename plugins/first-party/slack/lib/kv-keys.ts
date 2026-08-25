@@ -15,12 +15,35 @@ export const KV_SIGNING_SECRET = "slack:signing-secret";
  * Slack Web API. */
 export const KV_BOT_TOKEN = "slack:bot-token";
 
-/** Set once by `tools/slack-setup.ts`; the session a mention maps to when
- * its channel has no explicit entry in `slack:channel-map:<channelId>`. */
-export const KV_DEFAULT_SESSION = "slack:default-session";
+/**
+ * Set once by `tools/slack-setup.ts` from `auth.test`'s `team_id`; the ONE
+ * Slack workspace this installation will act for.
+ *
+ * A valid v0 signature proves a request came from Slack, not that it came
+ * from a workspace this operator installed the app into. Without this,
+ * `channels/events.ts` would act on any signature-valid `app_mention`.
+ * Absent means not configured, and not configured means refuse — never
+ * "any workspace".
+ */
+export const KV_TEAM_ID = "slack:team-id";
 
-/** Slack channel id -> Paco session id, set by `tools/slack-setup.ts`'s
- * optional `channelMap` input. */
+/**
+ * Optional: the Slack user ids allowed to start work, as a string array.
+ *
+ * Absent or empty means every member of a mapped channel may — which is
+ * already a deliberate grant, since a channel only routes anywhere at all
+ * once an admin has mapped it. Present means only these people.
+ */
+export const KV_ALLOWED_USERS = "slack:allowed-users";
+
+/**
+ * Slack channel id -> Paco session id, set by `tools/slack-setup.ts`'s
+ * `channelMap` input.
+ *
+ * This mapping IS the channel authorization: a mention in a channel with no
+ * entry here starts nothing. There is deliberately no catch-all — see
+ * `channels/events.ts`'s `resolveSessionId`.
+ */
 export function kvChannelMapKey(slackChannelId: string): string {
   return `slack:channel-map:${slackChannelId}`;
 }

@@ -12,6 +12,9 @@ export interface SlackApiResponse {
   error?: string;
   ts?: string;
   team?: string;
+  /** The workspace id (`auth.test`'s `team_id`). `channels/events.ts` binds
+   * to it so a signature-valid event from another workspace is refused. */
+  teamId?: string;
   botUserId?: string;
 }
 
@@ -24,6 +27,7 @@ function parseSlackApiResponse(body: string): SlackApiResponse {
         error: typeof parsed.error === "string" ? parsed.error : undefined,
         ts: typeof parsed.ts === "string" ? parsed.ts : undefined,
         team: typeof parsed.team === "string" ? parsed.team : undefined,
+        teamId: typeof parsed.team_id === "string" ? parsed.team_id : undefined,
         botUserId:
           typeof parsed.user_id === "string" ? parsed.user_id : undefined,
       };

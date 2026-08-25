@@ -1,9 +1,10 @@
 import type { PluginApi, PluginToolModule } from "@paco/plugin-host";
-import { isRecord } from "../lib/guards.ts";
+import { isRecord, isStringArray } from "../lib/guards.ts";
 import {
+  KV_ALLOWED_USERS,
   KV_BOT_TOKEN,
-  KV_DEFAULT_SESSION,
   KV_SIGNING_SECRET,
+  KV_TEAM_ID,
   kvChannelMapKey,
 } from "../lib/kv-keys.ts";
 import { slackAuthTest } from "../lib/slack-api.ts";
@@ -17,57 +18,78 @@ import { slackAuthTest } from "../lib/slack-api.ts";
 export interface SlackSetupInput {
   botToken: string;
   signingSecret: string;
-  defaultSessionId: string;
   appUrl: string;
-  channelMap?: Record<string, string>;
+  /**
+   * Slack channel id -> Paco session id. Required and non-empty: a mention
+   * only starts work in a channel listed here, and there is no catch-all
+   * session behind it (see `channels/events.ts`'s `resolveSessionId`).
+   */
+  channelMap: Record<string, string>;
+  /** Optional: narrow further, to these Slack user ids only. */
+  allowedUserIds?: string[];
 }
 
 export interface SlackSetupResult {
   ok: boolean;
   webhookUrl?: string;
   team?: string;
+  /** The workspace this installation is now bound to. */
+  teamId?: string;
   botUserId?: string;
   error?: string;
+}
+
+function parseChannelMap(raw: unknown): Record<string, string> | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const normalized: Record<string, string> = {};
+  for (const [slackChannelId, sessionId] of Object.entries(raw)) {
+    if (
+      slackChannelId.length === 0 ||
+      typeof sessionId !== "string" ||
+      sessionId.length === 0
+    ) {
+      return undefined;
+    }
+    normalized[slackChannelId] = sessionId;
+  }
+  // An empty map is not "map nothing yet" — it is a setup that authorizes no
+  // channel at all, which is a mistake worth reporting rather than storing.
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function parseInput(raw: unknown): SlackSetupInput | undefined {
   if (!isRecord(raw)) {
     return undefined;
   }
-  const { botToken, signingSecret, defaultSessionId, appUrl, channelMap } = raw;
+  const { botToken, signingSecret, appUrl, channelMap, allowedUserIds } = raw;
   if (
     typeof botToken !== "string" ||
     botToken.length === 0 ||
     typeof signingSecret !== "string" ||
     signingSecret.length === 0 ||
-    typeof defaultSessionId !== "string" ||
-    defaultSessionId.length === 0 ||
     typeof appUrl !== "string" ||
     appUrl.length === 0
   ) {
     return undefined;
   }
 
-  if (channelMap === undefined) {
-    return { botToken, signingSecret, defaultSessionId, appUrl };
-  }
-  if (!isRecord(channelMap)) {
+  const parsedChannelMap = parseChannelMap(channelMap);
+  if (!parsedChannelMap) {
     return undefined;
   }
 
-  const normalizedChannelMap: Record<string, string> = {};
-  for (const [slackChannelId, sessionId] of Object.entries(channelMap)) {
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
-      return undefined;
-    }
-    normalizedChannelMap[slackChannelId] = sessionId;
+  if (allowedUserIds !== undefined && !isStringArray(allowedUserIds)) {
+    return undefined;
   }
+
   return {
     botToken,
     signingSecret,
-    defaultSessionId,
     appUrl,
-    channelMap: normalizedChannelMap,
+    channelMap: parsedChannelMap,
+    ...(allowedUserIds === undefined ? {} : { allowedUserIds }),
   };
 }
 
@@ -86,7 +108,7 @@ async function execute(
     return {
       ok: false,
       error:
-        "invalid input: botToken, signingSecret, defaultSessionId and appUrl are all required",
+        "invalid input: botToken, signingSecret, appUrl and a non-empty channelMap are all required",
     };
   }
 
@@ -98,13 +120,26 @@ async function execute(
     };
   }
 
+  // The workspace binding is not optional configuration: without it,
+  // `channels/events.ts` has no way to tell a mention in the operator's
+  // workspace from a mention in anyone else's. Nothing is stored if Slack
+  // did not name one, so a half-configured installation cannot be left
+  // accepting events it should refuse.
+  if (!authTest.teamId) {
+    return {
+      ok: false,
+      error:
+        "Slack's auth.test did not return a team_id, so this installation cannot be bound to a workspace. Nothing was stored.",
+    };
+  }
+
   await Promise.all([
     api.kv.set(KV_BOT_TOKEN, parsed.botToken),
     api.kv.set(KV_SIGNING_SECRET, parsed.signingSecret),
-    api.kv.set(KV_DEFAULT_SESSION, parsed.defaultSessionId),
-    ...Object.entries(parsed.channelMap ?? {}).map(
-      ([slackChannelId, sessionId]) =>
-        api.kv.set(kvChannelMapKey(slackChannelId), sessionId),
+    api.kv.set(KV_TEAM_ID, authTest.teamId),
+    api.kv.set(KV_ALLOWED_USERS, parsed.allowedUserIds ?? []),
+    ...Object.entries(parsed.channelMap).map(([slackChannelId, sessionId]) =>
+      api.kv.set(kvChannelMapKey(slackChannelId), sessionId),
     ),
   ]);
 
@@ -112,6 +147,7 @@ async function execute(
     ok: true,
     webhookUrl: buildWebhookUrl(parsed.appUrl),
     team: authTest.team,
+    teamId: authTest.teamId,
     botUserId: authTest.botUserId,
   };
 }
@@ -119,7 +155,7 @@ async function execute(
 const slackSetupTool: PluginToolModule = {
   name: "slack_setup",
   description:
-    "One-time Slack setup: validates the bot token, stores the signing secret and session routing, and returns the webhook URL to paste into Slack's Event Subscriptions.",
+    "One-time Slack setup: validates the bot token, binds this installation to that token's Slack workspace, stores the signing secret and per-channel session routing, and returns the webhook URL to paste into Slack's Event Subscriptions.",
   inputSchema: {
     type: "object",
     properties: {
@@ -131,21 +167,24 @@ const slackSetupTool: PluginToolModule = {
         type: "string",
         description: "Slack app signing secret, from Basic Information.",
       },
-      defaultSessionId: {
-        type: "string",
-        description: "Paco session used for channels with no explicit mapping.",
-      },
       appUrl: {
         type: "string",
         description: "Paco's public origin, e.g. https://paco.example.com.",
       },
       channelMap: {
         type: "object",
-        description: "Optional Slack channel id -> Paco session id overrides.",
+        description:
+          "Slack channel id -> Paco session id. Required, and at least one entry: a mention only starts work in a channel listed here.",
         additionalProperties: { type: "string" },
       },
+      allowedUserIds: {
+        type: "array",
+        description:
+          "Optional Slack user ids allowed to start work. Omit to allow any member of a mapped channel.",
+        items: { type: "string" },
+      },
     },
-    required: ["botToken", "signingSecret", "defaultSessionId", "appUrl"],
+    required: ["botToken", "signingSecret", "appUrl", "channelMap"],
     additionalProperties: false,
   },
   execute,

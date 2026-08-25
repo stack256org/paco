@@ -4,11 +4,12 @@ import type {
   PluginChannelRequest,
   PluginChannelResponse,
 } from "@paco/plugin-host";
-import { isRecord } from "../lib/guards.ts";
+import { isRecord, isStringArray } from "../lib/guards.ts";
 import {
   isStoredThread,
-  KV_DEFAULT_SESSION,
+  KV_ALLOWED_USERS,
   KV_SIGNING_SECRET,
+  KV_TEAM_ID,
   kvChannelMapKey,
   kvChatTaskKey,
   kvThreadIndexKey,
@@ -34,18 +35,72 @@ function stripMentionPrefix(text: string): string {
   return text.replace(/^(?:\s*<@[A-Za-z0-9]+>\s*)+/, "").trim();
 }
 
+/**
+ * The session a channel is wired to, or `undefined`.
+ *
+ * There is deliberately NO fallback to a catch-all session. This handler
+ * ends in `tasks.create({autoStart: true})` — an agent turn on the
+ * operator's own host — so the question "may this channel start work?" has
+ * to have been answered by a person, once, in advance.
+ *
+ * A default session answered it implicitly for every channel at once, which
+ * made "somebody invited the bot into a channel" equivalent to "somebody
+ * may run an agent on the operator's machine". Inviting a bot is not an
+ * authorization decision an operator makes; mapping a channel is. So an
+ * unmapped channel routes nowhere, and says so.
+ */
 async function resolveSessionId(
   api: PluginApi,
   channel: string,
 ): Promise<string | undefined> {
   const mapped = await api.kv.get(kvChannelMapKey(channel));
-  if (typeof mapped === "string" && mapped.length > 0) {
-    return mapped;
+  return typeof mapped === "string" && mapped.length > 0 ? mapped : undefined;
+}
+
+/**
+ * Whether this `event_callback` came from the workspace this installation
+ * was set up for.
+ *
+ * The v0 signature authenticates Slack, not a workspace: any workspace the
+ * app is installed into signs with the SAME app signing secret. Without this
+ * check, anyone who could get the bot into any workspace could reach the
+ * handler below.
+ *
+ * Fails closed in both directions — an unconfigured installation (no stored
+ * team id) and an event that names no workspace are both refused, never
+ * treated as a match.
+ */
+async function isConfiguredWorkspace(
+  api: PluginApi,
+  body: Record<string, unknown>,
+): Promise<boolean> {
+  const configured = await api.kv.get(KV_TEAM_ID);
+  if (typeof configured !== "string" || configured.length === 0) {
+    api.log(
+      "error",
+      "slack: no workspace is bound; run slack_setup before events can be accepted",
+    );
+    return false;
   }
-  const fallback = await api.kv.get(KV_DEFAULT_SESSION);
-  return typeof fallback === "string" && fallback.length > 0
-    ? fallback
-    : undefined;
+  return body.team_id === configured;
+}
+
+/**
+ * Whether `userId` may start work, given the optionally configured
+ * allowlist.
+ *
+ * No allowlist means every member of a MAPPED channel may — that channel
+ * having been mapped by an admin is itself the grant. A stored value that
+ * is not a string array is treated as no allowlist rather than as an empty
+ * one, so a corrupted key cannot lock the operator out of their own bot;
+ * the mapped-channel gate still stands in front of it either way.
+ */
+async function isAllowedUser(api: PluginApi, userId: string): Promise<boolean> {
+  const stored = await api.kv.get(KV_ALLOWED_USERS);
+  if (!isStringArray(stored) || stored.length === 0) {
+    return true;
+  }
+  return stored.includes(userId);
 }
 
 /**
@@ -132,6 +187,27 @@ async function handleAppMention(
     return;
   }
 
+  // Authored by a bot rather than a person. Answering would let two bots
+  // mention each other into an unbounded run of agent turns, so this one is
+  // dropped in silence — a reply is exactly what must not happen.
+  if (typeof event.bot_id === "string") {
+    api.log(
+      "warn",
+      `slack: ignoring app_mention authored by bot ${event.bot_id}`,
+    );
+    return;
+  }
+
+  const user = typeof event.user === "string" ? event.user : undefined;
+  if (!user) {
+    api.log("warn", "slack: ignoring app_mention with no author to authorize");
+    return;
+  }
+  if (!(await isAllowedUser(api, user))) {
+    api.log("warn", `slack: ${user} is not on the Slack allowlist`);
+    return;
+  }
+
   const goal = stripMentionPrefix(text);
   const rootThreadTs = threadTs ?? ts;
 
@@ -155,7 +231,7 @@ async function handleAppMention(
       api,
       channel,
       rootThreadTs,
-      "No session is configured for this channel. Ask an admin to run slack_setup.",
+      "This channel is not connected to a Paco session. Ask an admin to map it with slack_setup.",
     );
     return;
   }
@@ -197,6 +273,17 @@ async function handle(
   }
 
   if (body.type === "event_callback") {
+    // Authorization before deduplication: a retry of an event this
+    // installation was never entitled to act on is still not ours.
+    if (!(await isConfiguredWorkspace(api, body))) {
+      return {
+        status: 403,
+        body: {
+          error: "this event is not from the configured Slack workspace",
+        },
+      };
+    }
+
     if (request.headers[RETRY_HEADER]) {
       return { status: 200, body: {} };
     }
