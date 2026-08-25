@@ -27,11 +27,16 @@ const RENDERER_CAPABILITY = "ui:panel";
  *
  * `discoverPlugin`'s `slots.renderers` is a list of absolute
  * `renderers/<toolName>.html` paths (`packages/plugin-kit/discovery.ts`);
- * this strips each down to the bare tool name `resolvePluginRenderer`
- * matches on. A plugin that discovers with no renderer files at all is left
- * out entirely rather than included with an empty `toolNames` — nothing
- * downstream needs to know it exists as a renderer candidate if it isn't
- * one.
+ * this strips each down to the bare tool name. Bare is correct and must
+ * stay that way: a plugin author names a renderer file after the tool they
+ * registered, not after the `mcp__paco-plugins__<pluginId>__` name Claude
+ * Code later exposes it under. `resolvePluginRenderer`
+ * (`app/lib/render-tool.tsx`) rebuilds that full name from `pluginId` plus
+ * each entry here and compares it to the incoming tool name, so this half
+ * of the pair stays the file name on disk. A plugin that discovers with no
+ * renderer files at all is left out entirely rather than included with an
+ * empty `toolNames` — nothing downstream needs to know it exists as a
+ * renderer candidate if it isn't one.
  *
  * Never throws: this is discovery, run once per page load
  * (`app/sessions/[sessionId]/chats/[chatId]/page.tsx`), and a chat page must

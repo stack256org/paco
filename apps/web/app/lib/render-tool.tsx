@@ -70,12 +70,45 @@ export type PluginRendererMatch = {
 };
 
 /**
+ * The prefix Claude Code puts on every tool it exposes from Paco's plugin
+ * MCP bridge.
+ *
+ * `mcp__<serverName>__<toolName>`, where the server name is the single
+ * aggregate server `buildPluginMcpConfig` registers ("paco-plugins",
+ * `lib/plugins/mcp-bridge.ts`) and the tool name is the bridge's own
+ * `pluginId + "__" + tool` join (`scripts/plugin-mcp-server.ts`'s
+ * `toolFullName`). So a plugin tool reaches dispatch as
+ * `mcp__paco-plugins__<pluginId>__<tool>` and never, under any
+ * circumstances, as the bare `<tool>`.
+ *
+ * Matching used to compare a bare `<tool>` against the bare names derived
+ * from `renderers/<tool>.html` (`lib/plugins/renderer-info.ts`), which is
+ * a comparison that can never be true in production — every plugin
+ * renderer silently fell through to `DefaultRenderer`. The tests missed it
+ * by constructing bare names by hand.
+ */
+const PLUGIN_MCP_TOOL_PREFIX = "mcp__paco-plugins__";
+
+/**
  * Finds the enabled plugin, if any, that registered a renderer for
  * `toolName` — by convention, a renderer file named `<toolName>.html`
  * (spec Section 2). Pure and side-effect-free so `ToolCall`'s dispatch
  * switch (`components/tool-call/tool-call.tsx`) can call it directly in
  * its `default` case: a match routes to `PluginRenderer`, no match falls
  * through to the existing generic renderer unchanged.
+ *
+ * `toolName` is what `getToolName` returns — the MCP name verbatim — so
+ * the match is built forwards, from each candidate's own
+ * (`pluginId`, registered tool) pair, rather than by parsing the incoming
+ * name backwards. Parsing would have to guess where the plugin id ends and
+ * the tool name begins, and both halves may legitimately contain `__`;
+ * building the expected name and comparing it whole cannot guess wrong.
+ *
+ * Both halves have to agree. A renderer belongs to the plugin whose tool
+ * was actually called: a second plugin registering the same tool name does
+ * not get to render the first one's calls, and a same-named tool from some
+ * other MCP server (or a built-in arriving bare) matches nothing here at
+ * all.
  *
  * The caller is responsible for only ever passing already-enabled plugins
  * here (see `getPlugin`/`listPlugins`, `apps/web/lib/db/plugins.ts`) — this
@@ -90,13 +123,22 @@ export function resolvePluginRenderer(
   toolName: string,
   plugins: PluginRendererInfo[],
 ): PluginRendererMatch | undefined {
-  const plugin = plugins.find((candidate) =>
-    candidate.toolNames.includes(toolName),
-  );
-  if (!plugin) {
+  if (!toolName.startsWith(PLUGIN_MCP_TOOL_PREFIX)) {
     return undefined;
   }
-  return { pluginId: plugin.pluginId, file: `${toolName}.html` };
+
+  for (const plugin of plugins) {
+    const expectedPrefix = `${PLUGIN_MCP_TOOL_PREFIX}${plugin.pluginId}__`;
+    if (!toolName.startsWith(expectedPrefix)) {
+      continue;
+    }
+    for (const registered of plugin.toolNames) {
+      if (toolName === `${expectedPrefix}${registered}`) {
+        return { pluginId: plugin.pluginId, file: `${registered}.html` };
+      }
+    }
+  }
+  return undefined;
 }
 
 // Re-export extractRenderState for convenience
