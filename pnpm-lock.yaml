@@ -51,6 +51,9 @@ importers:
       '@paco/claude-code':
         specifier: workspace:*
         version: link:../../packages/claude-code
+      '@paco/plugin-host':
+        specifier: workspace:*
+        version: link:../../packages/plugin-host
       '@paco/plugin-kit':
         specifier: workspace:*
         version: link:../../packages/plugin-kit
@@ -225,6 +228,9 @@ importers:
       '@paco/agent-backend':
         specifier: workspace:*
         version: link:../agent-backend
+      ai:
+        specifier: 'catalog:'
+        version: 6.0.236(zod@4.4.3)
       typescript:
         specifier: ^7
         version: 7.0.2

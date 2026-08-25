@@ -676,6 +676,33 @@ export type PluginRow = typeof plugins.$inferSelect;
 export type NewPluginRow = typeof plugins.$inferInsert;
 
 /**
+ * Per-plugin key-value storage backing the `storage:kv` capability (spec
+ * Section 2, Task 6).
+ *
+ * Keyed by `(pluginId, key)` rather than a synthetic id: a plugin's rows are
+ * scoped to it by construction, so a handler that only ever queries with the
+ * `pluginId` the host supplies (never one read from a payload) cannot be
+ * tricked into crossing into another plugin's namespace. `onDelete: "cascade"`
+ * so uninstalling a plugin (`removePlugin`) takes its stored state with it
+ * instead of leaving orphaned rows behind.
+ */
+export const pluginKv = pgTable(
+  "plugin_kv",
+  {
+    pluginId: text("plugin_id")
+      .notNull()
+      .references(() => plugins.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: jsonb("value").notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.pluginId, table.key] })],
+);
+
+export type PluginKvRow = typeof pluginKv.$inferSelect;
+export type NewPluginKvRow = typeof pluginKv.$inferInsert;
+
+/**
  * The task board's state machine (Section 3 Global Constraints, binding,
  * single source of truth): `todo → running → review → done`, with `blocked`
  * reachable from `running` (approval pending) and `failed` reachable from

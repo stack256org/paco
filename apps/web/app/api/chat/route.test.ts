@@ -1,5 +1,10 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
+// `lib/chat/submit-message` (imported transitively via the route) is
+// server-only; the marker package throws outside a server component and has
+// nothing to do with what is being tested.
+mock.module("server-only", () => ({}));
+
 interface TestSessionRecord {
   id: string;
   userId: string;

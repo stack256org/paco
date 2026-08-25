@@ -43,6 +43,13 @@
       "when": 1787667065634,
       "tag": "0005_common_fenris",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787667749355,
+      "tag": "0006_bored_thundra",
+      "breakpoints": true
     }
   ]
 }
