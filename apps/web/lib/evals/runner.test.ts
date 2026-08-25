@@ -96,7 +96,16 @@ const listSessionEventsMock = mock(async (_chatId: string) => {
     },
   ];
 });
+type AppendedCall = { chatId: string; events: unknown[] };
+let appendedEvents: AppendedCall[] = [];
+const appendSessionEventsMock = mock(
+  (chatId: string, events: unknown[]): Promise<void> => {
+    appendedEvents.push({ chatId, events });
+    return Promise.resolve();
+  },
+);
 mock.module("@/lib/db/session-events", () => ({
+  appendSessionEvents: appendSessionEventsMock,
   listSessionEvents: listSessionEventsMock,
 }));
 
@@ -284,6 +293,7 @@ beforeEach(async () => {
   finishCalls = [];
   callOrder = [];
   worktreeRemovalOutcome = { kind: "removed" };
+  appendedEvents = [];
 
   hostChatWorktreeMock.mockClear();
   submitChatMessageMock.mockClear();
@@ -300,6 +310,7 @@ beforeEach(async () => {
   sandboxExecMock.mockClear();
   connectSandboxMock.mockClear();
   removeChatWorktreeMock.mockClear();
+  appendSessionEventsMock.mockClear();
 });
 
 afterEach(async () => {
@@ -343,6 +354,22 @@ describe("runEvalScenario", () => {
       "removeChatWorktree:eval-chat-1",
       "deleteChat:eval-chat-1",
     ]);
+    // eval/finished is appended to the throwaway chat's log before that
+    // chat is cleaned up, recording the run's terminal status.
+    expect(appendSessionEventsMock).toHaveBeenCalledTimes(1);
+    expect(appendedEvents).toEqual([
+      {
+        chatId: "eval-chat-1",
+        events: [
+          {
+            type: "eval/finished",
+            evalRunId: "eval-run-1",
+            scenarioName: "smoke",
+            status: "passed",
+          },
+        ],
+      },
+    ]);
   });
 
   test("one failing assertion yields status failed naming it", async () => {
@@ -378,6 +405,19 @@ describe("runEvalScenario", () => {
       "removeChatWorktree:eval-chat-1",
       "deleteChat:eval-chat-1",
     ]);
+    expect(appendedEvents).toEqual([
+      {
+        chatId: "eval-chat-1",
+        events: [
+          {
+            type: "eval/finished",
+            evalRunId: "eval-run-1",
+            scenarioName: "smoke",
+            status: "failed",
+          },
+        ],
+      },
+    ]);
   });
 
   test("a harness failure (turn never started) yields status error", async () => {
@@ -393,6 +433,40 @@ describe("runEvalScenario", () => {
     expect(finishCalls[0]?.details.harnessError).toContain("conflict");
     expect(finishCalls[0]?.details.assertions).toEqual([]);
     expect(deleteChatMock).toHaveBeenCalledTimes(1);
+    // The chat was already created (only the turn failed to start), so the
+    // error status is still recorded against it before cleanup.
+    expect(appendedEvents).toEqual([
+      {
+        chatId: "eval-chat-1",
+        events: [
+          {
+            type: "eval/finished",
+            evalRunId: "eval-run-1",
+            scenarioName: "smoke",
+            status: "error",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("no session found before any chat exists: yields error and appends nothing", async () => {
+    sessionRow = undefined;
+
+    const result = await runEvalScenario({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      scenario: makeScenario(),
+    });
+
+    expect(result.status).toBe("error");
+    expect(finishCalls[0]?.details.harnessError).toContain("not found");
+    // No chat was ever created for this run, so there is nowhere to append
+    // eval/finished to — it must be skipped silently, not throw.
+    expect(createChatMock).not.toHaveBeenCalled();
+    expect(appendSessionEventsMock).not.toHaveBeenCalled();
+    expect(appendedEvents).toEqual([]);
+    expect(deleteChatMock).not.toHaveBeenCalled();
   });
 
   test("an unexpected exception still cleans up the throwaway chat and yields error", async () => {

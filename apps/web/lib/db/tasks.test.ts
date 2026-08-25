@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { tasks } from "@/lib/db/schema";
 
 // The module under test is server-only; the marker package throws outside a
@@ -137,6 +137,18 @@ const fakeDb = {
 
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
+type AppendedCall = { chatId: string; events: unknown[] };
+let appendedEvents: AppendedCall[] = [];
+const appendSessionEventsMock = mock(
+  (chatId: string, events: unknown[]): Promise<void> => {
+    appendedEvents.push({ chatId, events });
+    return Promise.resolve();
+  },
+);
+mock.module("@/lib/db/session-events", () => ({
+  appendSessionEvents: appendSessionEventsMock,
+}));
+
 const {
   TaskTransitionError,
   createTask,
@@ -146,6 +158,11 @@ const {
   taskTree,
   transitionTaskStatus,
 } = await import("./tasks");
+
+beforeEach(() => {
+  appendedEvents = [];
+  appendSessionEventsMock.mockClear();
+});
 
 describe("createTask", () => {
   test("creates a todo task with defaults", async () => {
@@ -215,6 +232,19 @@ describe("createTask", () => {
       }),
     ).rejects.toThrow();
     expect(store).toHaveLength(0);
+  });
+
+  test("appends nothing to the session log: a new task's chatId is always null", async () => {
+    store = [];
+    await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+
+    expect(appendSessionEventsMock).not.toHaveBeenCalled();
+    expect(appendedEvents).toEqual([]);
   });
 });
 
@@ -375,6 +405,21 @@ describe("transitionTaskStatus", () => {
     expect(updated.status).toBe("running");
   });
 
+  test("appends nothing to the session log when the task has no chat attached", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+
+    await transitionTaskStatus("org-1", task.id, "running");
+
+    expect(appendSessionEventsMock).not.toHaveBeenCalled();
+    expect(appendedEvents).toEqual([]);
+  });
+
   test("throws TaskTransitionError on an illegal transition, without mutating the row", async () => {
     store = [];
     const task = await createTask({
@@ -420,6 +465,35 @@ describe("transitionTaskStatus", () => {
     });
     expect(updated.status).toBe("running");
     expect(updated.chatId).toBe("chat-1");
+  });
+
+  test("appends exactly one task/status event with the correct from/to when a chat is attached", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+    await transitionTaskStatus("org-1", task.id, "running", {
+      chatId: "chat-1",
+    });
+    appendedEvents = [];
+    appendSessionEventsMock.mockClear();
+
+    await transitionTaskStatus("org-1", task.id, "review");
+
+    expect(appendSessionEventsMock).toHaveBeenCalledTimes(1);
+    expect(appendedEvents).toHaveLength(1);
+    expect(appendedEvents[0]?.chatId).toBe("chat-1");
+    expect(appendedEvents[0]?.events).toEqual([
+      {
+        type: "task/status",
+        taskId: task.id,
+        from: "running",
+        to: "review",
+      },
+    ]);
   });
 
   test("the two Task 8 edges are enforced too: failed -> todo and blocked -> running", async () => {

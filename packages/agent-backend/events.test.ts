@@ -37,6 +37,91 @@ describe("sessionEventSchema", () => {
     expect(() => sessionEventSchema.parse({ type: "bogus/none" })).toThrow();
   });
 
+  test("accepts a task/created event and carries no turnId", () => {
+    const event = {
+      type: "task/created" as const,
+      taskId: "task_1",
+      title: "Do the thing",
+      origin: "planner" as const,
+    };
+    expect(sessionEventSchema.parse(event)).toEqual(event);
+  });
+
+  test("rejects task/created missing a required field", () => {
+    expect(() =>
+      sessionEventSchema.parse({
+        type: "task/created",
+        taskId: "task_1",
+        origin: "user",
+        // title missing
+      }),
+    ).toThrow();
+  });
+
+  test("accepts a task/status event", () => {
+    const event = {
+      type: "task/status" as const,
+      taskId: "task_1",
+      from: "running" as const,
+      to: "review" as const,
+    };
+    expect(sessionEventSchema.parse(event)).toEqual(event);
+  });
+
+  test("rejects task/status missing a required field", () => {
+    expect(() =>
+      sessionEventSchema.parse({
+        type: "task/status",
+        taskId: "task_1",
+        from: "running",
+        // to missing
+      }),
+    ).toThrow();
+  });
+
+  test("rejects task/status with an unrecognized status value", () => {
+    expect(() =>
+      sessionEventSchema.parse({
+        type: "task/status",
+        taskId: "task_1",
+        from: "running",
+        to: "not-a-status",
+      }),
+    ).toThrow();
+  });
+
+  test("accepts an eval/finished event", () => {
+    const event = {
+      type: "eval/finished" as const,
+      evalRunId: "eval_1",
+      scenarioName: "smoke",
+      status: "passed" as const,
+    };
+    expect(sessionEventSchema.parse(event)).toEqual(event);
+  });
+
+  test("rejects eval/finished missing a required field", () => {
+    expect(() =>
+      sessionEventSchema.parse({
+        type: "eval/finished",
+        evalRunId: "eval_1",
+        status: "failed",
+        // scenarioName missing
+      }),
+    ).toThrow();
+  });
+
+  test("rejects eval/finished with status 'running' (not a terminal status)", () => {
+    expect(() =>
+      sessionEventSchema.parse({
+        type: "eval/finished",
+        evalRunId: "eval_1",
+        scenarioName: "smoke",
+        status: "running",
+      }),
+    ).toThrow();
+  });
+
   test("isSessionEvent narrows", () => {
     expect(
       isSessionEvent({

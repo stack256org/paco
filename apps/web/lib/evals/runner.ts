@@ -17,7 +17,10 @@ import {
 } from "@/lib/db/eval-runs";
 import { getRoster } from "@/lib/db/roster";
 import type { EvalRun } from "@/lib/db/schema";
-import { listSessionEvents } from "@/lib/db/session-events";
+import {
+  appendSessionEvents,
+  listSessionEvents,
+} from "@/lib/db/session-events";
 import { createChat, deleteChat, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import type { EvalAssertion, EvalScenario } from "@/lib/evals/discovery";
@@ -388,10 +391,38 @@ export async function runEvalScenario(
 
   let chatId: string | undefined;
 
+  /**
+   * Finishes the run and records `eval/finished` on the throwaway chat's
+   * session log — but only once that chat exists: the very first check
+   * below (`getSessionById` before `createChat`) can fail before there is
+   * any chat to append to, so `chatId` is still `undefined` at that point
+   * and the event is skipped silently, the same "chatId nullable -> skip"
+   * rule task lifecycle events follow (`lib/db/tasks.ts`). Uses the
+   * never-throwing `appendSessionEvents` so recording the event can never
+   * turn a finished eval run into a harness failure.
+   */
+  async function finish(finishParams: {
+    status: Exclude<EvalRun["status"], "running">;
+    details: EvalRunDetails;
+  }): Promise<EvalRunRow> {
+    const finished = await finishEvalRun(run.id, finishParams);
+    if (chatId) {
+      await appendSessionEvents(chatId, [
+        {
+          type: "eval/finished",
+          evalRunId: finished.id,
+          scenarioName: scenario.name,
+          status: finishParams.status,
+        },
+      ]);
+    }
+    return finished;
+  }
+
   try {
     const session = await getSessionById(sessionId);
     if (!session) {
-      return await finishEvalRun(run.id, {
+      return await finish({
         status: "error",
         details: harnessError(`Session "${sessionId}" not found`),
       });
@@ -426,7 +457,7 @@ export async function runEvalScenario(
     });
 
     if (outcome.kind !== "streaming") {
-      return await finishEvalRun(run.id, {
+      return await finish({
         status: "error",
         details: harnessError(
           `Failed to start the eval turn: chat submission returned "${outcome.kind}"`,
@@ -445,7 +476,7 @@ export async function runEvalScenario(
               (params.timeoutMs ?? EVAL_RUN_TIMEOUT_MS) / 60_000,
             )} minute(s)`
           : `Eval turn ${completion.reason}`;
-      return await finishEvalRun(run.id, {
+      return await finish({
         status: "error",
         details: harnessError(message),
       });
@@ -453,7 +484,7 @@ export async function runEvalScenario(
 
     const finishedSession = await getSessionById(sessionId);
     if (!finishedSession?.sandboxState) {
-      return await finishEvalRun(run.id, {
+      return await finish({
         status: "error",
         details: harnessError(
           "Eval turn completed but the session has no sandbox to check assertions against",
@@ -474,12 +505,12 @@ export async function runEvalScenario(
     }
 
     const allPassed = assertions.every((result) => result.passed);
-    return await finishEvalRun(run.id, {
+    return await finish({
       status: allPassed ? "passed" : "failed",
       details: { assertions },
     });
   } catch (error) {
-    return await finishEvalRun(run.id, {
+    return await finish({
       status: "error",
       details: harnessError(assertionMessage(error)),
     });

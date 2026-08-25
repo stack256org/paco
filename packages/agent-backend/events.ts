@@ -50,6 +50,34 @@ export const turnPolicySchema = z.enum(["steer", "queue"]);
 export type TurnPolicy = z.infer<typeof turnPolicySchema>;
 
 /**
+ * Mirrors apps/web's `TASK_STATUSES` (`lib/db/schema.ts`). This package has
+ * no dependency on the web app, so the values are duplicated here rather
+ * than imported — keep the two lists in sync by hand.
+ */
+const taskStatusSchema = z.enum([
+  "todo",
+  "running",
+  "blocked",
+  "review",
+  "done",
+  "failed",
+]);
+
+/** Mirrors apps/web's `TASK_ORIGINS` (`lib/db/schema.ts`) — see above. */
+const taskOriginSchema = z.enum([
+  "user",
+  "planner",
+  "schedule",
+  "channel",
+  "reflection",
+]);
+
+/** An eval run's terminal statuses — mirrors `Exclude<EvalRunStatus, "running">`
+ * from apps/web's `lib/db/schema.ts` (excluding `"running"`: only a
+ * finished run is ever logged). */
+const evalRunFinishedStatusSchema = z.enum(["passed", "failed", "error"]);
+
+/**
  * The session event vocabulary.
  *
  * Spec invariant: anything that reaches a model request must be
@@ -135,6 +163,32 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
     finishReason: finishReasonSchema,
     isError: z.boolean(),
     steered: z.object({ text: z.string() }).optional(),
+  }),
+  // The three variants below are chat-adjacent, not turn-scoped: a task's
+  // lifecycle (and an eval scenario's) spans zero or more turns across its
+  // whole life, so none of them carry a `turnId`. They are appended to the
+  // chat the task/eval happens to be attached to at the moment they fire
+  // (apps/web's `appendSessionEvents`, never-throwing) — and a task's
+  // `chatId` is null until it starts, with some tasks (proposals,
+  // reflection) never getting one at all, so callers append these ONLY
+  // when a chatId exists and skip silently otherwise.
+  z.object({
+    type: z.literal("task/created"),
+    taskId: z.string(),
+    title: z.string(),
+    origin: taskOriginSchema,
+  }),
+  z.object({
+    type: z.literal("task/status"),
+    taskId: z.string(),
+    from: taskStatusSchema,
+    to: taskStatusSchema,
+  }),
+  z.object({
+    type: z.literal("eval/finished"),
+    evalRunId: z.string(),
+    scenarioName: z.string(),
+    status: evalRunFinishedStatusSchema,
   }),
 ]);
 

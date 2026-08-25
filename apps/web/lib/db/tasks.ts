@@ -9,7 +9,27 @@ import {
   type TaskOrigin,
   type TaskStatus,
 } from "@/lib/db/schema";
+import { appendSessionEvents } from "@/lib/db/session-events";
 import { canTransition } from "@/lib/tasks/state";
+
+/**
+ * Records a task lifecycle event on the task's chat log — but only when
+ * the task actually has a chat: `chatId` is null for every task until it
+ * starts, and a proposal/reflection task may never get one at all. There is
+ * nowhere to append to in that case, so the event is skipped silently
+ * (never an error) rather than logged against a chat the task doesn't own.
+ * Uses the never-throwing `appendSessionEvents` so recording a task's
+ * lifecycle can never fail the mutation that produced it.
+ */
+async function appendTaskLifecycleEvent(
+  chatId: string | null,
+  event: Parameters<typeof appendSessionEvents>[1][number],
+): Promise<void> {
+  if (!chatId) {
+    return;
+  }
+  await appendSessionEvents(chatId, [event]);
+}
 
 /**
  * Thrown by `transitionTaskStatus` when `from -> to` is not a legal edge of
@@ -94,6 +114,12 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   if (!row) {
     throw new Error("createTask: insert returned no row");
   }
+  await appendTaskLifecycleEvent(row.chatId, {
+    type: "task/created",
+    taskId: row.id,
+    title: row.title,
+    origin: row.origin,
+  });
   return row;
 }
 
@@ -212,6 +238,12 @@ export async function transitionTaskStatus(
       `Task "${taskId}" status changed concurrently while transitioning "${current.status}" -> "${to}"`,
     );
   }
+  await appendTaskLifecycleEvent(row.chatId, {
+    type: "task/status",
+    taskId: row.id,
+    from: current.status,
+    to,
+  });
   return row;
 }
 
