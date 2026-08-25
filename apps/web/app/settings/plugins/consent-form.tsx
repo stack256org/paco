@@ -151,7 +151,7 @@ export function ConsentForm({
               {capability === "channels:ingress" ? (
                 <span className="mt-1 block text-base-content/60 text-xs">
                   {selfVerifiedChannels.length > 0
-                    ? `Requests are checked against a per-plugin secret, except for these channels, which this plugin verifies itself: ${selfVerifiedChannels.join(", ")}. Requests to those reach the plugin without Paco checking anything, and only the plugin's own signature check stands in the way.`
+                    ? `Requests are checked against a per-plugin secret, except for these channels, which this plugin claims to verify itself: ${selfVerifiedChannels.join(", ")}. Requests to those reach the plugin with Paco checking nothing, and whatever its own handler does — which may be nothing — is the only thing standing in the way. Grant this only to a plugin you trust to check them.`
                     : "Requests must carry a per-plugin secret, checked before the plugin sees them."}
                 </span>
               ) : null}

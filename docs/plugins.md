@@ -46,13 +46,19 @@ Each `channels/` slot picks one of two gates, declared per channel in
   time by `apps/web/app/api/channels/[pluginId]/[channel]/route.ts` before
   the request ever reaches the plugin's own code.
 - **`self-verified`**: Paco does not check the secret, and the request
-  reaches the plugin's handler unauthenticated — the handler verifies it
-  itself. This exists because real providers often cannot attach a custom
-  header: Slack's Event Subscriptions UI takes a Request URL and nothing
-  else, and signs the raw request body instead. A channel that opts in is
-  taking on its own authentication, so the mode is declared in the manifest
-  where you see it at consent time, rather than chosen by plugin code at
-  runtime.
+  reaches the plugin's handler unauthenticated. The handler is *supposed* to
+  verify it — but nothing in Paco enforces that, and nothing can: the mode is
+  a declaration, not a mechanism. A plugin that declares it and then verifies
+  nothing has an open, unauthenticated endpoint, and Paco cannot tell the
+  difference. Grant `channels:ingress` to a plugin with a self-verified
+  channel only if you trust that plugin's own verification.
+
+  It exists because real providers often cannot attach a custom header:
+  Slack's Event Subscriptions UI takes a Request URL and nothing else, and
+  signs the raw request body instead. Because opting in is a security
+  decision the operator is making on the plugin's word, it is declared in the
+  manifest — where the consent screen shows it, by channel name, before
+  anything is granted — rather than chosen by plugin code at runtime.
 
 Everything else applies to both. The `channels:ingress` grant, the
 plugin-is-running check, the request body cap, and both rate limiters (one
