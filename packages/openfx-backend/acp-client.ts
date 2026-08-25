@@ -58,6 +58,21 @@ export interface InitializeResult {
  * two `initialize` actually advertises via `mcpCapabilities`, despite stdio
  * also being accepted (documented asymmetry, PROTOCOL.md §7).
  */
+/**
+ * DO NOT USE THIS FOR THE STDIO CASE — see `OpenFxStdioMcpServer` in
+ * `backend.ts`, which is what `session/new` actually accepts.
+ *
+ * This type was written from PROTOCOL.md and is wrong about stdio in three
+ * ways the binary's own `mcp_servers.zig` (`parseServer`, lines 177-221)
+ * settles: `name` is required and missing here; `args` and `env` are
+ * required, not optional; and a present `type` selects a REMOTE transport,
+ * so `type: "stdio"` is an `InvalidTransport` error rather than the no-op
+ * this shape implies.
+ *
+ * Left in place because the remote (`http`/`sse`) half is accurate and is
+ * the only half `initialize` advertises via `mcpCapabilities`. Narrow this
+ * to the remote variants alone once something actually uses them.
+ */
 export type McpServerConfig =
   | {
       type?: "stdio";

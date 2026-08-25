@@ -8,6 +8,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-25-paco-platform-design.md` (Section 7). Depends on Section 1. Model config: OpenFX is model-agnostic (Vercel AI Gateway et al.) — Paco stores per-org OpenFX provider config (endpoint/key) encrypted with the existing secret-box (`apps/web/lib/crypto/secret-box.ts`).
 
+> **Correction, recorded after implementation.** This plan promised a
+> "BYO endpoint" for OpenFX in its Goal and Spec lines below. That is NOT
+> delivered, and cannot be as written: the OpenFX binary's ACP protocol has
+> no wire field for an endpoint override — `buildOpenFxBackendConfig` has
+> nowhere to put it. The setting is stored and the input is rendered
+> permanently disabled with a caption saying so, rather than silently
+> accepting a value that goes nowhere. The API key and binary path DO work.
+> Left in the plan rather than edited out, because the plan is the record of
+> what was intended; this note is the record of what shipped.
+
 ## Global Constraints
 
 - Section 1 plan's Global Constraints apply. Zero-customer ruling. Nothing deferred.
