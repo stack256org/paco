@@ -28,6 +28,11 @@ import { ScheduleRow as ScheduleRowView } from "./schedule-row";
  * action re-checks admin itself server-side (`requireOrgAdmin` in
  * `./actions.ts`), the same defense-in-depth the agents page's docstring
  * describes.
+ *
+ * The session hook is the only source for that flag. `./actions.ts` briefly
+ * also exported a `canManageSchedulesAction` returning the same boolean;
+ * nothing here ever called it, and an uncalled `"use server"` export is a
+ * POST-able endpoint earning nothing, so it is gone.
  */
 export function SchedulesPageContent() {
   const { isAdmin } = useSession();

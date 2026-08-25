@@ -115,15 +115,6 @@ export async function listSchedulesAction(): Promise<ScheduleRow[]> {
   return rows.map(toScheduleRow);
 }
 
-/** Whether the caller may create/edit/delete/toggle/run schedules. */
-export async function canManageSchedulesAction(): Promise<boolean> {
-  const session = await getServerSession();
-  if (!session?.user?.id) {
-    return false;
-  }
-  return isAdmin(session.user.id);
-}
-
 /** One of the caller's own, non-archived sessions — the schedule's session picker. */
 export type MySessionOption = { id: string; title: string };
 

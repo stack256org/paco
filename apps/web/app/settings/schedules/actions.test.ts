@@ -194,7 +194,6 @@ mock.module("@/lib/schedules/fire", () => ({
 }));
 
 const {
-  canManageSchedulesAction,
   createScheduleAction,
   deleteScheduleAction,
   listSchedulesAction,
@@ -297,15 +296,6 @@ describe("write gate", () => {
     await deleteScheduleAction("sched-1");
 
     expect(requireAdminMock).toHaveBeenCalledTimes(5);
-  });
-});
-
-describe("canManageSchedulesAction", () => {
-  test("reflects the admin flag", async () => {
-    adminOk = false;
-    expect(await canManageSchedulesAction()).toBe(false);
-    adminOk = true;
-    expect(await canManageSchedulesAction()).toBe(true);
   });
 });
 
