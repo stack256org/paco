@@ -20,6 +20,7 @@ interface TestChatRecord {
   sessionId: string;
   modelId: string | null;
   activeStreamId: string | null;
+  turnPolicy?: "steer" | "queue";
 }
 
 let sessionRecord: TestSessionRecord | null;
@@ -78,6 +79,11 @@ const isFirstChatMessageSpy = mock(async () => true);
 const updateChatSpy = mock(async () => {
   routeEvents.push("update-chat");
 });
+const appendSessionEventsSpy = mock(
+  async (_chatId: string, _events: unknown[]) => {
+    routeEvents.push("append-session-events");
+  },
+);
 
 const originalFetch = globalThis.fetch;
 
@@ -184,6 +190,10 @@ mock.module("@/lib/db/sessions", () => ({
   upsertChatMessageScoped: async () => ({ status: "inserted" as const }),
 }));
 
+mock.module("@/lib/db/session-events", () => ({
+  appendSessionEvents: appendSessionEventsSpy,
+}));
+
 mock.module("@/lib/db/user-preferences", () => ({
   getUserPreferences: async () => preferencesState,
 }));
@@ -272,6 +282,7 @@ describe("/api/chat route", () => {
     touchChatSpy.mockClear();
     isFirstChatMessageSpy.mockClear();
     updateChatSpy.mockClear();
+    appendSessionEventsSpy.mockClear();
     currentAuthSession = {
       user: {
         id: "user-1",
@@ -542,7 +553,7 @@ describe("/api/chat route", () => {
     expect(startCalls).toHaveLength(1);
   });
 
-  test("reconnects to existing running workflow instead of starting new one", async () => {
+  test("buffers a message as steer/buffered instead of starting a second workflow when a turn is active", async () => {
     if (!chatRecord) throw new Error("chatRecord must be set");
     chatRecord.activeStreamId = "wrun_existing-456";
     existingRunStatus = "running";
@@ -552,10 +563,36 @@ describe("/api/chat route", () => {
     const response = await POST(createValidRequest());
 
     expect(response.ok).toBe(true);
-    expect(response.headers.get("x-workflow-run-id")).toBe("wrun_existing-456");
     expect(startCalls).toHaveLength(0);
-    expect(createChatMessageIfNotExistsSpy).not.toHaveBeenCalled();
     expect(compareAndSetChatActiveStreamIdSpy).not.toHaveBeenCalled();
+    expect(createChatMessageIfNotExistsSpy).toHaveBeenCalledWith({
+      id: "user-1",
+      chatId: "chat-1",
+      role: "user",
+      parts: expect.objectContaining({ id: "user-1", role: "user" }),
+    });
+    expect(appendSessionEventsSpy).toHaveBeenCalledTimes(1);
+    expect(appendSessionEventsSpy).toHaveBeenCalledWith("chat-1", [
+      { type: "steer/buffered", messageId: "user-1", text: "Fix the bug" },
+    ]);
+  });
+
+  test("buffers a message identically for a chat with turnPolicy queue", async () => {
+    if (!chatRecord) throw new Error("chatRecord must be set");
+    chatRecord.activeStreamId = "wrun_existing-456";
+    chatRecord.turnPolicy = "queue";
+    existingRunStatus = "running";
+
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(createValidRequest());
+
+    expect(response.ok).toBe(true);
+    expect(startCalls).toHaveLength(0);
+    expect(appendSessionEventsSpy).toHaveBeenCalledTimes(1);
+    expect(appendSessionEventsSpy).toHaveBeenCalledWith("chat-1", [
+      { type: "steer/buffered", messageId: "user-1", text: "Fix the bug" },
+    ]);
   });
 
   test("starts new workflow when existing run is completed and clears the stale stream id first", async () => {

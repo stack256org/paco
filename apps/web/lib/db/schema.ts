@@ -301,6 +301,15 @@ export const chats = pgTable(
     effort: text("effort", {
       enum: ["low", "medium", "high", "xhigh", "max"],
     }),
+    /**
+     * What happens when a message arrives while a turn is running.
+     * "steer": buffer durably, cancel the active turn, continue with the
+     * buffered message. "queue": buffer durably, run it after the turn ends.
+     * (Spec 1c; both consume from the same steer/buffered events.)
+     */
+    turnPolicy: text("turn_policy", { enum: ["steer", "queue"] })
+      .notNull()
+      .default("steer"),
     activeStreamId: text("active_stream_id"),
     /**
      * Claude Code session id backing this chat.

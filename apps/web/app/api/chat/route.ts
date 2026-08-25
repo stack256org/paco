@@ -14,6 +14,7 @@ import {
   touchChat,
   updateChat,
 } from "@/lib/db/sessions";
+import { appendSessionEvents } from "@/lib/db/session-events";
 import { createCancelableReadableStream } from "@/lib/chat/create-cancelable-readable-stream";
 import { NOT_YOURS } from "@/lib/error-copy";
 import { getServerSession } from "@/lib/session/get-server-session";
@@ -76,24 +77,18 @@ export async function POST(req: Request) {
     );
   }
 
-  // Guard: if a workflow is already running for this chat, reconnect to it
-  // instead of starting a duplicate. This prevents auto-submit from spawning
-  // parallel workflows when the client sees completed tool calls mid-loop.
+  // Guard: if a turn is already active for this chat, buffer this message as
+  // a durable steer/buffered event instead of starting a duplicate workflow.
+  // A later turn (Task 10) consumes the buffered event per the chat's
+  // turnPolicy — this layer only needs to record it and avoid double-running.
   if (chat.activeStreamId) {
     const existingStreamResolution = await reconcileExistingActiveStream(
       chatId,
       chat.activeStreamId,
     );
 
-    if (existingStreamResolution.action === "resume") {
-      return createUIMessageStreamResponse({
-        stream: existingStreamResolution.stream,
-        headers: { "x-workflow-run-id": existingStreamResolution.runId },
-      });
-    }
-
-    if (existingStreamResolution.action === "conflict") {
-      return Response.json({ error: STILL_WORKING }, { status: 409 });
+    if (existingStreamResolution.action === "active") {
+      return bufferMidTurnMessage(chatId, messages);
     }
   }
 
@@ -146,15 +141,10 @@ export async function POST(req: Request) {
 
 type ExistingActiveStreamResolution =
   | {
-      action: "resume";
-      runId: string;
-      stream: ReadableStream<WebAgentUIMessageChunk>;
+      action: "active";
     }
   | {
       action: "ready";
-    }
-  | {
-      action: "conflict";
     };
 
 const ACTIVE_STREAM_RECONCILIATION_MAX_ATTEMPTS = 3;
@@ -175,13 +165,7 @@ async function reconcileExistingActiveStream(
       const existingRun = getRun(currentStreamId);
       const status = await existingRun.status;
       if (status === "running" || status === "pending") {
-        return {
-          action: "resume",
-          runId: currentStreamId,
-          stream: createCancelableReadableStream(
-            existingRun.getReadable<WebAgentUIMessageChunk>(),
-          ),
-        };
+        return { action: "active" };
       }
     } catch {
       // Workflow not found or inaccessible — try to clear the stale stream ID.
@@ -200,7 +184,48 @@ async function reconcileExistingActiveStream(
     currentStreamId = latestChat?.activeStreamId ?? null;
   }
 
-  return currentStreamId ? { action: "conflict" } : { action: "ready" };
+  // Retries exhausted and the slot is still contested — treat it the same as
+  // a confirmed-running turn rather than rejecting the message.
+  return currentStreamId ? { action: "active" } : { action: "ready" };
+}
+
+/**
+ * A turn is active for this chat: record the incoming message as a durable
+ * steer/buffered event instead of starting a second workflow run. Both
+ * turnPolicy values buffer identically here — which one cancels vs. queues
+ * the active turn is decided by the consumer (Task 10).
+ */
+async function bufferMidTurnMessage(
+  chatId: string,
+  messages: WebAgentUIMessage[],
+): Promise<Response> {
+  await Promise.all([
+    persistLatestUserMessage(chatId, messages),
+    persistAssistantMessagesWithToolResults(chatId, messages),
+  ]);
+
+  const latestMessage = messages[messages.length - 1];
+  if (latestMessage?.role === "user") {
+    await appendSessionEvents(chatId, [
+      {
+        type: "steer/buffered",
+        messageId: latestMessage.id,
+        text: extractMessageText(latestMessage),
+      },
+    ]);
+  }
+
+  return Response.json({ ok: true });
+}
+
+function extractMessageText(message: WebAgentUIMessage): string {
+  return message.parts
+    .filter(
+      (part): part is { type: "text"; text: string } => part.type === "text",
+    )
+    .map((part) => part.text)
+    .join(" ")
+    .trim();
 }
 
 async function persistLatestUserMessage(
@@ -231,13 +256,7 @@ async function persistLatestUserMessage(
       return;
     }
 
-    const textContent = latestMessage.parts
-      .filter(
-        (part): part is { type: "text"; text: string } => part.type === "text",
-      )
-      .map((part) => part.text)
-      .join(" ")
-      .trim();
+    const textContent = extractMessageText(latestMessage);
 
     if (textContent.length === 0) {
       return;

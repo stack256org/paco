@@ -515,6 +515,7 @@ export async function getChatSummariesBySessionId(
       title: chats.title,
       modelId: chats.modelId,
       effort: chats.effort,
+      turnPolicy: chats.turnPolicy,
       activeStreamId: chats.activeStreamId,
       claudeSessionId: chats.claudeSessionId,
       lastAssistantMessageAt: chats.lastAssistantMessageAt,
