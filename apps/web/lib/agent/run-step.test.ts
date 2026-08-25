@@ -110,6 +110,7 @@ function makeStructuredOutputOptions() {
     agents: { explorer: { description: "explores the repo" } },
     structuredOutput: { jsonSchema: { type: "object", properties: {} } },
     tools: ["Read", "Grep", "Glob", "Bash"],
+    disallowedTools: ["Write", "Edit", "NotebookEdit"],
   } as never;
 }
 
@@ -282,6 +283,11 @@ describe("runAgentTurn", () => {
       properties: {},
     });
     expect(backendOptions.tools).toEqual(["Read", "Grep", "Glob", "Bash"]);
+    expect(backendOptions.disallowedTools).toEqual([
+      "Write",
+      "Edit",
+      "NotebookEdit",
+    ]);
 
     const env = backendOptions.env as Record<string, string>;
     expect(env.GH_TOKEN).toBe("gh-token-abc");
