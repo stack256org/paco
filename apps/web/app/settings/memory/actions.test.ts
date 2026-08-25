@@ -48,6 +48,7 @@ const {
 } = await import("./actions");
 const { orgMemoryDir, userMemoryDir } = await import("@/lib/memory/paths");
 const { listMemory, writeMemory } = await import("@/lib/memory/store");
+const { MEMORY_BODY_MAX_LENGTH } = await import("./memory-schemas");
 
 let dataDir: string;
 let originalPacoHome: string | undefined;
@@ -209,5 +210,100 @@ describe("org memory: admin gate", () => {
 
     expect(result.success).toBe(true);
     expect(await listMemory(orgMemoryDir("org-1"))).toHaveLength(0);
+  });
+});
+
+/**
+ * Every other settings section validates its write inputs with a Zod schema
+ * before touching storage; this one used to take raw strings with nothing
+ * but an existence check. Memory bodies are injected verbatim into agent
+ * turns (`lib/memory/load-for-turn.ts`), so an unbounded or blank body is
+ * not a cosmetic problem — it is unvalidated content on a prompt path.
+ */
+describe("write-path input validation", () => {
+  test("editUserMemory rejects a body longer than the limit, and writes nothing", async () => {
+    const { slug } = await writeMemory(userMemoryDir("user-a"), {
+      title: "Editor preference",
+      body: "original",
+      source: "manual",
+    });
+
+    const result = await editUserMemory(
+      slug,
+      "x".repeat(MEMORY_BODY_MAX_LENGTH + 1),
+    );
+
+    expect(result.success).toBe(false);
+    const [entry] = await listMemory(userMemoryDir("user-a"));
+    expect(entry?.body).toBe("original");
+  });
+
+  test("editUserMemory rejects a blank body rather than silently emptying an entry", async () => {
+    const { slug } = await writeMemory(userMemoryDir("user-a"), {
+      title: "Editor preference",
+      body: "original",
+      source: "manual",
+    });
+
+    const result = await editUserMemory(slug, "   \n\t  ");
+
+    expect(result.success).toBe(false);
+    const [entry] = await listMemory(userMemoryDir("user-a"));
+    expect(entry?.body).toBe("original");
+  });
+
+  test("editUserMemory keeps a body's own leading whitespace — validation must not rewrite markdown", async () => {
+    const { slug } = await writeMemory(userMemoryDir("user-a"), {
+      title: "Editor preference",
+      body: "original",
+      source: "manual",
+    });
+
+    const result = await editUserMemory(slug, "    indented code block\n");
+
+    expect(result.success).toBe(true);
+    const [entry] = await listMemory(userMemoryDir("user-a"));
+    expect(entry?.body).toBe("    indented code block\n");
+  });
+
+  test("editUserMemory rejects a slug that is not a slug, before any directory read", async () => {
+    const result = await editUserMemory("../../../etc/passwd", "anything");
+
+    expect(result.success).toBe(false);
+  });
+
+  test("deleteUserMemory rejects a malformed slug", async () => {
+    const result = await deleteUserMemory("../escape");
+
+    expect(result.success).toBe(false);
+  });
+
+  test("editOrgMemory and deleteOrgMemory validate the same way, after the admin gate", async () => {
+    await expect(
+      editOrgMemory("../../../etc/passwd", "anything"),
+    ).resolves.toMatchObject({ success: false });
+    await expect(deleteOrgMemory("../escape")).resolves.toMatchObject({
+      success: false,
+    });
+
+    const { slug } = await writeMemory(orgMemoryDir("org-1"), {
+      title: "Org convention",
+      body: "Deploy from main.",
+      source: "promoted",
+    });
+    const tooLong = await editOrgMemory(
+      slug,
+      "x".repeat(MEMORY_BODY_MAX_LENGTH + 1),
+    );
+    expect(tooLong.success).toBe(false);
+    const [entry] = await listMemory(orgMemoryDir("org-1"));
+    expect(entry?.body).toBe("Deploy from main.");
+  });
+
+  test("the admin gate still runs before validation: a non-admin gets rejected, not a field error", async () => {
+    adminOk = false;
+
+    await expect(editOrgMemory("../nope", "body")).rejects.toThrow();
+    await expect(deleteOrgMemory("../nope")).rejects.toThrow();
   });
 });
