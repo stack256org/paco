@@ -5,6 +5,7 @@ import {
   ChartLine,
   ArrowLeft,
   Bot,
+  Brain,
   Cable,
   LogOut,
   Menu,
@@ -100,6 +101,17 @@ const baseSidebarItems = [
     label: "Usage",
     href: "/settings/usage",
     icon: ChartLine,
+  },
+  {
+    /*
+     * Sits with the base items, not the admin-only ones below: every user
+     * has their own memory to read, edit, and delete here, even though the
+     * page's second section (organisation memory) is admin only.
+     */
+    id: "memory",
+    label: "Memory",
+    href: "/settings/memory",
+    icon: Brain,
   },
 ];
 
