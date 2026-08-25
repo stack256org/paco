@@ -7,6 +7,17 @@ import { listPlugins } from "@/lib/db/plugins";
 import { pluginDir } from "@/lib/plugins/install";
 
 /**
+ * The grant a renderer needs.
+ *
+ * Serving plugin-authored HTML into a sandboxed iframe on Paco's origin IS
+ * `ui:panel`; nothing else in the product is. Enablement is a separate
+ * question — an operator can enable a plugin while denying this one
+ * capability at the consent dialog, and a denied capability that keeps
+ * working is worse than one that never worked.
+ */
+const RENDERER_CAPABILITY = "ui:panel";
+
+/**
  * One enabled plugin's `renderers/<toolName>.html` slot, turned into the
  * `PluginRendererInfo` shape `ToolCall` (`components/tool-call/tool-call.tsx`)
  * dispatches against — the second dead-code fix from the plan's Task 12
@@ -32,7 +43,16 @@ import { pluginDir } from "@/lib/plugins/install";
 export async function enabledPluginRenderers(): Promise<PluginRendererInfo[]> {
   try {
     const rows = await listPlugins();
-    const enabledIds = rows.filter((row) => row.enabled).map((row) => row.id);
+    // Enabled AND actually granted `ui:panel`. Filtering here is what keeps a
+    // plugin whose grant was denied from contributing a renderer to the UI at
+    // all; the route that serves the file checks the same grant again, since
+    // its URL is directly navigable and "nothing links to it" is not a gate.
+    const enabledIds = rows
+      .filter(
+        (row) =>
+          row.enabled && row.grantedCapabilities.includes(RENDERER_CAPABILITY),
+      )
+      .map((row) => row.id);
 
     const perPlugin = await Promise.all(
       enabledIds.map(async (id): Promise<PluginRendererInfo | undefined> => {

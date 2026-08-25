@@ -6,7 +6,14 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 // The module under test is server-only.
 mock.module("server-only", () => ({}));
 
-type FakePluginRow = { id: string; enabled: boolean };
+type FakePluginRow = {
+  id: string;
+  enabled: boolean;
+  grantedCapabilities: string[];
+};
+
+/** The grant a renderer needs; anything else is beside the point here. */
+const UI_PANEL = ["ui:panel"];
 
 let pluginRows: FakePluginRow[] = [];
 let listPluginsError: Error | undefined;
@@ -85,7 +92,9 @@ describe("enabledPluginRenderers", () => {
     await writeManifest("demo-plugin");
     await writeRenderer("demo-plugin", "search_docs");
     await writeRenderer("demo-plugin", "lookup_ticket");
-    pluginRows = [{ id: "demo-plugin", enabled: true }];
+    pluginRows = [
+      { id: "demo-plugin", enabled: true, grantedCapabilities: UI_PANEL },
+    ];
 
     const result = await enabledPluginRenderers();
 
@@ -97,24 +106,80 @@ describe("enabledPluginRenderers", () => {
   test("excludes a disabled plugin even if it has renderer files on disk", async () => {
     await writeManifest("demo-plugin");
     await writeRenderer("demo-plugin", "search_docs");
-    pluginRows = [{ id: "demo-plugin", enabled: false }];
+    pluginRows = [
+      { id: "demo-plugin", enabled: false, grantedCapabilities: UI_PANEL },
+    ];
 
     expect(await enabledPluginRenderers()).toEqual([]);
   });
 
   test("omits an enabled plugin that has no renderers directory", async () => {
     await writeManifest("no-renderers-plugin");
-    pluginRows = [{ id: "no-renderers-plugin", enabled: true }];
+    pluginRows = [
+      {
+        id: "no-renderers-plugin",
+        enabled: true,
+        grantedCapabilities: UI_PANEL,
+      },
+    ];
 
     expect(await enabledPluginRenderers()).toEqual([]);
   });
 
   test("logs and skips an enabled plugin whose manifest fails to discover, without throwing", async () => {
     // No plugin.json written at all for this id.
-    pluginRows = [{ id: "missing-plugin", enabled: true }];
+    pluginRows = [
+      { id: "missing-plugin", enabled: true, grantedCapabilities: UI_PANEL },
+    ];
 
     await expect(enabledPluginRenderers()).resolves.toEqual([]);
     expect(consoleErrorCalls.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * `ui:panel` is a capability an operator can explicitly DENY at the consent
+   * dialog, and a denied capability that still works is worse than one that
+   * never worked. Enablement is not the grant: a plugin can be enabled with
+   * only some of what it asked for.
+   */
+  test("excludes an enabled plugin whose ui:panel grant was denied", async () => {
+    await writeManifest("demo-plugin");
+    await writeRenderer("demo-plugin", "search_docs");
+    pluginRows = [
+      {
+        id: "demo-plugin",
+        enabled: true,
+        grantedCapabilities: ["tools:register", "storage:kv"],
+      },
+    ];
+
+    expect(await enabledPluginRenderers()).toEqual([]);
+  });
+
+  test("excludes a plugin granted nothing at all", async () => {
+    await writeManifest("demo-plugin");
+    await writeRenderer("demo-plugin", "search_docs");
+    pluginRows = [
+      { id: "demo-plugin", enabled: true, grantedCapabilities: [] },
+    ];
+
+    expect(await enabledPluginRenderers()).toEqual([]);
+  });
+
+  test("keeps a plugin granted ui:panel alongside other capabilities", async () => {
+    await writeManifest("demo-plugin");
+    await writeRenderer("demo-plugin", "search_docs");
+    pluginRows = [
+      {
+        id: "demo-plugin",
+        enabled: true,
+        grantedCapabilities: ["tools:register", "ui:panel"],
+      },
+    ];
+
+    expect(await enabledPluginRenderers()).toEqual([
+      { pluginId: "demo-plugin", toolNames: ["search_docs"] },
+    ]);
   });
 
   test("never throws when listPlugins fails", async () => {

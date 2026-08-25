@@ -5,7 +5,14 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
-type StubPluginRow = { id: string; enabled: boolean };
+type StubPluginRow = {
+  id: string;
+  enabled: boolean;
+  grantedCapabilities: string[];
+};
+
+/** The grant a renderer needs; anything else is beside the point here. */
+const UI_PANEL = ["ui:panel"];
 
 let pluginRows: Map<string, StubPluginRow>;
 
@@ -66,7 +73,11 @@ function callRoute(pluginId: string, file: string) {
 
 describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
   test("serves an enabled plugin's renderer with the exact CSP and content-type", async () => {
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     await writeRenderer(
       "demo-plugin",
       "search.html",
@@ -101,7 +112,11 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
    * `allow-forms`, which is the auto-submit route.
    */
   test("sandboxes the document itself, so a direct navigation is as confined as the iframe", async () => {
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     await writeRenderer("demo-plugin", "search.html", "<body>hi</body>");
 
     const response = await callRoute("demo-plugin", "search.html");
@@ -117,7 +132,11 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
 
   test("401s an unauthenticated request before any plugin/fs lookup", async () => {
     currentSession = undefined;
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     await writeRenderer("demo-plugin", "search.html", "<body>hi</body>");
 
     const response = await callRoute("demo-plugin", "search.html");
@@ -134,6 +153,7 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
     pluginRows.set("disabled-plugin", {
       id: "disabled-plugin",
       enabled: false,
+      grantedCapabilities: UI_PANEL,
     });
     await writeRenderer("disabled-plugin", "search.html", "<body>hi</body>");
 
@@ -141,8 +161,64 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
     expect(response.status).toBe(404);
   });
 
+  /**
+   * Enablement is not the grant. `ui:panel` is a capability the operator can
+   * explicitly DENY at the consent dialog while still enabling the plugin for
+   * everything else it asked for — and a denied capability that keeps working
+   * is worse than one that never worked.
+   *
+   * `renderer-info.ts` stops such a plugin contributing a renderer to the UI
+   * at all, so nothing links here. This route checks again anyway, for the
+   * same reason it carries a `sandbox` CSP directive: the URL is directly
+   * navigable, and "nothing links to it" is not a gate.
+   */
+  test("404s for an enabled plugin whose ui:panel grant was denied", async () => {
+    pluginRows.set("denied-plugin", {
+      id: "denied-plugin",
+      enabled: true,
+      grantedCapabilities: ["tools:register", "storage:kv"],
+    });
+    await writeRenderer("denied-plugin", "search.html", "<body>hi</body>");
+
+    const response = await callRoute("denied-plugin", "search.html");
+
+    // The same opaque 404 an unknown or disabled plugin gets: this endpoint
+    // never confirms which plugin ids exist, nor which grants they hold.
+    expect(response.status).toBe(404);
+  });
+
+  test("404s for an enabled plugin granted nothing at all", async () => {
+    pluginRows.set("ungranted-plugin", {
+      id: "ungranted-plugin",
+      enabled: true,
+      grantedCapabilities: [],
+    });
+    await writeRenderer("ungranted-plugin", "search.html", "<body>hi</body>");
+
+    const response = await callRoute("ungranted-plugin", "search.html");
+    expect(response.status).toBe(404);
+  });
+
+  test("serves a plugin granted ui:panel alongside other capabilities", async () => {
+    pluginRows.set("granted-plugin", {
+      id: "granted-plugin",
+      enabled: true,
+      grantedCapabilities: ["tools:register", "ui:panel"],
+    });
+    await writeRenderer("granted-plugin", "search.html", "<body>hi</body>");
+
+    const response = await callRoute("granted-plugin", "search.html");
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("<body>hi</body>");
+  });
+
   test("404s for a renderer file that doesn't exist", async () => {
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     await mkdir(path.join(pluginsRoot, "demo-plugin", "renderers"), {
       recursive: true,
     });
@@ -152,7 +228,11 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
   });
 
   test("rejects a path-traversal file segment before any fs call", async () => {
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     // Outside the plugin tree entirely, so a successful traversal would
     // read it.
     const secretPath = path.join(pluginsRoot, "secret.txt");
@@ -174,7 +254,11 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
   });
 
   test("rejects a symlinked renderer file, even one pointing inside the same directory", async () => {
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     await writeRenderer("demo-plugin", "legit.html", "<body>legit</body>");
     const renderersDir = path.join(pluginsRoot, "demo-plugin", "renderers");
     await symlink(
@@ -187,7 +271,11 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
   });
 
   test("rejects a symlinked renderer file pointing outside the plugin's tree", async () => {
-    pluginRows.set("demo-plugin", { id: "demo-plugin", enabled: true });
+    pluginRows.set("demo-plugin", {
+      id: "demo-plugin",
+      enabled: true,
+      grantedCapabilities: UI_PANEL,
+    });
     const renderersDir = path.join(pluginsRoot, "demo-plugin", "renderers");
     await mkdir(renderersDir, { recursive: true });
     const secretPath = path.join(pluginsRoot, "secret.html");

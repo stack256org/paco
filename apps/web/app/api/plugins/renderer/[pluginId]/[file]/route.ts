@@ -28,11 +28,19 @@ import { getServerSession } from "@/lib/session/get-server-session";
  *    URL-decodes into the raw segment before this handler ever sees it)
  *    fails the regex outright — there is no path-joining step for it to
  *    survive.
- * 2. The plugin must be both installed AND enabled (`getPlugin` — the same
- *    validated-row accessor `apps/web/lib/db/plugins.ts` exposes to every
- *    other caller). A disabled plugin's renderer is refused exactly like
- *    an unknown one: both are a plain 404, so this endpoint never confirms
- *    or denies which plugin ids exist versus which happen to be off.
+ * 2. The plugin must be installed, enabled, AND actually granted `ui:panel`
+ *    (`getPlugin` — the same validated-row accessor
+ *    `apps/web/lib/db/plugins.ts` exposes to every other caller).
+ *    Enablement is not the grant: an operator can enable a plugin while
+ *    denying this one capability at the consent dialog, and a denied
+ *    capability that keeps working is worse than one that never worked.
+ *    `lib/plugins/renderer-info.ts` applies the same filter so such a
+ *    plugin contributes no renderer to the UI in the first place; this
+ *    route checks again because the URL is directly navigable, which is the
+ *    same reason the response carries a `sandbox` directive. All three
+ *    refusals — unknown, disabled, ungranted — are the same plain 404, so
+ *    this endpoint never confirms which plugin ids exist, nor which grants
+ *    they hold.
  * 3. `lstat` (not `stat`) on the exact requested path, rejecting outright
  *    if it is a symlink — regardless of what it points at, even another
  *    file inside the same `renderers/` directory. This mirrors
@@ -105,6 +113,14 @@ const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
 const RENDERER_FILE_PATTERN = /^[a-z0-9_-]+\.html$/;
 
 /**
+ * The grant this route serves under. Serving plugin-authored HTML into a
+ * sandboxed iframe on Paco's origin IS `ui:panel` — mirrored in
+ * `lib/plugins/renderer-info.ts`, which applies the same filter so a plugin
+ * without the grant never contributes a renderer to the UI to begin with.
+ */
+const RENDERER_CAPABILITY = "ui:panel";
+
+/**
  * `frame-ancestors 'self'` is not implied by `default-src 'none'` —
  * `frame-ancestors` is excluded from the fetch-directive fallback chain by
  * spec, so it must be listed explicitly or embedding is left unrestricted.
@@ -154,10 +170,15 @@ export async function GET(
     return notFound();
   }
 
-  // Step 2: installed AND enabled — a disabled plugin 404s exactly like an
-  // unknown one.
+  // Step 2: installed, enabled, AND granted `ui:panel` — a disabled or
+  // ungranted plugin 404s exactly like an unknown one.
   const plugin = await getPlugin(pluginId);
-  if (!plugin?.enabled) {
+  if (
+    !(
+      plugin?.enabled &&
+      plugin.grantedCapabilities.includes(RENDERER_CAPABILITY)
+    )
+  ) {
     return notFound();
   }
 
