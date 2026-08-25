@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import type { Capability } from "@paco/plugin-kit";
 import { requireAdmin } from "@/lib/admin/require-admin";
 import {
+  ensurePluginIngressSecret,
   getPlugin,
   PluginGrantEscalationError,
   removePlugin,
@@ -132,8 +133,8 @@ export async function installPluginAction(input: { source: string }): Promise<{
 }
 
 /**
- * Grants a subset of the plugin's declared capabilities, enables it, and
- * starts its host.
+ * Grants a subset of the plugin's declared capabilities, enables it, mints
+ * a channel-ingress secret if the plugin needs one, and starts its host.
  *
  * `setPluginGrants` (`lib/db/plugins.ts`) is the actual enforcement of the
  * no-self-escalation invariant — this action never re-derives that check,
@@ -144,11 +145,27 @@ export async function installPluginAction(input: { source: string }): Promise<{
  * swallowed: the plugin is left enabled (a later retry, e.g. the next
  * `ensurePluginsStarted()` pass, will try again) but this call reports the
  * failure so the operator sees it immediately.
+ *
+ * `ensurePluginIngressSecret` (`lib/db/plugins.ts`, Section 6 Task 1) is
+ * called only when the plugin's MANIFEST declares `channels:ingress` — a
+ * plugin with no `channels/` slot has nothing for `/api/channels/[pluginId]`
+ * to authenticate, so it gets no secret. That check is on the manifest's
+ * declared capabilities, not on whether this call's `grants` happens to
+ * include `channels:ingress`: minting one doesn't itself unlock anything —
+ * `PluginHost.deliverIngress` still refuses to deliver unless
+ * `channels:ingress` is actually granted — so there's no consent
+ * implication to gate it further here. `ensurePluginIngressSecret` itself
+ * never regenerates an existing secret and returns the plaintext only when
+ * it just minted one, so a re-grant (or a second `grantAndEnableAction`
+ * call for an already-enabled plugin) returns no `ingressSecret` at all:
+ * this is the ONE response that ever carries the plaintext. No read path
+ * anywhere in this file (or `lib/db/plugins.ts`'s `getPlugin`/`listPlugins`)
+ * returns it again — the sealed column is all a later read ever sees.
  */
 export async function grantAndEnableAction(input: {
   pluginId: string;
   grants: Capability[];
-}): Promise<{ ok: boolean; error?: string }> {
+}): Promise<{ ok: boolean; error?: string; ingressSecret?: string }> {
   await requireAdmin();
 
   const idCheck = validatePluginId(input.pluginId);
@@ -167,12 +184,20 @@ export async function grantAndEnableAction(input: {
 
   await setPluginEnabled(input.pluginId, true);
 
+  let ingressSecret: string | undefined;
+  const row = await getPlugin(input.pluginId);
+  if (row?.manifest.capabilities.includes("channels:ingress")) {
+    ingressSecret = await ensurePluginIngressSecret(input.pluginId);
+  }
+
   const started = await startPluginHost(input.pluginId);
   if (!started.ok) {
     return { ok: false, error: started.error };
   }
 
-  return { ok: true };
+  return ingressSecret === undefined
+    ? { ok: true }
+    : { ok: true, ingressSecret };
 }
 
 /** Stops a plugin's host (if running) and marks it disabled. */
@@ -207,6 +232,11 @@ export async function disablePluginAction(input: {
  * checking here — rather than trusting `pluginDir()`'s own validation alone
  * — means a 404 comes back as an ordinary error value instead of depending
  * on that lower-level throw to save it.
+ *
+ * No separate ingress-secret cleanup is needed: `removePlugin` deletes the
+ * whole row, `ingressSecret` column included, so there is nothing left for
+ * a re-installed plugin of the same id to inherit — a fresh install starts
+ * with no secret, same as any other plugin that has never been enabled.
  */
 export async function removePluginAction(input: {
   pluginId: string;

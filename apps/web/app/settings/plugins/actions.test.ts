@@ -39,6 +39,7 @@ type FakeRow = {
   grantedCapabilities: Capability[];
   consentedNetDomains: string[];
   enabled: boolean;
+  ingressSecret?: string;
 };
 
 let rows: Map<string, FakeRow>;
@@ -80,8 +81,33 @@ async function removePluginImpl(id: string): Promise<void> {
   rows.delete(id);
 }
 
+let ensurePluginIngressSecretCalls: string[];
+
+/**
+ * Mirrors the real `ensurePluginIngressSecret` (`lib/db/plugins.ts`): mints
+ * and stores a secret only when the row doesn't already have one, and
+ * returns the plaintext only on that first mint — `undefined` on every
+ * later call, so a test can assert the secret is never handed back twice.
+ */
+async function ensurePluginIngressSecretImpl(
+  id: string,
+): Promise<string | undefined> {
+  ensurePluginIngressSecretCalls.push(id);
+  const row = rows.get(id);
+  if (!row) {
+    throw new Error(`No plugin installed with id "${id}"`);
+  }
+  if (row.ingressSecret) {
+    return undefined;
+  }
+  const secret = `secret-for-${id}`;
+  row.ingressSecret = secret;
+  return secret;
+}
+
 mock.module("@/lib/db/plugins", () => ({
   PluginGrantEscalationError: FakePluginGrantEscalationError,
+  ensurePluginIngressSecret: (id: string) => ensurePluginIngressSecretImpl(id),
   getPlugin: (id: string) => getPluginImpl(id),
   // Unused by anything this file exercises, but `lib/plugins/registry.ts`
   // (now the real, unmocked module backing `startPluginHost`/
@@ -252,6 +278,7 @@ beforeEach(() => {
   adminOk = true;
   rows = new Map();
   getPluginCalls = [];
+  ensurePluginIngressSecretCalls = [];
   registry().clear();
   (
     globalThis as typeof globalThis & { __pacoPluginStartLocks?: unknown }
@@ -457,6 +484,67 @@ describe("grantAndEnableAction", () => {
 
     expect(result).toEqual({ ok: true });
     expect(registry().get("widgets")).toBe(already);
+  });
+});
+
+describe("grantAndEnableAction ingress secret", () => {
+  test("mints and returns an ingress secret once for a channels:ingress plugin", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv", "channels:ingress"]));
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv", "channels:ingress"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.ingressSecret).toBe("secret-for-widgets");
+    expect(ensurePluginIngressSecretCalls).toEqual(["widgets"]);
+    expect(rows.get("widgets")?.ingressSecret).toBe("secret-for-widgets");
+  });
+
+  test("does not mint a secret for a plugin that doesn't declare channels:ingress", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv"]));
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv"],
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(result.ingressSecret).toBeUndefined();
+    expect(ensurePluginIngressSecretCalls).toEqual([]);
+  });
+
+  test("does not return the secret again on a later grantAndEnableAction call", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv", "channels:ingress"]));
+
+    const first = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv", "channels:ingress"],
+    });
+    expect(first.ingressSecret).toBe("secret-for-widgets");
+
+    const second = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv", "channels:ingress"],
+    });
+
+    expect(second.ok).toBe(true);
+    expect(second.ingressSecret).toBeUndefined();
+    expect(ensurePluginIngressSecretCalls).toEqual(["widgets", "widgets"]);
+  });
+
+  test("no other action's result ever carries an ingress secret", async () => {
+    rows.set("widgets", {
+      ...makeRow("widgets", ["channels:ingress"]),
+      ingressSecret: "already-set",
+    });
+
+    const installResult = await installPluginAction({ source: "acme/widgets" });
+    const disableResult = await disablePluginAction({ pluginId: "widgets" });
+
+    expect(installResult).not.toHaveProperty("ingressSecret");
+    expect(disableResult).not.toHaveProperty("ingressSecret");
   });
 });
 
