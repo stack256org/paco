@@ -58,7 +58,9 @@ mock.module("node:child_process", () => ({
   },
 }));
 
-const { buildCloneArgs, installPlugin } = await import("./install");
+const { buildCloneArgs, installPlugin, pluginDir, recheckPluginIntegrity } =
+  await import("./install");
+const { hashDirectory } = await import("./content-hash");
 
 let pluginsRoot: string;
 let localSourceDirs: string[] = [];
@@ -339,5 +341,69 @@ describe("installPlugin", () => {
     } finally {
       await rm(expectedAbsoluteRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("pluginDir", () => {
+  test("rejects a malformed id — including a traversal string — before touching the filesystem", () => {
+    expect(() => pluginDir("../../../etc")).toThrow();
+    expect(() => pluginDir("../secrets")).toThrow();
+    expect(() => pluginDir("Not-Lowercase")).toThrow();
+    expect(() => pluginDir("has a space")).toThrow();
+    expect(() => pluginDir("")).toThrow();
+  });
+
+  test("returns a path under the plugins root for a valid id, even before it's installed", () => {
+    const dir = pluginDir("not-installed-yet");
+    expect(dir).toBe(path.join(pluginsRoot, "not-installed-yet"));
+  });
+
+  test("throws when the entry for a valid id is a symlink that resolves outside the plugins root", async () => {
+    await symlink(os.tmpdir(), path.join(pluginsRoot, "escaped-plugin"));
+
+    expect(() => pluginDir("escaped-plugin")).toThrow(
+      /resolves outside the plugins root/,
+    );
+  });
+});
+
+describe("recheckPluginIntegrity", () => {
+  test("matches when the directory's current hash equals the recorded one", async () => {
+    const dir = pluginDir("hash-match-plugin");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "plugin.json"), "{}");
+    const expectedHash = await hashDirectory(dir);
+
+    const result = await recheckPluginIntegrity(
+      "hash-match-plugin",
+      expectedHash,
+    );
+
+    expect(result).toEqual({ ok: true });
+  });
+
+  test("refuses with a named, actionable error when the content has changed since install", async () => {
+    const dir = pluginDir("hash-mismatch-plugin");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "plugin.json"), "{}");
+
+    const result = await recheckPluginIntegrity(
+      "hash-mismatch-plugin",
+      "not-the-real-hash",
+    );
+
+    expect(result.ok).toBe(false);
+    const { error } = result as { ok: false; error: string };
+    expect(error).toContain('"hash-mismatch-plugin"');
+    expect(error).toMatch(/Reinstall it/);
+  });
+
+  test("surfaces a missing plugin directory as a value, not a throw", async () => {
+    const result = await recheckPluginIntegrity(
+      "never-installed-plugin",
+      "irrelevant",
+    );
+
+    expect(result.ok).toBe(false);
   });
 });

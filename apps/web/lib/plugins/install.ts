@@ -1,6 +1,7 @@
 import "server-only";
 
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { cp, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -79,15 +80,72 @@ function pluginsDir(): string {
 }
 
 /**
+ * Plugin ids, per the plan (spec Section 2) and `pluginManifestSchema`'s
+ * `name` field (`packages/plugin-kit/manifest.ts`). No `.`, no `/`, no
+ * uppercase — which is what makes it safe to join straight onto a
+ * filesystem path below: a string matching this can never contain `..` or a
+ * path separator, so it can never walk `pluginDir()` outside its root by
+ * itself.
+ */
+const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
+
+/**
  * Where one installed plugin lives on disk.
  *
  * Exported so callers that scan an installed plugin's own slots (skills,
  * agents) — `pluginSkillContributions`/`pluginAgentContributions` in
  * `contributions.ts` — resolve the same directory `commitInstall` moved the
  * plugin into, without a second copy of the `pluginsDir()` convention.
+ *
+ * Throws, rather than silently building a path, on two things:
+ *
+ * - `id` failing `PLUGIN_ID_PATTERN` — this is the id every caller in this
+ *   codebase gets from a validated manifest or a plugins-table row, never
+ *   from unreviewed user input directly, but a settings action taking a raw
+ *   `pluginId` string from the client is exactly the kind of call site a
+ *   future change could add without threading a fresh validation call
+ *   through it. Rejecting here means that mistake fails loud instead of
+ *   quietly building `<pluginsRoot>/../../etc` and handing it to `rm -rf`.
+ * - the resolved (symlink-followed) path landing outside the resolved
+ *   plugins root — belt-and-braces alongside the id check above: the id
+ *   pattern alone already rules out `..` in the requested id, but a
+ *   directory entry actually named e.g. `my-plugin` could itself be a
+ *   symlink pointing elsewhere (see `SECURITY.md`'s symlink-escape finding
+ *   for why "a path under the allowed prefix" and "a path actually inside
+ *   it" are not the same claim). A path that doesn't exist yet can't have
+ *   escaped through a symlink, so a missing `candidate` (or missing
+ *   `pluginsRoot`) skips this check rather than failing it.
  */
 export function pluginDir(id: string): string {
-  return path.join(pluginsDir(), id);
+  if (!PLUGIN_ID_PATTERN.test(id)) {
+    throw new Error(`Invalid plugin id ${JSON.stringify(id)}`);
+  }
+
+  const root = pluginsDir();
+  const candidate = path.join(root, id);
+
+  let resolvedRoot: string;
+  let resolvedCandidate: string;
+  try {
+    resolvedRoot = realpathSync(root);
+    resolvedCandidate = realpathSync(candidate);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      return candidate;
+    }
+    throw error;
+  }
+
+  const isContained =
+    resolvedCandidate === resolvedRoot ||
+    resolvedCandidate.startsWith(resolvedRoot + path.sep);
+  if (!isContained) {
+    throw new Error(
+      `plugin "${id}" resolves outside the plugins root (${resolvedCandidate} is not under ${resolvedRoot})`,
+    );
+  }
+
+  return candidate;
 }
 
 /** Fetches `source` into `destDir`, which already exists as an empty directory. */
@@ -305,4 +363,43 @@ async function commitInstall(params: {
   }
 
   return { ok: true, pluginId, requested: manifest.capabilities };
+}
+
+/**
+ * Re-verifies an installed plugin's on-disk content against the hash
+ * recorded at install/grant time, before anything starts its host.
+ *
+ * `contentHash` (`lib/db/schema.ts`) is written once, at install, and
+ * otherwise just sits in the row — nothing re-reads it without this
+ * function. An operator's consent (`setPluginGrants`) is consent to the
+ * code that was reviewed at that moment; a plugin directory that changes on
+ * disk afterwards — a manual edit, a compromised host, anything other than
+ * a fresh `installPlugin` call recomputing and rewriting the hash — must
+ * not run on that stale consent. Shared by every start path (the settings
+ * action here, and — once wired — `lib/plugins/registry.ts`'s
+ * `ensurePluginsStarted`) so there is exactly one place this check is made,
+ * not two that can drift.
+ */
+export async function recheckPluginIntegrity(
+  id: string,
+  expectedContentHash: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let actualHash: string;
+  try {
+    actualHash = await hashDirectory(pluginDir(id));
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Could not verify plugin "${id}"'s integrity: ${describe(error)}`,
+    };
+  }
+
+  if (actualHash !== expectedContentHash) {
+    return {
+      ok: false,
+      error: `Plugin "${id}" has changed on disk since it was installed — its content hash no longer matches what was reviewed and consented to. Reinstall it to review and re-consent to the current code before it can run.`,
+    };
+  }
+
+  return { ok: true };
 }

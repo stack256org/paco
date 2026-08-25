@@ -94,7 +94,10 @@ function validatePluginId(
   pluginId: string,
 ): { ok: true } | { ok: false; error: string } {
   if (!PLUGIN_ID_PATTERN.test(pluginId)) {
-    return { ok: false, error: `Invalid plugin id ${JSON.stringify(pluginId)}` };
+    return {
+      ok: false,
+      error: `Invalid plugin id ${JSON.stringify(pluginId)}`,
+    };
   }
   return { ok: true };
 }

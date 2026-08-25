@@ -42,8 +42,10 @@ type FakeRow = {
 };
 
 let rows: Map<string, FakeRow>;
+let getPluginCalls: string[];
 
 async function getPluginImpl(id: string): Promise<FakeRow | undefined> {
+  getPluginCalls.push(id);
   return rows.get(id);
 }
 
@@ -144,13 +146,17 @@ type FakePluginHost = {
   id: string;
   start: () => Promise<{ tools: [] }>;
   stop: () => Promise<void>;
+  onCrash: (callback: (error: string) => void) => void;
 };
 
 /**
  * A plain factory rather than a `class` — this file already declares
  * `FakePluginGrantEscalationError`, and Ultracite's `max-classes-per-file`
- * caps a file at one. The shape (an object with `start`/`stop`) is all
- * `startPluginHost`/`stopPluginHost` in `actions.ts` ever touch.
+ * caps a file at one. The shape (an object with `start`/`stop`/`onCrash`) is
+ * all `discoverAndStartHost` in the real, unmocked `lib/plugins/registry.ts`
+ * (see below) actually calls on a `PluginHost` — `onCrash` is a no-op here
+ * since crash-restart behavior is `registry.test.ts`'s concern, not this
+ * file's.
  */
 function makeFakePluginHost(options: {
   descriptor: { manifest: { name: string } };
@@ -163,6 +169,9 @@ function makeFakePluginHost(options: {
       stopCalls.push(id);
       return Promise.resolve();
     },
+    onCrash: () => {
+      // No-op: nothing in this file's tests simulates a post-start crash.
+    },
   };
 }
 
@@ -174,14 +183,37 @@ mock.module("@/lib/plugins/capability-handlers", () => ({
   buildCapabilityHandlers: () => ({}),
 }));
 
+// --- @/lib/plugins/plugin-fanout -------------------------------------------
+//
+// The real `lib/plugins/registry.ts` registers every started host with the
+// process-wide session-event fan-out (`plugin-fanout.ts`, itself a thin
+// wrapper around `SessionEventFanout`'s polling). That polling behavior is
+// `event-fanout.test.ts`'s concern, not this file's — mocked out here so a
+// started host doesn't leave a real poll timer running past this test file.
+
+mock.module("@/lib/plugins/plugin-fanout", () => ({
+  getPluginEventFanout: () => ({
+    register: () => {
+      // No-op.
+    },
+    unregister: () => {
+      // No-op.
+    },
+    start: () => {
+      // No-op.
+    },
+  }),
+}));
+
 // --- @/lib/plugins/registry ------------------------------------------------
 //
 // Deliberately NOT mocked: `startPluginHost`/`stopPluginHost` now live in
 // `lib/plugins/registry.ts` (Task 7 consolidated them out of this file), so
 // this test exercises the real registry module against the same mocked
 // `@paco/plugin-host`/`@paco/plugin-kit`/`@/lib/plugins/install`/
-// `@/lib/db/plugins` it already set up above — the same approach
-// `lib/plugins/registry.test.ts` uses for the registry's own tests.
+// `@/lib/plugins/plugin-fanout`/`@/lib/db/plugins` it already set up above —
+// the same approach `lib/plugins/registry.test.ts` uses for the registry's
+// own tests.
 
 const registryModule = await import("@/lib/plugins/registry");
 
@@ -219,6 +251,7 @@ function makeRow(id: string, capabilities: Capability[] = []): FakeRow {
 beforeEach(() => {
   adminOk = true;
   rows = new Map();
+  getPluginCalls = [];
   registry().clear();
   (
     globalThis as typeof globalThis & { __pacoPluginStartLocks?: unknown }
@@ -325,6 +358,40 @@ describe("installPluginAction", () => {
 
     expect(result.ok).toBe(false);
     expect(installCalls).toEqual([]);
+  });
+});
+
+describe("pluginId validation", () => {
+  const malformedIds = [
+    "../../../etc/passwd", // path traversal
+    "../secrets",
+    "Not-Lowercase",
+    "has a space",
+    "",
+  ];
+
+  test("grantAndEnableAction rejects every malformed id as a value, without touching the DB", async () => {
+    for (const pluginId of malformedIds) {
+      const result = await grantAndEnableAction({ pluginId, grants: [] });
+      expect(result.ok).toBe(false);
+    }
+    expect(getPluginCalls).toEqual([]);
+  });
+
+  test("disablePluginAction rejects every malformed id as a value, without touching the DB", async () => {
+    for (const pluginId of malformedIds) {
+      const result = await disablePluginAction({ pluginId });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  test("removePluginAction rejects a path-traversal id before any DB or filesystem work", async () => {
+    const result = await removePluginAction({
+      pluginId: "../../../etc/passwd",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(getPluginCalls).toEqual([]);
   });
 });
 
