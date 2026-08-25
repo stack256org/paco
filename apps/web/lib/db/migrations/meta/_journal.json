@@ -71,6 +71,13 @@
       "when": 1787671741286,
       "tag": "0009_pretty_sentinel",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787671794571,
+      "tag": "0010_parched_boomer",
+      "breakpoints": true
     }
   ]
 }

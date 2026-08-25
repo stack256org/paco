@@ -902,3 +902,61 @@ export const evalRuns = pgTable(
 
 export type EvalRun = typeof evalRuns.$inferSelect;
 export type NewEvalRun = typeof evalRuns.$inferInsert;
+
+/**
+ * A cron schedule that fires a task (spec Section 6 Task 4) — "run the
+ * suite nightly and open a fix PR if it's red" as a config row instead of a
+ * hand-run command.
+ *
+ * `sessionId` is required (unlike `tasks.sessionId`): a schedule always
+ * names the repo its fired task works in — there is no "proposal" case here
+ * the way a planner/reflection task can be session-less. `goal` is the
+ * prompt text handed to the executor the same way `tasks.goal` is;
+ * `assignedAgent` mirrors `tasks.assignedAgent` (a roster name, or null for
+ * the orchestrator's default agent). `cron` is stored as free text and
+ * validated at the write boundary (`lib/db/schedules.ts`), not with a
+ * database constraint, so an invalid expression is rejected with a
+ * field-level message before it ever reaches a row.
+ *
+ * `lastFiredAt` records the most recent fire (`lib/schedules/fire.ts`);
+ * there is deliberately no "missed windows" bookkeeping here — a schedule
+ * that fires only records that it fired, never what it would have fired for
+ * while nothing was watching (see that file's own comment on catch-up).
+ * `createdBy` is nullable and set-null-on-delete like `tasks.createdBy`: the
+ * schedule keeps firing after the admin who created it is gone.
+ */
+export const schedules = pgTable(
+  "schedules",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /** A five-field cron expression, validated by `lib/db/schedules.ts`. */
+    cron: text("cron").notNull(),
+    /** The full prompt/goal text handed to the executor when this fires. */
+    goal: text("goal").notNull(),
+    /** Roster name; null means the orchestrator's default agent. */
+    assignedAgent: text("assigned_agent"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastFiredAt: timestamp("last_fired_at"),
+    createdBy: text("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("schedules_org_id_enabled_idx").on(
+      table.organizationId,
+      table.enabled,
+    ),
+  ],
+);
+
+export type Schedule = typeof schedules.$inferSelect;
+export type NewSchedule = typeof schedules.$inferInsert;

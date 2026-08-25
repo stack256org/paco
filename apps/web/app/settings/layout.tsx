@@ -7,6 +7,7 @@ import {
   Bot,
   Brain,
   Cable,
+  Clock,
   LogOut,
   Menu,
   Settings as SettingsIcon,
@@ -112,6 +113,17 @@ const baseSidebarItems = [
     label: "Memory",
     href: "/settings/memory",
     icon: Brain,
+  },
+  {
+    /*
+     * Member-viewable like Memory: every member sees the organisation's
+     * cron schedules, even though creating, editing, and firing one is
+     * admin only (enforced in `./schedules/actions.ts`, not here).
+     */
+    id: "schedules",
+    label: "Schedules",
+    href: "/settings/schedules",
+    icon: Clock,
   },
 ];
 

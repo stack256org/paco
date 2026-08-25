@@ -51,6 +51,9 @@ importers:
       '@paco/claude-code':
         specifier: workspace:*
         version: link:../../packages/claude-code
+      '@paco/openfx-backend':
+        specifier: workspace:*
+        version: link:../../packages/openfx-backend
       '@paco/plugin-host':
         specifier: workspace:*
         version: link:../../packages/plugin-host
@@ -90,6 +93,9 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
+      cron-parser:
+        specifier: ^5.7.0
+        version: 5.7.0
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
