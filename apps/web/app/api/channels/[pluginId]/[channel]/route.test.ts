@@ -60,14 +60,32 @@ const CORRECT_SECRET = "correct-secret-value";
 function makeRequest(options: {
   secret?: string | null;
   body?: string;
+  /** The real source IP, as nginx would report it. */
   ip?: string;
+  /** A client-supplied X-Forwarded-For value, prepended the way nginx does. */
+  forgedPrefix?: string;
+  /** Set false to simulate a proxy that sent no X-Real-IP. */
+  realIp?: false;
 }): Request {
   const headers = new Headers({ "content-type": "application/json" });
   if (options.secret !== null) {
     headers.set("x-paco-channel-secret", options.secret ?? CORRECT_SECRET);
   }
   if (options.ip) {
-    headers.set("x-forwarded-for", options.ip);
+    // Mirrors nginx's `$proxy_add_x_forwarded_for`: whatever the client sent
+    // stays at the FRONT and nginx appends the real peer at the BACK. Tests
+    // that pass `forgedPrefix` are simulating a caller who supplied their own
+    // X-Forwarded-For, which is what makes the first entry untrustworthy.
+    headers.set(
+      "x-forwarded-for",
+      options.forgedPrefix
+        ? `${options.forgedPrefix}, ${options.ip}`
+        : options.ip,
+    );
+    if (options.realIp !== false) {
+      // nginx sets this as a REPLACE, so it always reflects the real peer.
+      headers.set("x-real-ip", options.ip);
+    }
   }
   // The route reads pluginId/channel exclusively from `params`, never from
   // the URL, so every test can share one URL and vary only what matters.
@@ -402,6 +420,86 @@ describe("POST /api/channels/[pluginId]/[channel]", () => {
     }
 
     expect(last?.status).toBe(429);
+  });
+
+  test("a caller cannot pick their own rate-limit bucket by forging X-Forwarded-For", async () => {
+    // nginx APPENDS to X-Forwarded-For, so a client-supplied value survives at
+    // the front. Reading the first entry let a caller rotate a forged value per
+    // request and never accumulate against any bucket. The real peer is the
+    // LAST entry (and X-Real-IP, which nginx replaces).
+    pluginRow = undefined;
+    registry = new Map();
+
+    let last: Response | undefined;
+    for (let i = 0; i < 61; i++) {
+      last = await POST(
+        // Same real peer every time; a different forged value each time.
+        makeRequest({
+          ip: "203.0.113.30",
+          forgedPrefix: `10.0.0.${i}`,
+          realIp: false,
+        }),
+        paramsFor("forge-plugin", "events"),
+      );
+    }
+
+    // The forged prefixes must not have bought 61 fresh buckets.
+    expect(last?.status).toBe(429);
+  });
+
+  test("a forged X-Forwarded-For cannot land in the real sender's bucket", async () => {
+    // The other half of the same attack: forging the legitimate integration's
+    // IP to burn ITS bucket and get its deliveries 429'd.
+    pluginRow = undefined;
+    registry = new Map();
+
+    let attackerLast: Response | undefined;
+    for (let i = 0; i < 61; i++) {
+      attackerLast = await POST(
+        makeRequest({
+          ip: "203.0.113.31",
+          forgedPrefix: "203.0.113.40",
+          realIp: false,
+        }),
+        paramsFor("victim-plugin", "events"),
+      );
+    }
+    expect(attackerLast?.status).toBe(429);
+
+    // The IP the attacker was impersonating is still free to send.
+    const legitimate = await POST(
+      makeRequest({ ip: "203.0.113.40", realIp: false }),
+      paramsFor("victim-plugin", "events"),
+    );
+    expect(legitimate.status).not.toBe(429);
+  });
+
+  test("X-Real-IP wins over X-Forwarded-For, since nginx replaces it", async () => {
+    pluginRow = undefined;
+    registry = new Map();
+
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.set("x-real-ip", "203.0.113.50");
+    headers.set("x-forwarded-for", "203.0.113.99, 203.0.113.50");
+    let last: Response | undefined;
+    for (let i = 0; i < 61; i++) {
+      last = await POST(
+        new Request("http://localhost/api/channels/plugin/channel", {
+          method: "POST",
+          headers,
+          body: "{}",
+        }),
+        paramsFor("realip-plugin", "events"),
+      );
+    }
+    expect(last?.status).toBe(429);
+
+    // The forged X-Forwarded-For front entry never got its own budget.
+    const forgedIdentity = await POST(
+      makeRequest({ ip: "203.0.113.99", realIp: false }),
+      paramsFor("realip-plugin", "events"),
+    );
+    expect(forgedIdentity.status).not.toBe(429);
   });
 
   test("two different source IPs hammering the same plugin+channel do not starve each other", async () => {

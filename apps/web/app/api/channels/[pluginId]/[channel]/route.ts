@@ -117,22 +117,46 @@ function notFound(): Response {
 /**
  * The caller's source IP, for rate limiting only — never for auth.
  *
- * Next.js's `Request` has no direct socket access, so this trusts the
- * reverse proxy in front of it (Paco is deployed behind nginx) to set these
- * headers itself and strip any client-supplied copy. Without a trusted
- * proxy in this position, a caller could spoof this header and evade the
- * per-IP limiter below — that is not this deployment's topology, but it is
- * why this is never used for anything security-critical beyond rate
- * limiting.
+ * Next.js's `Request` has no direct socket access, so this reads what the
+ * reverse proxy in front of it wrote. WHICH header, and which end of it, is
+ * the whole point:
+ *
+ * - `X-Real-IP` is preferred, because Paco's own nginx sets it with
+ *   `proxy_set_header X-Real-IP $remote_addr` — a REPLACE. Whatever the
+ *   client sent is discarded, so this value is the socket peer nginx
+ *   actually saw.
+ * - `X-Forwarded-For` is the fallback, and the LAST entry is taken, not the
+ *   first. Paco's nginx sets it with `$proxy_add_x_forwarded_for`, which
+ *   APPENDS `$remote_addr` to whatever the client already sent. So a caller
+ *   who sends `X-Forwarded-For: 1.2.3.4` has that value survive at the
+ *   FRONT, and nginx's trustworthy value lands at the back. Reading the
+ *   first entry — as this did originally — let any caller pick their own
+ *   rate-limit bucket: rotate a forged value per request to evade the
+ *   limiter entirely, or forge the real integration's IP to land in its
+ *   bucket and 429 it, which is the exact attack the per-IP key exists to
+ *   prevent.
+ *
+ * Both nginx configs that front this are in-repo and set both headers this
+ * way: `packaging/debian/postinst` and `lib/preview/nginx-config.ts`. The
+ * last-entry rule assumes that single hop; behind a different topology
+ * (another proxy in front of nginx) the trustworthy entry moves, and this
+ * would need to skip a known number of hops instead.
+ *
+ * With neither header — a direct connection that bypassed nginx entirely,
+ * i.e. local development — every such caller shares one `"unknown"` bucket.
+ * That is deliberate: a deployment where this is reachable without the proxy
+ * has no trustworthy source identity to offer, so one shared bucket is the
+ * honest answer rather than a per-caller one derived from something the
+ * caller controls.
  */
 function clientIp(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  const firstForwarded = forwardedFor?.split(",")[0]?.trim();
-  if (firstForwarded) {
-    return firstForwarded;
-  }
   const realIp = request.headers.get("x-real-ip")?.trim();
-  return realIp || "unknown";
+  if (realIp) {
+    return realIp;
+  }
+  const forwarded = request.headers.get("x-forwarded-for");
+  const lastForwarded = forwarded?.split(",").at(-1)?.trim();
+  return lastForwarded || "unknown";
 }
 
 /**
