@@ -1,0 +1,22 @@
+export { AcpError } from "./acp-error.ts";
+export {
+  AcpClient,
+  type AcpClientOptions,
+  type ContentBlock,
+  type InitializeParams,
+  type InitializeResult,
+  type LoadSessionParams,
+  type LoadSessionResult,
+  type McpServerConfig,
+  type NewSessionParams,
+  type NewSessionResult,
+  type PermissionDecision,
+  type PermissionHandler,
+  type PermissionOutcome,
+  type PermissionRequestParams,
+  type PromptParams,
+  type PromptResult,
+  type SessionModes,
+  type SessionUpdateEnvelope,
+  type StopReason,
+} from "./acp-client.ts";
