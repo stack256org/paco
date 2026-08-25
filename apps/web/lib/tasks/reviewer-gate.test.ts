@@ -80,6 +80,7 @@ let sessionResult: unknown = {
 let chatResult: unknown = {
   id: "chat-1",
   activeStreamId: null,
+  backend: "openfx",
 };
 
 const getSessionByIdSpy = mock(() => Promise.resolve(sessionResult));
@@ -133,6 +134,9 @@ let turnResult: unknown = {
 type RunAgentTurnCall = {
   prompt: string;
   maxTurns?: number;
+  chatId?: string;
+  chatBackend?: string | null;
+  approval?: { url: string; token: string };
   options: {
     customInstructions?: string;
     tools?: string[];
@@ -150,6 +154,16 @@ const sandboxExecSpy = mock(() =>
   Promise.resolve({ success: true, stdout: " file.ts | 2 +-\n" }),
 );
 const connectSandboxSpy = mock(() => Promise.resolve({ exec: sandboxExecSpy }));
+
+// The approval hook's endpoint and shared secret. Mocked so the assertions
+// below name exact values rather than re-deriving `appUrl()`'s port and a
+// freshly-minted random token.
+mock.module("@/lib/app-url", () => ({
+  appUrl: () => new URL("http://localhost:3066"),
+}));
+mock.module("@/lib/agent/approvals/token", () => ({
+  approvalToken: () => "reviewer-approval-secret",
+}));
 
 mock.module("@paco/sandbox", () => ({
   connectSandbox: connectSandboxSpy,
@@ -209,7 +223,7 @@ beforeEach(() => {
     branch: "main",
     sandboxState: { type: "docker", sandboxName: "session_1" },
   };
-  chatResult = { id: "chat-1", activeStreamId: null };
+  chatResult = { id: "chat-1", activeStreamId: null, backend: "openfx" };
   turnResult = {
     responseMessage: undefined,
     usage: {},
@@ -477,6 +491,47 @@ describe("runReviewerGate", () => {
     expect(call?.prompt).not.toContain(
       "Verify the diff matches the goal exactly.",
     );
+  });
+
+  /**
+   * The reviewer keeps `Bash` — running the project's own tests is a large
+   * part of what a useful review is — so, unlike the planner, it cannot be
+   * made safe by restriction alone. It has a real chat, so it gets the real
+   * gate instead.
+   */
+  test("installs the approval hook on the reviewer turn, addressed to the task's chat", async () => {
+    const task = makeTask();
+
+    await runReviewerGate(task, "chat-1");
+
+    const call = runAgentTurnSpy.mock.calls[0]?.[0];
+    expect(call?.chatId).toBe("chat-1");
+    expect(call?.approval).toEqual({
+      url: "http://127.0.0.1:3066/api/internal/approvals",
+      token: "reviewer-approval-secret",
+    });
+  });
+
+  test("runs the reviewer on the chat's own backend rather than defaulting to claude-code", async () => {
+    const task = makeTask();
+
+    await runReviewerGate(task, "chat-1");
+
+    const call = runAgentTurnSpy.mock.calls[0]?.[0];
+    expect(call?.chatBackend).toBe("openfx");
+  });
+
+  test("leaves the backend unset when the chat row cannot be read", async () => {
+    chatResult = undefined;
+    const task = makeTask();
+
+    await runReviewerGate(task, "chat-1");
+
+    const call = runAgentTurnSpy.mock.calls[0]?.[0];
+    expect(call?.chatBackend).toBeUndefined();
+    // The gate is still installed: it depends on the chat ID, which the
+    // caller supplied, not on the row being readable.
+    expect(call?.chatId).toBe("chat-1");
   });
 
   test("uses the reviewer roster row's own tools when it restricts them", async () => {

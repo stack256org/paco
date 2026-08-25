@@ -13,11 +13,40 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import type { AgentStepResult } from "@/lib/agent/run-step";
 import type { AgentCallOptions } from "@/lib/agent/types";
 import type { DesignCandidate } from "./candidates";
 import type { DesignProgress, RunCandidateTurn } from "./design-turn";
 
 mock.module("server-only", () => ({}));
+
+/**
+ * `defaultRunCandidateTurn` — the runner `runDesignTurn` uses when the caller
+ * injects none — reaches `runAgentTurn` through a dynamic `import()`, so this
+ * module mock only ever bites in the one describe block below that exercises
+ * it. Every other test here injects its own `runTurn` and never touches it.
+ */
+type RunAgentTurnArgs = Parameters<
+  typeof import("@/lib/agent/run-step").runAgentTurn
+>[0];
+
+const runAgentTurnSpy = mock((_params: RunAgentTurnArgs) =>
+  Promise.resolve({
+    finishReason: "stop",
+    isError: false,
+    claudeSessionId: "claude-1",
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      models: {},
+    },
+  } as AgentStepResult<never>),
+);
+mock.module("@/lib/agent/run-step", () => ({
+  runAgentTurn: (params: RunAgentTurnArgs) => runAgentTurnSpy(params),
+}));
 
 const {
   commitCandidateIfDirty,
@@ -384,6 +413,126 @@ describe("runDesignTurn", () => {
     for (const event of events) {
       expect(event.candidate).toBe(1);
     }
+  });
+});
+
+/**
+ * The approval seam.
+ *
+ * `run-step.ts` runs the CLI with `permissionMode: "bypassPermissions"`
+ * unconditionally, and installs the `PreToolUse` approval hook only when
+ * BOTH `approval` and `chatId` reach it. A design candidate has `Write`,
+ * `Edit` and `Bash` and is driven by arbitrary user prompt text, so a
+ * candidate turn that reaches `runAgentTurn` without those two is the
+ * single least-gated turn in the product.
+ */
+describe("runDesignTurn — approval and backend", () => {
+  test("passes the chat's approval settings, chat id and backend to every candidate turn", async () => {
+    const calls: Array<Parameters<RunCandidateTurn>[0]> = [];
+    const runTurn: RunCandidateTurn = (params) => {
+      calls.push(params);
+      return Promise.resolve({ isError: false, finishReason: "stop" });
+    };
+
+    await runDesignTurn({
+      candidates: [candidate(1, "/designs/1"), candidate(2, "/designs/2")],
+      prompt: "Build a landing page",
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      approval: {
+        url: "http://127.0.0.1:3066/api/internal/approvals",
+        token: "approval-secret",
+      },
+      chatId: "chat-1",
+      chatBackend: "openfx",
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      runTurn,
+      commitCandidate: noopCommit,
+    });
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.approval).toEqual({
+        url: "http://127.0.0.1:3066/api/internal/approvals",
+        token: "approval-secret",
+      });
+      expect(call.chatId).toBe("chat-1");
+      expect(call.chatBackend).toBe("openfx");
+    }
+  });
+
+  test("leaves approval, chat id and backend unset when the caller supplies none", async () => {
+    const calls: Array<Parameters<RunCandidateTurn>[0]> = [];
+    const runTurn: RunCandidateTurn = (params) => {
+      calls.push(params);
+      return Promise.resolve({ isError: false, finishReason: "stop" });
+    };
+
+    await runDesignTurn({
+      candidates: [candidate(1, "/designs/1")],
+      prompt: "Build a landing page",
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      runTurn,
+      commitCandidate: noopCommit,
+    });
+
+    expect(calls[0]?.approval).toBeUndefined();
+    expect(calls[0]?.chatId).toBeUndefined();
+    expect(calls[0]?.chatBackend).toBeUndefined();
+  });
+});
+
+describe("the default candidate turn runner", () => {
+  test("forwards approval, chat id and backend through to runAgentTurn", async () => {
+    runAgentTurnSpy.mockClear();
+
+    await runDesignTurn({
+      candidates: [candidate(1, "/designs/1")],
+      prompt: "Build a landing page",
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      approval: {
+        url: "http://127.0.0.1:3066/api/internal/approvals",
+        token: "approval-secret",
+      },
+      chatId: "chat-1",
+      chatBackend: "openfx",
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      commitCandidate: noopCommit,
+    });
+
+    expect(runAgentTurnSpy).toHaveBeenCalledTimes(1);
+    const call = runAgentTurnSpy.mock.calls[0]?.[0];
+    expect(call?.approval).toEqual({
+      url: "http://127.0.0.1:3066/api/internal/approvals",
+      token: "approval-secret",
+    });
+    expect(call?.chatId).toBe("chat-1");
+    expect(call?.chatBackend).toBe("openfx");
+  });
+
+  test("omits approval, chat id and backend entirely when the design turn had none", async () => {
+    runAgentTurnSpy.mockClear();
+
+    await runDesignTurn({
+      candidates: [candidate(1, "/designs/1")],
+      prompt: "Build a landing page",
+      agentOptions: baseAgentOptions(),
+      designerAgent: FALLBACK_DESIGNER_AGENT,
+      onProgress: () => Promise.resolve(),
+      onChunk: () => Promise.resolve(),
+      commitCandidate: noopCommit,
+    });
+
+    const call = runAgentTurnSpy.mock.calls[0]?.[0];
+    expect(call).not.toHaveProperty("approval");
+    expect(call).not.toHaveProperty("chatId");
+    expect(call).not.toHaveProperty("chatBackend");
   });
 });
 

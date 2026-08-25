@@ -340,6 +340,26 @@ describe("planGoal", () => {
     }
   });
 
+  /**
+   * A planning turn runs under `bypassPermissions` with no `PreToolUse`
+   * approval hook — `run-step.ts` installs that hook only when both
+   * `approval` and `chatId` reach it, and a planner turn has no chat for a
+   * human to answer in. `Bash` is therefore not gateable here by anything,
+   * so it is simply not granted: this test is the enforcement.
+   */
+  test("never grants the planning turn Bash, or any other tool that can write", async () => {
+    await planGoal({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      goal: "Ship the billing page",
+    });
+
+    const args = runAgentTurnMock.mock.calls[0]?.[0];
+    expect(args?.options.tools).not.toContain("Bash");
+    expect(args?.chatId).toBeUndefined();
+    expect(args?.approval).toBeUndefined();
+  });
+
   test("runs one headless, read-only turn against the session repo dir, with no subagent delegation", async () => {
     await planGoal({
       organizationId: "org-1",
@@ -350,7 +370,7 @@ describe("planGoal", () => {
     expect(runAgentTurnMock).toHaveBeenCalledTimes(1);
     const args = runAgentTurnMock.mock.calls[0]?.[0];
     expect(args?.maxTurns).toBe(20);
-    expect(args?.options.tools).toEqual(["Read", "Grep", "Glob", "Bash"]);
+    expect(args?.options.tools).toEqual(["Read", "Grep", "Glob"]);
     expect(args?.options.disallowedTools).toEqual([
       "Write",
       "Edit",

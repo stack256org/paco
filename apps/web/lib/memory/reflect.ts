@@ -231,10 +231,34 @@ export async function reflectOnRecentSessions(params: {
       unknown
     >;
 
-    // `cwd` is unused for pure structured-output generation (see
-    // `generateText`'s doc comment in `packages/claude-code/generate.ts`);
-    // this call is org-wide, not tied to any one session's repo, so there is
-    // no more meaningful directory to hand it than the process's own.
+    /*
+     * `generateObject` from `@paco/claude-code`, NOT `runAgentTurn` — this
+     * deliberately does not go through the backend seam, for two separate
+     * reasons worth stating rather than leaving to be rediscovered.
+     *
+     * Security: the seam exists because `runAgentTurn` runs the CLI with
+     * `permissionMode: "bypassPermissions"`, which makes the `PreToolUse`
+     * approval hook the only gate on a tool call. There is nothing to gate
+     * here. `generateObject` runs with `tools: []` and `maxTurns: 1`
+     * (`packages/claude-code/generate.ts`), so this is prompt in,
+     * schema-constrained JSON out — no agentic loop, no filesystem, no
+     * shell. A turn that cannot call a tool cannot be gated wrongly.
+     *
+     * Backend: this is Claude-only on purpose, not by omission. A backend
+     * choice in Paco is a per-CHAT column (`chats.backend`), and reflection
+     * has no chat — it runs from a cron job across an entire organisation's
+     * recent turns. There is no chat's choice to inherit and no defensible
+     * way to elect one chat's backend to speak for the whole org, so it
+     * runs on the one backend that is always present. The `tools: []`
+     * framing above is what makes that acceptable: the thing a caller loses
+     * by not choosing a backend is the agentic behaviour, and there is none
+     * here to lose.
+     *
+     * `cwd` is unused for pure structured-output generation (see
+     * `generateText`'s doc comment in `packages/claude-code/generate.ts`);
+     * this call is org-wide, not tied to any one session's repo, so there is
+     * no more meaningful directory to hand it than the process's own.
+     */
     const raw = await generateObject<unknown>(
       buildTranscript(turns),
       jsonSchema,

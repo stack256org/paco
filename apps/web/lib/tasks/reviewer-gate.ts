@@ -4,8 +4,11 @@ import { generateId } from "ai";
 import type { UIMessage } from "ai";
 import { z } from "zod";
 import { submitChatMessage } from "@/lib/chat/submit-message";
+import { approvalToken } from "@/lib/agent/approvals/token";
+import type { BackendSelectionInput } from "@/lib/agent/backend-factory";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
+import { appUrl } from "@/lib/app-url";
 import { getRoster } from "@/lib/db/roster";
 import type { SessionRecord } from "@/lib/db/sessions";
 import type { Task, TaskStatus } from "@/lib/db/schema";
@@ -42,16 +45,41 @@ const reviewerOutputSchema = z.object({
  * `disallowedTools` is passed alongside this as defense in depth: `tools` is
  * an allow-list, so a custom roster row that widens it to include `Write`
  * or `Edit` would otherwise hand a reviewer — whose whole point is to judge
- * work, not touch it — the ability to change the thing it is reviewing. The
- * residual risk is `Bash` itself, which is not deniable this way: an
- * unattended reviewer turn has no `chatId`/`approval` wired through
- * `runAgentTurn`, so the `PreToolUse` approval hook that gates a normal
- * chat's Bash calls never installs for this turn, and nothing here stops
- * the reviewer's shell commands from writing files. Read-only intent is
- * enforced by the reviewer's own system prompt, not by the sandbox.
+ * work, not touch it — the ability to change the thing it is reviewing.
+ *
+ * `Bash` stays, and is not deniable this way — a shell can write files no
+ * matter what the allow-list says about `Write`. It stays because a review
+ * worth having runs the project's own tests and build, and because the
+ * reviewer, unlike the planner (`lib/tasks/planner.ts`, whose `Bash` was
+ * removed for exactly this reason), CAN be gated: it runs against a real
+ * chat's worktree with a real `chatId`, so `runReviewerTurn` wires the
+ * `PreToolUse` approval hook through to it and the same
+ * `decideApproval` policy that guards a human's own chat guards this turn.
+ * That policy allows ordinary in-worktree work silently and stops only what
+ * reaches outside it or is irreversible, so the gate costs a reviewer
+ * nothing it legitimately needs.
  */
 const DEFAULT_REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Bash"];
 const REVIEWER_DISALLOWED_TOOLS = ["Write", "Edit", "NotebookEdit"];
+
+/**
+ * Where the `PreToolUse` approval hook posts, and the secret it carries.
+ *
+ * Mirrors the chat workflow's own construction (`app/workflows/chat.ts`):
+ * the hook runs on this machine, as a child of the CLI this server spawned,
+ * so 127.0.0.1 is right even when the app is reached through another
+ * origin — and the port comes from `APP_URL`, the one place it is
+ * configured. That last detail is load-bearing rather than fussy: the hook
+ * fails OPEN on a transport error by design, so a callback aimed at a
+ * closed port would not error loudly, it would silently approve every tool
+ * call this gate exists to stop.
+ */
+function reviewerApproval(): { url: string; token: string } {
+  return {
+    url: `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`,
+    token: approvalToken(),
+  };
+}
 
 /** Cap on the resultSummary column. */
 const RESULT_SUMMARY_MAX_LENGTH = 500;
@@ -278,7 +306,17 @@ type ReviewerVerdictOutcome = {
   summary: string;
 };
 
-/** Runs the reviewer's one headless turn and normalizes its output. */
+/**
+ * Runs the reviewer's one headless turn and normalizes its output.
+ *
+ * `chatBackend` is the chat's own `backend` column, threaded through so the
+ * review runs on the backend the chat is actually set to. Left undefined
+ * when the chat row could not be read, in which case `runAgentTurn`'s
+ * `normalizeBackendId(undefined)` falls back to `"claude-code"` — the same
+ * fallback every other unreadable-backend path takes, and the reason this
+ * is threaded at all: a chat explicitly switched to OpenFX used to have its
+ * work reviewed on Claude Code without that appearing anywhere.
+ */
 async function runReviewerTurn(
   task: Task,
   chatId: string,
@@ -289,6 +327,7 @@ async function runReviewerTurn(
     model?: string;
     tools?: string[];
   },
+  chatBackend?: BackendSelectionInput["backend"],
 ): Promise<ReviewerVerdictOutcome> {
   if (!session.sandboxState) {
     return {
@@ -321,6 +360,27 @@ async function runReviewerTurn(
     messageId: generateId(),
     originalMessages: [],
     maxTurns: 15,
+    /*
+     * The gate. Paco runs the CLI with
+     * `permissionMode: "bypassPermissions"` unconditionally
+     * (`lib/agent/run-step.ts`), so the `PreToolUse` hook is the only thing
+     * standing between a tool call and the operator's machine — and
+     * `run-step.ts` installs it only when BOTH of these arrive. A reviewer
+     * turn holds `Bash` and reads a diff written by a previous agent turn,
+     * which is untrusted content (see `buildReviewerPrompt`), so this is
+     * not a theoretical exposure.
+     *
+     * The turn is unattended, which is the honest cost: an approval nobody
+     * answers is denied after five minutes
+     * (`lib/agent/approvals/store.ts` — it fails closed). That is the right
+     * trade. The policy only asks about what reaches outside the worktree
+     * or is irreversible, so an honest reviewer never trips it, and a
+     * reviewer that does trip it is asking for exactly the thing an
+     * unattended turn should not be allowed to do unasked.
+     */
+    approval: reviewerApproval(),
+    chatId,
+    ...(chatBackend ? { chatBackend } : {}),
     onChunk: () => Promise.resolve(),
   });
 
@@ -391,11 +451,19 @@ export async function runReviewerGate(
 
   await applyTransition(task.organizationId, task.id, "review");
 
+  // Read for its `backend` only — which backend this chat's turns run on,
+  // so the review runs there too. Best-effort: a chat row that cannot be
+  // read is not a reason to abandon a review that otherwise has everything
+  // it needs, so this falls through to `runAgentTurn`'s own default rather
+  // than failing the gate.
+  const chat = await getChatById(chatId);
+
   const { verdict, problems, summary } = await runReviewerTurn(
     task,
     chatId,
     session,
     reviewer,
+    chat?.backend,
   );
 
   const next = nextOnReviewerVerdict(

@@ -21,23 +21,38 @@ import { getOrganization } from "@/lib/org/organization";
  * The planner only needs to understand the codebase well enough to write a
  * sensible task tree — it never implements anything itself, so there is no
  * reason to grant it `Edit`/`Write` or anything else destructive.
+ *
+ * `Bash` used to be on this list, and its removal is the security fix, not a
+ * tidy-up. Paco runs the CLI with `permissionMode: "bypassPermissions"`
+ * unconditionally (`lib/agent/run-step.ts`), so the ONLY gate on a tool call
+ * is the `PreToolUse` approval hook — and `run-step.ts` installs that hook
+ * only when both an `approval` endpoint and a `chatId` reach it. A planning
+ * turn has neither, and cannot: `planGoal` is session-scoped and headless
+ * (a server action or an inbound channel message, see `PlanGoalParams`),
+ * there is no chat for an approval card to appear in and no human watching
+ * one, and the approval store fails closed after five minutes
+ * (`lib/agent/approvals/store.ts`) — so a hook wired to a chat that does not
+ * exist would stall the turn rather than gate it.
+ *
+ * That leaves exactly two honest options for a `Bash`-capable planning turn:
+ * a real approval gate, or no `Bash`. Since the planner's whole job is to
+ * read enough of the repository to decompose a goal — and `Read`, `Grep` and
+ * `Glob` cover that completely — the restriction is the right one. It is a
+ * strictly stronger guarantee than the hook would have given, because it is
+ * enforced by the CLI's own allow-list rather than by a policy decision made
+ * per call.
  */
-const PLANNER_TOOLS = ["Read", "Grep", "Glob", "Bash"];
+const PLANNER_TOOLS = ["Read", "Grep", "Glob"];
 
 /**
  * Belt-and-suspenders on top of `PLANNER_TOOLS`: even though those three
  * are already absent from the allowlist above, they are named again here so
  * the exclusion survives independently of that list ever changing shape.
  *
- * What this does NOT cover: `bypassPermissions` plus a bare `Bash` still
- * means this turn runs with no `PreToolUse` approval hook — `run-step.ts`
- * only installs that hook when both `approval` and a `chatId` are passed to
- * `runAgentTurn`, and a headless planning turn has neither (there is no chat
- * for a human to approve or deny against). So `Bash` itself is not sandboxed
- * beyond the read-only framing in the system prompt and the `maxTurns` cap
- * below. Closing that gap properly needs either a hookable approval path
- * that does not require a real chat, or a read-only exec wrapper scoped to
- * planning turns — both out of scope here and worth a follow-up.
+ * `Bash` is deliberately NOT named here — it is excluded by the allow-list
+ * above, and repeating it in a deny-list would suggest a `Bash`-capable
+ * planning turn is one config change away from being acceptable. It is not,
+ * for the reasons `PLANNER_TOOLS` sets out: nothing would gate it.
  */
 const PLANNER_DISALLOWED_TOOLS = ["Write", "Edit", "NotebookEdit"];
 
@@ -117,10 +132,10 @@ type PlannerTask = {
  *
  * The goal itself is delimited and framed as data, matching the
  * anti-injection pattern `lib/memory/distill.ts` uses for transcripts: a
- * goal is free text a user typed, and this turn runs with `Bash` and
- * read access to the whole repository, so text inside the goal that reads
- * like an instruction (or a request to ignore the planner's own framing)
- * must never be able to redirect what the planning turn does.
+ * goal is free text a user typed, and this turn runs with read access to
+ * the whole repository, so text inside the goal that reads like an
+ * instruction (or a request to ignore the planner's own framing) must never
+ * be able to redirect what the planning turn does.
  */
 export function buildPlannerPrompt(goal: string, agentNames: string[]): string {
   const roster = agentNames.length > 0 ? agentNames.join(", ") : "none";
@@ -248,7 +263,10 @@ export async function sessionBelongsToOrganization(
  * this turn — without it, `runAgentTurn` falls back to the tiered
  * `DEFAULT_AGENTS` roster, whose `executor` has no tool restriction of its
  * own, which would make `PLANNER_TOOLS`/`PLANNER_DISALLOWED_TOOLS` on the
- * orchestrator moot the moment the planner delegated to it.
+ * orchestrator moot the moment the planner delegated to it. That matters
+ * more than it reads: `PLANNER_TOOLS` is this turn's ONLY safety mechanism
+ * (there is no approval hook — see that constant's own doc), so anything
+ * that could route around it would leave the turn with no gate at all.
  *
  * Root and children are inserted inside one `db.transaction`: nothing is
  * left behind if a later insert in the loop fails, matching the same
@@ -302,6 +320,23 @@ export async function planGoal(
   const prompt = buildPlannerPrompt(params.goal, rosterNames);
   const customInstructions = `${PLANNER_AGENT_DEFINITION.description}\n\n${PLANNER_AGENT_DEFINITION.prompt}`;
 
+  /*
+   * No `approval`/`chatId`, and no `chatBackend` — both absences are
+   * deliberate, and both are the reason `PLANNER_TOOLS` is what it is.
+   *
+   * Approval: there is no chat here to raise an approval card in (see
+   * `PLANNER_TOOLS`), so the turn is made safe by holding no tool that can
+   * change anything, rather than by a gate that has no one to ask.
+   *
+   * Backend: `chatBackend` is a chat's `backend` column, and a planning turn
+   * has no chat — it runs against the SESSION repository, before any chat
+   * exists, on behalf of an organisation. There is no per-chat choice to
+   * inherit and no defensible way to pick one chat's backend to speak for a
+   * session, so this turn runs on the instance default that
+   * `normalizeBackendId(undefined)` resolves to. If planning ever grows a
+   * chat-originated caller, that caller's `chat.backend` is what belongs
+   * here.
+   */
   const step = await runAgentTurn<UIMessage>({
     prompt,
     options: {

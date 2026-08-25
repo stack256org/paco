@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { ClaudeAgentDefinition } from "@paco/claude-code";
 import type { UIMessageChunk } from "ai";
 import { candidateContainerPort } from "@/lib/preview/nginx-config";
+import type { BackendSelectionInput } from "@/lib/agent/backend-factory";
 import type { AgentCallOptions } from "@/lib/agent/types";
 import type { DesignCandidate } from "./candidates";
 
@@ -364,6 +365,16 @@ export type RunCandidateTurn = (params: {
   options: AgentCallOptions;
   messageId: string;
   maxTurns: number;
+  /**
+   * Where the `PreToolUse` approval hook posts, and the secret it
+   * authenticates with. See `RunDesignTurnParams.approval` for why a design
+   * candidate of all turns must carry this.
+   */
+  approval?: { url: string; token: string };
+  /** The chat this candidate belongs to; the hook names it when it asks. */
+  chatId?: string;
+  /** The chat's own backend, so a candidate runs where its chat runs. */
+  chatBackend?: BackendSelectionInput["backend"];
   onChunk: (chunk: UIMessageChunk) => Promise<void>;
 }) => Promise<CandidateTurnResult>;
 
@@ -377,6 +388,16 @@ async function defaultRunCandidateTurn(
     messageId: params.messageId,
     originalMessages: [],
     maxTurns: params.maxTurns,
+    // Spread rather than passed unconditionally: `run-step.ts` keys the
+    // hook (and the OpenFX in-process approval handler) off `approval &&
+    // chatId` both being present, and an explicit `approval: undefined`
+    // reads, at every call site that logs or forwards these, as "this turn
+    // deliberately has no gate" rather than "this caller had nothing to
+    // give". The distinction matters here precisely because the absent case
+    // is the insecure one.
+    ...(params.approval ? { approval: params.approval } : {}),
+    ...(params.chatId ? { chatId: params.chatId } : {}),
+    ...(params.chatBackend ? { chatBackend: params.chatBackend } : {}),
     onChunk: params.onChunk,
   });
   return {
@@ -401,6 +422,37 @@ export interface RunDesignTurnParams {
    * rather than fresh ones. Defaults to `"initial"`.
    */
   framing?: DesignTurnFraming;
+  /**
+   * Where the `PreToolUse` approval hook posts, and the secret it
+   * authenticates with — the chat workflow's own `approvalUrl` /
+   * `approvalToken()` pair, handed straight through to `runAgentTurn`.
+   *
+   * Optional only so this stays additive for existing callers. It should
+   * always be set in practice: Paco runs the CLI with
+   * `permissionMode: "bypassPermissions"` unconditionally
+   * (`lib/agent/run-step.ts`), so the hook is the ONLY gate on a tool call,
+   * and `run-step.ts` installs it only when both this and `chatId` arrive.
+   * A design candidate is the worst turn in the product to leave ungated:
+   * it holds `Write`, `Edit` and `Bash`, it runs on the host, and its
+   * prompt is arbitrary text the user typed.
+   */
+  approval?: { url: string; token: string };
+  /**
+   * The chat this design turn belongs to. Half of the hook's install
+   * condition (see `approval` above), and what the approval card in the UI
+   * is addressed to — without it a candidate's request would have no chat
+   * to surface in even if the hook were installed.
+   */
+  chatId?: string;
+  /**
+   * The chat's `backend` column, so candidates run on the backend the chat
+   * is actually set to.
+   *
+   * Without it `runAgentTurn` resolves `normalizeBackendId(undefined)` to
+   * `"claude-code"`, and a chat explicitly switched to OpenFX would run its
+   * design turn on Claude Code without saying so anywhere.
+   */
+  chatBackend?: BackendSelectionInput["backend"];
   onProgress: (progress: DesignProgress) => Promise<void>;
   onChunk: (candidateIndex: number, chunk: UIMessageChunk) => Promise<void>;
   /** Injectable for tests; defaults to the real `runAgentTurn`. */
@@ -431,6 +483,11 @@ export interface RunDesignTurnResult {
  * show." The design turn only fails — by throwing `DesignTurnAllFailedError`
  * — when every candidate failed, since a design turn with zero surviving
  * candidates has nothing left to hand back.
+ *
+ * `approval`, `chatId` and `chatBackend` are handed to every candidate
+ * unchanged. They are the tool-approval gate and the backend choice, and
+ * they matter more here than anywhere else in the product — see
+ * `RunDesignTurnParams.approval`.
  */
 export async function runDesignTurn(
   params: RunDesignTurnParams,
@@ -487,6 +544,9 @@ export async function runDesignTurn(
             },
             messageId: `design-candidate-${candidate.index}`,
             maxTurns: DESIGN_CANDIDATE_MAX_TURNS,
+            ...(params.approval ? { approval: params.approval } : {}),
+            ...(params.chatId ? { chatId: params.chatId } : {}),
+            ...(params.chatBackend ? { chatBackend: params.chatBackend } : {}),
             onChunk: (chunk) => params.onChunk(candidate.index, chunk),
           });
 
