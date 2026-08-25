@@ -103,15 +103,27 @@ const DIFF_SUMMARY_TRUNCATION_MARKER = "\n…truncated";
 const MALFORMED_PROBLEMS = ["reviewer output malformed"];
 
 /**
- * Applies a task-board transition, swallowing a concurrent-update race.
+ * Applies a task-board transition, swallowing a concurrent-update race —
+ * and ONLY a race.
  *
- * `transitionTaskStatus` throws `TaskTransitionError` both for an illegal
- * edge and for a concurrent writer that got there first (see its own
- * doc comment). Either way, this gate has already done its work — running
- * the reviewer turn, deciding the verdict — and a second writer racing it is
- * not a reason to crash the workflow step calling this. It is logged instead,
- * so the race is visible without taking the turn down. Any other error is
- * not a race this gate knows how to reason about, so it propagates.
+ * `transitionTaskStatus` throws `TaskTransitionError` for two opposite
+ * situations, told apart by its `kind` (see `lib/db/tasks.ts`):
+ *
+ * - `"race"` is swallowed and logged. This gate has already done its work —
+ *   running the reviewer turn, deciding the verdict — and another writer
+ *   getting there first is a legitimate outcome, not a reason to crash the
+ *   workflow step calling this.
+ * - `"illegal"` propagates. It means this gate asked for an edge the state
+ *   machine does not have, which is a programming error in the gate, not
+ *   something that happened to it. Swallowing it is how `review -> blocked`
+ *   went missing from the transition table for an entire branch without one
+ *   loud failure: the cap fired, the transition was refused, this logged
+ *   "race", and the gate returned `"fail"` as though it had blocked the
+ *   task — which sat in `review` forever, unreachable by any later turn and
+ *   with no button on the board.
+ *
+ * Any other error is not something this gate knows how to reason about, so
+ * it propagates too.
  */
 async function applyTransition(
   organizationId: string,
@@ -122,7 +134,7 @@ async function applyTransition(
   try {
     await transitionTaskStatus(organizationId, taskId, to, patch);
   } catch (error) {
-    if (error instanceof TaskTransitionError) {
+    if (error instanceof TaskTransitionError && error.kind === "race") {
       console.error("[tasks] reviewer gate: transition race", {
         taskId,
         to,

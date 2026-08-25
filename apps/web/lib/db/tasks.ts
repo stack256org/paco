@@ -32,8 +32,27 @@ async function appendTaskLifecycleEvent(
 }
 
 /**
- * Thrown by `transitionTaskStatus` when `from -> to` is not a legal edge of
- * the task state machine (`lib/tasks/state.ts`).
+ * Why a transition was refused. These are opposite situations that happen to
+ * share an exception type, and a caller that cannot tell them apart cannot
+ * respond correctly to either:
+ *
+ * - `"illegal"` — `from -> to` is not an edge of the state machine
+ *   (`lib/tasks/state.ts`). Nobody raced anybody; the code asking for this
+ *   transition is wrong about the machine. It must be loud.
+ * - `"race"` — the edge was legal, but another writer moved the task first
+ *   and this write's guarded `WHERE` no longer matched. Nothing is wrong;
+ *   the other writer's outcome stands.
+ *
+ * Collapsing the two is not academic: the reviewer gate logged both as "a
+ * race" and returned as if it had blocked the task, which is how a missing
+ * `review -> blocked` edge survived an entire branch without a single loud
+ * failure.
+ */
+export type TaskTransitionErrorKind = "illegal" | "race";
+
+/**
+ * Thrown by `transitionTaskStatus` when a transition is refused — see
+ * `kind` for which of the two refusals it is.
  *
  * Naming the failure makes the state-machine invariant visible at call
  * sites and in logs, rather than looking like any other database failure —
@@ -41,7 +60,10 @@ async function appendTaskLifecycleEvent(
  * invariant.
  */
 export class TaskTransitionError extends Error {
+  readonly kind: TaskTransitionErrorKind;
+
   constructor(
+    kind: TaskTransitionErrorKind,
     taskId: string,
     from: TaskStatus,
     to: TaskStatus,
@@ -51,6 +73,7 @@ export class TaskTransitionError extends Error {
       reason ?? `Task "${taskId}" cannot transition from "${from}" to "${to}"`,
     );
     this.name = "TaskTransitionError";
+    this.kind = kind;
   }
 }
 
@@ -228,7 +251,7 @@ export async function transitionTaskStatus(
     throw new Error(`No task "${taskId}" in organization "${organizationId}"`);
   }
   if (!canTransition(current.status, to)) {
-    throw new TaskTransitionError(taskId, current.status, to);
+    throw new TaskTransitionError("illegal", taskId, current.status, to);
   }
 
   // Guard the write with the status this decision was based on: two
@@ -249,6 +272,7 @@ export async function transitionTaskStatus(
     .returning();
   if (!row) {
     throw new TaskTransitionError(
+      "race",
       taskId,
       current.status,
       to,

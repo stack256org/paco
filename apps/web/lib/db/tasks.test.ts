@@ -433,6 +433,15 @@ describe("transitionTaskStatus", () => {
       transitionTaskStatus("org-1", task.id, "done"),
     ).rejects.toThrow(TaskTransitionError);
 
+    // An illegal edge is a programming error, not a concurrency outcome, and
+    // callers have to be able to tell the two apart — the reviewer gate
+    // swallowed both as "a race" and that is what hid `review -> blocked`
+    // being missing from the table for a whole branch.
+    const error = await transitionTaskStatus("org-1", task.id, "done").catch(
+      (thrown: unknown) => thrown,
+    );
+    expect((error as { kind?: string }).kind).toBe("illegal");
+
     const reread = await getTask("org-1", task.id);
     expect(reread?.status).toBe("todo");
   });
@@ -627,6 +636,8 @@ describe("transitionTaskStatus", () => {
     expect(rejected).toHaveLength(1);
     if (rejected[0]?.status === "rejected") {
       expect(rejected[0].reason).toBeInstanceOf(TaskTransitionError);
+      // The loser lost a RACE — the edge it attempted was perfectly legal.
+      expect((rejected[0].reason as { kind?: string }).kind).toBe("race");
     }
 
     // The loser's write never landed: exactly one row, and it reflects only

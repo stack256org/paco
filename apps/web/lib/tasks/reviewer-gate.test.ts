@@ -9,9 +9,15 @@ mock.module("server-only", () => ({}));
 // only works if it is the exact class the mocked module exports — so this is
 // defined once here and reused everywhere the mock needs to throw it.
 class FakeTaskTransitionError extends Error {
-  constructor(message = "task status changed concurrently") {
+  readonly kind: "illegal" | "race";
+
+  constructor(
+    kind: "illegal" | "race" = "race",
+    message = "task status changed concurrently",
+  ) {
     super(message);
     this.name = "FakeTaskTransitionError";
+    this.kind = kind;
   }
 }
 
@@ -27,6 +33,8 @@ type TransitionCall = {
 let transitionCalls: TransitionCall[] = [];
 /** When set, the transition to this status rejects with a transition race. */
 let transitionRaceOn: string | undefined;
+/** When set, the transition to this status rejects as an ILLEGAL edge. */
+let transitionIllegalOn: string | undefined;
 /** When set, the transition to this status rejects with a plain (non-race) error. */
 let transitionGenericErrorOn: string | undefined;
 
@@ -39,7 +47,15 @@ const transitionTaskStatusSpy = mock(
   ) => {
     transitionCalls.push({ organizationId, taskId, to, patch });
     if (transitionRaceOn === to) {
-      return Promise.reject(new FakeTaskTransitionError());
+      return Promise.reject(new FakeTaskTransitionError("race"));
+    }
+    if (transitionIllegalOn === to) {
+      return Promise.reject(
+        new FakeTaskTransitionError(
+          "illegal",
+          `Task "${taskId}" cannot transition to "${to}"`,
+        ),
+      );
     }
     if (transitionGenericErrorOn === to) {
       return Promise.reject(new Error("the database is unreachable"));
@@ -205,6 +221,7 @@ function transitionTargets(): string[] {
 beforeEach(() => {
   transitionCalls = [];
   transitionRaceOn = undefined;
+  transitionIllegalOn = undefined;
   transitionGenericErrorOn = undefined;
   transitionTaskStatusSpy.mockClear();
   getRosterSpy.mockClear();
@@ -378,6 +395,23 @@ describe("runReviewerGate", () => {
     }
 
     expect(errorSpy).toHaveBeenCalled();
+  });
+
+  test("an illegal transition is not swallowed as a race — it surfaces", async () => {
+    // The exact shape that hid `review -> blocked` for a whole branch: the
+    // gate asked for a transition the state machine did not have, the error
+    // was logged as "a race", and the gate returned "fail" as though it had
+    // blocked the task — while the task never moved at all.
+    transitionIllegalOn = "blocked";
+    turnResult = {
+      isError: false,
+      structuredOutput: { verdict: "fail", problems: ["still broken"] },
+    };
+    const task = makeTask({ reviewerRejections: 2 });
+
+    await expect(runReviewerGate(task, "chat-1")).rejects.toThrow(
+      "cannot transition",
+    );
   });
 
   test("a non-TaskTransitionError from transitionTaskStatus propagates", async () => {
