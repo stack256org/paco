@@ -16,6 +16,8 @@ export interface FakeBackendConfig {
   holdOpen?: boolean;
   steering?: "restart" | "none";
   resumeToken?: string;
+  /** Returned as `TurnResult.structuredOutput` on a naturally-finished turn. */
+  structuredOutput?: unknown;
 }
 
 function abortError(): Error {
@@ -47,7 +49,7 @@ export class FakeBackend implements AgentBackend {
   }
 
   startTurn(ctx: TurnContext): TurnHandle {
-    const { script, holdOpen, resumeToken } = this.config;
+    const { script, holdOpen, resumeToken, structuredOutput } = this.config;
     const steering = this.config.steering ?? "restart";
     const resultDeferred = Promise.withResolvers<TurnResult>();
     // `resultDeferred` is settled from inside the chunk generator below, as a
@@ -122,6 +124,7 @@ export class FakeBackend implements AgentBackend {
           isError: false,
           usage: zeroUsage(),
           resumeToken: token,
+          ...(structuredOutput !== undefined ? { structuredOutput } : {}),
         });
       } finally {
         // A consumer that abandons `chunks` early (break/return/throw on the

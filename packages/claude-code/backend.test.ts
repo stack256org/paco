@@ -179,6 +179,39 @@ describe("ClaudeCodeBackend", () => {
     expect(result.usage.outputTokens).toBe(17);
   });
 
+  test("surfaces the terminal message's structured_output on the result", async () => {
+    script({
+      sessionId: "scripted-session-2",
+      result: { structured_output: { tasks: [{ title: "t", goal: "g" }] } },
+    });
+
+    const backend = new ClaudeCodeBackend();
+    const handle = backend.startTurn(turnContext());
+
+    for await (const _chunk of handle.chunks) {
+      // drain: result only settles once chunks are fully consumed
+    }
+    const result = await handle.result;
+
+    expect(result.structuredOutput).toEqual({
+      tasks: [{ title: "t", goal: "g" }],
+    });
+  });
+
+  test("omits structuredOutput when the terminal message carries none", async () => {
+    script({ sessionId: "scripted-session-3" });
+
+    const backend = new ClaudeCodeBackend();
+    const handle = backend.startTurn(turnContext());
+
+    for await (const _chunk of handle.chunks) {
+      // drain: result only settles once chunks are fully consumed
+    }
+    const result = await handle.result;
+
+    expect(result.structuredOutput).toBeUndefined();
+  });
+
   test("interrupt(): result rejects with name AbortError", async () => {
     script({
       sessionId: "s",

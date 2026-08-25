@@ -98,8 +98,8 @@ function makeOptions() {
   } as never;
 }
 
-/** Same fixture as `makeOptions`, plus the fields that flow into `backendOptions`. */
-function makeFullOptions() {
+/** Same fixture as `makeOptions`, plus every field that flows into `backendOptions`. */
+function makeStructuredOutputOptions() {
   return {
     sandbox: {
       state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
@@ -108,6 +108,8 @@ function makeFullOptions() {
     },
     model: { id: "sonnet", effort: "high" },
     agents: { explorer: { description: "explores the repo" } },
+    structuredOutput: { jsonSchema: { type: "object", properties: {} } },
+    tools: ["Read", "Grep", "Glob", "Bash"],
   } as never;
 }
 
@@ -241,7 +243,7 @@ describe("runAgentTurn", () => {
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
-      options: makeFullOptions(),
+      options: makeStructuredOutputOptions(),
       messageId: "assistant-42",
       originalMessages: [],
       backend,
@@ -275,6 +277,11 @@ describe("runAgentTurn", () => {
     expect(backendOptions.maxTurns).toBe(7);
     expect(backendOptions.includePartialMessages).toBe(true);
     expect(backendOptions.settings).toBeDefined();
+    expect(backendOptions.jsonSchema).toEqual({
+      type: "object",
+      properties: {},
+    });
+    expect(backendOptions.tools).toEqual(["Read", "Grep", "Glob", "Bash"]);
 
     const env = backendOptions.env as Record<string, string>;
     expect(env.GH_TOKEN).toBe("gh-token-abc");
@@ -282,6 +289,30 @@ describe("runAgentTurn", () => {
     expect(env.PACO_APPROVAL_URL).toBe("https://example.test/approve");
     expect(env.PACO_APPROVAL_TOKEN).toBe("approval-token-xyz");
     expect(env.PACO_APPROVAL_CHAT_ID).toBe("chat-123");
+  });
+
+  test("surfaces a backend's structuredOutput on the step result", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = new FakeBackend({
+      script: [],
+      structuredOutput: { tasks: [{ title: "t", goal: "g" }] },
+    });
+
+    const step = await runAgentTurn<UIMessage>({
+      prompt: "plan the thing",
+      options: makeStructuredOutputOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    expect(step.structuredOutput).toEqual({
+      tasks: [{ title: "t", goal: "g" }],
+    });
   });
 
   test("with no claudeSessionId: mints a fresh sessionId and leaves resumeToken unset", async () => {

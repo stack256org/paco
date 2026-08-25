@@ -45,6 +45,13 @@ export interface TurnResult {
   resumeToken?: string;
   /** Set when the turn ended because steer() was called; carries the steer text. */
   steered?: { text: string };
+  /**
+   * Parsed structured output, when the turn was constrained by a JSON
+   * Schema. Backend-specific in origin (Claude Code's terminal `result`
+   * message carries it as `structured_output`); the neutral interface only
+   * forwards it.
+   */
+  structuredOutput?: unknown;
 }
 
 export class SteeringUnsupportedError extends Error {

@@ -102,6 +102,9 @@ export class ClaudeCodeBackend implements AgentBackend {
         usage: toRunUsage(terminal),
         costUsd: terminal.total_cost_usd,
         resumeToken: terminal.session_id,
+        ...(terminal.structured_output !== undefined
+          ? { structuredOutput: terminal.structured_output }
+          : {}),
       }),
       (error): TurnResult => {
         // A steer aborts the process on purpose; report it as a clean,
