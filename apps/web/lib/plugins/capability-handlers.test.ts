@@ -764,6 +764,56 @@ describe("net:fetch", () => {
     }
   });
 
+  test("closes the dispatcher when fetch itself throws mid-hop", async () => {
+    dnsAddresses = {};
+    agentCloseCalls = 0;
+    withFetch(async () => {
+      throw new Error("network error: connection reset");
+    });
+
+    try {
+      const handlers = buildCapabilityHandlers(pluginRow());
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await expect(
+        netFetch("plugin-a", { url: "https://api.linear.app/graphql" }),
+      ).rejects.toThrow(/network error/);
+
+      // The hop's dispatcher was created before the throw; nothing else
+      // ever gets a chance to close it, so the throwing path itself must.
+      expect(agentCloseCalls).toBe(1);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  test("closes the dispatcher when the shared timeout fires mid-hop", async () => {
+    dnsAddresses = {};
+    agentCloseCalls = 0;
+    withFetch(async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    });
+
+    try {
+      const handlers = buildCapabilityHandlers(pluginRow());
+      const netFetch = handlers["net:fetch"];
+      if (!netFetch) {
+        throw new Error("net:fetch handler missing");
+      }
+
+      await expect(
+        netFetch("plugin-a", { url: "https://api.linear.app/graphql" }),
+      ).rejects.toThrow(/timed out/);
+
+      expect(agentCloseCalls).toBe(1);
+    } finally {
+      restoreFetch();
+    }
+  });
+
   test("closes the pinned dispatcher after a successful fetch", async () => {
     dnsAddresses = {};
     agentCloseCalls = 0;

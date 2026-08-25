@@ -356,11 +356,22 @@ async function fetchFollowingRedirects(
     const dispatcher = pinnedDispatcher(validated.address, validated.family);
     previousDispatcher = dispatcher;
 
-    const response = await fetch(target, {
-      ...init,
-      redirect: "manual",
-      dispatcher,
-    } as FetchInitWithDispatcher);
+    let response: Response;
+    try {
+      response = await fetch(target, {
+        ...init,
+        redirect: "manual",
+        dispatcher,
+      } as FetchInitWithDispatcher);
+    } catch (error) {
+      // `fetch` itself threw (network error, TLS failure, the shared
+      // AbortSignal.timeout firing mid-hop) — this hop's dispatcher was
+      // never handed back to a caller that could close it, so it must be
+      // closed here or it leaks. `previousDispatcher.close()` only runs at
+      // the top of the *next* iteration, which this throw skips entirely.
+      await dispatcher.close();
+      throw error;
+    }
 
     if (!REDIRECT_STATUSES.has(response.status)) {
       return { response, dispatcher };
