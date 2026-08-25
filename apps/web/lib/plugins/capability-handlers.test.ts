@@ -1251,15 +1251,22 @@ describe("messages:post", () => {
 
 describe("tasks:create", () => {
   function resetTasksCreateMocks(): void {
-    organizationRow = { id: "org-1" };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
-    sessionBelongsToOrganizationResult = true;
+    resetAuthorizationMocks();
     createdTask = { id: "task-1" };
     startTaskResult = { ok: true, chatId: "chat-99" };
-    getOrganizationSpy.mockClear();
-    sessionBelongsToOrganizationSpy.mockClear();
     createTaskSpy.mockClear();
     startTaskSpy.mockClear();
+  }
+
+  /**
+   * The rate limiter's windows live on `globalThis` and are keyed by plugin
+   * id, so every test that counts requests needs a plugin id of its own or
+   * it inherits a sibling test's budget.
+   */
+  let rateLimitPluginSeq = 0;
+  function freshPluginId(): string {
+    rateLimitPluginSeq++;
+    return `rate-limit-plugin-${rateLimitPluginSeq}`;
   }
 
   test("rejects an invalid payload", async () => {
@@ -1355,6 +1362,7 @@ describe("tasks:create", () => {
       title: "Investigate the outage",
       goal: "Find out why the outage happened",
       origin: "channel",
+      createdBy: "user-1",
     });
     expect(startTaskSpy).not.toHaveBeenCalled();
   });
@@ -1419,5 +1427,117 @@ describe("tasks:create", () => {
     });
 
     expect(result).toEqual({ taskId: "task-1", error: "sandbox unavailable" });
+  });
+
+  test("rejects a session owned by a plain org member, identically to an unknown session", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+    const payload = {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+    };
+
+    sessionRow = undefined;
+    const unknownSessionError = await tasksCreate(
+      freshPluginId(),
+      payload,
+    ).catch((error: unknown) => error);
+
+    // In the organization, but not an administrator: the UI path rejects a
+    // session that is not the actor's own, and a plugin has no "own" session
+    // at all, so a member's session must be unreachable to it.
+    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    isAdminResult = false;
+    const memberSessionError = await tasksCreate(
+      freshPluginId(),
+      payload,
+    ).catch((error: unknown) => error);
+
+    expect(memberSessionError).toBeInstanceOf(Error);
+    expect((memberSessionError as Error).message).toBe(
+      (unknownSessionError as Error).message,
+    );
+    expect(createTaskSpy).not.toHaveBeenCalled();
+    expect(isAdminSpy).toHaveBeenCalledWith("user-1");
+  });
+
+  test("attributes the task to the session's owner instead of leaving it creatorless", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    await tasksCreate(freshPluginId(), {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+    });
+
+    const call = createTaskSpy.mock.calls[0]?.[0] as { createdBy?: string };
+    expect(call.createdBy).toBe("user-1");
+  });
+
+  test("bounds how many tasks one plugin can create in a minute", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+    const pluginId = freshPluginId();
+    const payload = {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+    };
+
+    const errors: unknown[] = [];
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const outcome = await tasksCreate(pluginId, payload).catch(
+        (error: unknown) => {
+          errors.push(error);
+          return undefined;
+        },
+      );
+      if (outcome === undefined && errors.length > 0) {
+        break;
+      }
+    }
+
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toMatch(/too many tasks/i);
+    // The bound has to bite well before 40 unattended agent runs are queued.
+    expect(createTaskSpy.mock.calls.length).toBeLessThan(40);
+  });
+
+  test("the bound is per plugin, so one runaway plugin cannot starve another", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+    const noisy = freshPluginId();
+    const quiet = freshPluginId();
+    const payload = {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+    };
+
+    for (let attempt = 0; attempt < 40; attempt++) {
+      await tasksCreate(noisy, payload).catch(() => undefined);
+    }
+
+    await expect(tasksCreate(quiet, payload)).resolves.toEqual({
+      taskId: "task-1",
+    });
   });
 });

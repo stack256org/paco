@@ -20,6 +20,7 @@ import { pluginKv, type PluginRow } from "@/lib/db/schema";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { createTask } from "@/lib/db/tasks";
 import { getOrganization } from "@/lib/org/organization";
+import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { sessionBelongsToOrganization } from "@/lib/tasks/planner";
 import { startTask } from "@/lib/tasks/start";
 
@@ -111,7 +112,7 @@ export function buildCapabilityHandlers(
     "net:fetch": (_pluginId, payload) => handleNetFetch(pluginRow, payload),
     "messages:post": (pluginId, payload) =>
       handleMessagesPost(pluginId, payload),
-    "tasks:create": (_pluginId, payload) => handleTasksCreate(payload),
+    "tasks:create": (pluginId, payload) => handleTasksCreate(pluginId, payload),
   };
 }
 
@@ -770,19 +771,72 @@ export interface TasksCreateResult {
 }
 
 /**
+ * Ceilings on plugin-initiated task creation, per plugin, in two layers.
+ *
+ * There is no ingress gate on this path at all: a `hooks/*` module gets the
+ * same `PluginApi` as a channel handler and runs at worker start, with
+ * nothing upstream of it, so `while (true) tasks.create({autoStart: true})`
+ * spawns unbounded concurrent agent runs — each one a real executor turn in
+ * a member's worktree. That is the expensive thing being bounded here, not
+ * database load.
+ *
+ * The numbers come from what a legitimate channel integration does: a task
+ * per human mention in Slack. Twenty in a minute is already far beyond any
+ * real team's mention rate and is the burst ceiling. A hundred in an hour is
+ * the sustained one, because a loop pinned at the burst limit would
+ * otherwise still manage 1200 unattended agent runs an hour. Both are per
+ * plugin id, so one runaway plugin cannot consume another's budget, and both
+ * are counted before the session lookup so a denied attempt costs a plugin
+ * its budget too.
+ *
+ * Same fixed-window limiter (`lib/rate-limit.ts`) the channel ingress route
+ * uses, and per process for the same stated reason.
+ */
+const TASKS_CREATE_BURST_LIMIT = 20;
+const TASKS_CREATE_BURST_WINDOW_MS = 60_000;
+const TASKS_CREATE_SUSTAINED_LIMIT = 100;
+const TASKS_CREATE_SUSTAINED_WINDOW_MS = 3_600_000;
+
+function assertTasksCreateWithinBudget(pluginId: string): void {
+  const overBurst = checkRateLimit({
+    key: rateLimitKey(["plugin-tasks-create-burst", pluginId]),
+    limit: TASKS_CREATE_BURST_LIMIT,
+    windowMs: TASKS_CREATE_BURST_WINDOW_MS,
+  });
+  const overSustained = checkRateLimit({
+    key: rateLimitKey(["plugin-tasks-create-sustained", pluginId]),
+    limit: TASKS_CREATE_SUSTAINED_LIMIT,
+    windowMs: TASKS_CREATE_SUSTAINED_WINDOW_MS,
+  });
+  if (overBurst || overSustained) {
+    throw new Error(
+      `tasks:create: too many tasks created by plugin "${pluginId}" — at most ${TASKS_CREATE_BURST_LIMIT} per minute and ${TASKS_CREATE_SUSTAINED_LIMIT} per hour`,
+    );
+  }
+}
+
+/**
  * Creates a task on the board from an inbound channel message — the
  * mechanism behind "mention the bot -> task appears" — and, if `autoStart`
  * is set, starts it the same way the board's own "start" action does.
  *
- * Sessions are user-scoped, not org-scoped (`lib/db/schema.ts`), so the only
- * way to check a session belongs to the instance this plugin runs in is the
- * same membership check `planGoal` uses for the identical problem:
- * `sessionBelongsToOrganization` is imported from `lib/tasks/planner.ts`
- * rather than re-derived here, so the two call sites can never drift into
- * checking different things. An unknown session id and a session that
- * belongs to someone else's organization are reported with the exact same
- * error — a plugin must not be able to tell "no such session" apart from
- * "not yours" (same reasoning as `messages:post` and `planGoal` before it).
+ * Authorization is `authorizeSessionForPlugin`, shared with `messages:post`:
+ * the session must belong to this instance's organization AND be owned by an
+ * administrator. Org scoping on its own was not enough — every member of the
+ * one organization passed it, so a plugin could point this at any
+ * colleague's session and have the resulting turn run as them, in their
+ * worktree, which is exactly what the UI path forbids by rejecting a session
+ * that is not the actor's own (`app/tasks/actions.ts`). An unknown session
+ * id, a session outside the organization and a member-owned session are all
+ * reported with the identical error, so the denial is not an oracle for who
+ * is in the instance.
+ *
+ * `createdBy` is the session's OWNER. It cannot be the plugin —
+ * `tasks.created_by` is a foreign key to `users.id` — and leaving it null
+ * made plugin tasks the only creatorless rows on the board. The owner is the
+ * administrator whose session this runs in and who configured the plugin to
+ * point at it; `origin: "channel"` alongside it is what records that a
+ * channel integration, not that person's own hands, filed it.
  *
  * `origin: "channel"` is hardcoded here, never read from the payload — a
  * plugin chooses `title`/`goal`/`sessionId`/`autoStart`, nothing else, so it
@@ -796,41 +850,45 @@ export interface TasksCreateResult {
  * would report the whole call as failed when a task in fact now exists on
  * the board, just without a chat behind it yet.
  */
-async function handleTasksCreate(payload: unknown): Promise<TasksCreateResult> {
+async function handleTasksCreate(
+  pluginId: string,
+  payload: unknown,
+): Promise<TasksCreateResult> {
   const parsed = tasksCreatePayloadSchema.safeParse(payload);
   if (!parsed.success) {
     throw new Error(`tasks:create: invalid payload: ${parsed.error.message}`);
   }
   const { sessionId, title, goal, autoStart } = parsed.data;
 
+  assertTasksCreateWithinBudget(pluginId);
+
   const notFoundError = new Error(
     `tasks:create: session "${sessionId}" not found`,
   );
 
-  const [session, organization] = await Promise.all([
-    getSessionById(sessionId),
-    getOrganization(),
-  ]);
-  if (!session || !organization) {
+  const session = await getSessionById(sessionId);
+  if (!session) {
     throw notFoundError;
   }
-  if (!(await sessionBelongsToOrganization(session.userId, organization.id))) {
-    throw notFoundError;
-  }
+  const organizationId = await authorizeSessionForPlugin(
+    session.userId,
+    notFoundError,
+  );
 
   const task = await createTask({
-    organizationId: organization.id,
+    organizationId,
     sessionId,
     title,
     goal,
     origin: "channel",
+    createdBy: session.userId,
   });
 
   if (!autoStart) {
     return { taskId: task.id };
   }
 
-  const started = await startTask(organization.id, task.id);
+  const started = await startTask(organizationId, task.id);
   if (!started.ok) {
     return { taskId: task.id, error: started.error };
   }
