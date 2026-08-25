@@ -102,14 +102,23 @@ describe("ConsentForm", () => {
     expect(html).not.toContain("from an inbound message");
   });
 
-  test("says what the plugin can reach on disk, without claiming no file access", () => {
+  test("separates what the plugin can read on disk from what it can write", () => {
+    // SECURITY.md's allowlist is asymmetric: the plugin can READ its own
+    // directory, Paco's plugin-runtime code and its state directory, but can
+    // WRITE only the state directory. A line that merges the two ("read and
+    // write only inside...") is wrong in both directions at once — it
+    // overstates where writes can land and understates what is readable —
+    // so both halves are pinned here rather than one phrase.
     const html = renderForm();
 
-    expect(html).toContain(
-      "its own plugin directory and its own scratch directory",
-    );
+    expect(html).toContain("read its own plugin directory");
+    expect(html).toContain("state directory");
+    expect(html).toContain("only");
+    // Still must not overclaim in the other direction.
     expect(html.toLowerCase()).not.toContain("cannot touch your files");
     expect(html.toLowerCase()).not.toContain("no file access");
+    // And must not reintroduce the merged read+write claim.
+    expect(html).not.toContain("read and write only inside");
   });
 
   test("states the Node >= 24 floor the isolation depends on", () => {

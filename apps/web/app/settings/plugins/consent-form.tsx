@@ -85,10 +85,10 @@ export function ConsentForm({
           approve below.
         </p>
         <p>
-          On disk, it can read and write only inside a small, explicit set of
-          paths — its own plugin directory and its own scratch directory —
-          enforced by Node&apos;s permission model. That is not the whole disk,
-          and it is not nothing: paths outside that set are refused.
+          On disk, it can read its own plugin directory, Paco&apos;s own
+          plugin-runtime code, and its own state directory — but it can only
+          write to that state directory. Everything else is refused, enforced by
+          Node&apos;s permission model.
         </p>
         <p>
           It is <strong>not a container</strong> — there is no OS-level sandbox,
