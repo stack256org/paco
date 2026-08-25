@@ -27,6 +27,7 @@ interface ConsentDialogProps {
   requested: Capability[];
   /** The manifest's exact `net:fetch` domain list, shown verbatim next to that capability. */
   netDomains: string[];
+  selfVerifiedChannels?: string[];
   /** Pre-checked on open — empty for a fresh install, the plugin's current grants for an update. */
   initialGrants: Capability[];
   onGrant: (grants: Capability[]) => Promise<ConsentGrantResult>;
@@ -51,6 +52,7 @@ export function ConsentDialog({
   pluginId,
   requested,
   netDomains,
+  selfVerifiedChannels,
   initialGrants,
   onGrant,
   onGranted,
@@ -119,6 +121,7 @@ export function ConsentDialog({
             disabled={saving}
             grants={grants}
             netDomains={netDomains}
+            selfVerifiedChannels={selfVerifiedChannels}
             onGrantsChange={setGrants}
             requested={requested}
           />

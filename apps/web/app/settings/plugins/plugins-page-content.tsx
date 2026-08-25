@@ -15,7 +15,7 @@ import {
 import { ConsentDialog } from "./consent-dialog";
 import { InstallDialog } from "./install-dialog";
 import { IngressSecretDialog } from "./ingress-secret-dialog";
-import { getPluginNetDomainsAction } from "./manifest-actions";
+import { getPluginConsentDetailsAction } from "./manifest-actions";
 import { PluginCard } from "./plugin-card";
 import type { PluginListRow } from "./plugin-list-row";
 import { removeWithConfirm, toggleEnabled } from "./plugin-mutations";
@@ -33,6 +33,8 @@ interface ConsentState {
   pluginId: string;
   requested: Capability[];
   netDomains: string[];
+  /** Channels this plugin verifies itself — see `ConsentFormProps`. */
+  selfVerifiedChannels: string[];
   initialGrants: Capability[];
 }
 
@@ -116,8 +118,8 @@ export function PluginsPageContent({
     requested: Capability[],
     initialGrants: Capability[],
   ) {
-    const domains = await getPluginNetDomainsAction(pluginId);
-    if (!domains.ok && requested.includes("net:fetch")) {
+    const details = await getPluginConsentDetailsAction(pluginId);
+    if (!details.ok && requested.includes("net:fetch")) {
       toast.error(
         "Could not load this plugin's declared domain list — showing none.",
       );
@@ -126,7 +128,8 @@ export function PluginsPageContent({
       pluginId,
       requested,
       initialGrants,
-      netDomains: domains.ok ? domains.netDomains : [],
+      netDomains: details.ok ? details.netDomains : [],
+      selfVerifiedChannels: details.ok ? details.selfVerifiedChannels : [],
     });
   }
 

@@ -9,7 +9,7 @@ import type { PluginRow } from "@/lib/db/schema";
  * fine there — and maps each one through this before handing it to
  * `PluginsPageContent`. The row's `manifest` and `contentHash` never need to
  * cross into client code: the manifest's `net:fetch` domain list is read
- * fresh, per plugin, via `getPluginNetDomainsAction` at consent time rather
+ * fresh, per plugin, via `getPluginConsentDetailsAction` at consent time rather
  * than carried around here where it could go stale between a page load and
  * a later grant.
  */

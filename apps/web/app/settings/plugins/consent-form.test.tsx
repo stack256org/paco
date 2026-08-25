@@ -121,6 +121,43 @@ describe("ConsentForm", () => {
     expect(html).not.toContain("read and write only inside");
   });
 
+  test("names the channels a plugin verifies itself, and says what that means", () => {
+    // Granting channels:ingress to a plugin with a self-verified channel is
+    // materially different from granting it to one without: requests to that
+    // channel reach the plugin with Paco checking nothing. The consent screen
+    // is the only place an operator ever sees that.
+    const html = renderForm({
+      requested: ["channels:ingress"],
+      selfVerifiedChannels: ["events"],
+    });
+
+    expect(html).toContain("events");
+    expect(html).toContain("verifies itself");
+    expect(html).toContain("without Paco checking anything");
+  });
+
+  test("says a channel plugin's requests need the secret when none are self-verified", () => {
+    const html = renderForm({
+      requested: ["channels:ingress"],
+      selfVerifiedChannels: [],
+    });
+
+    expect(html).toContain("per-plugin secret");
+    expect(html).not.toContain("verifies itself");
+  });
+
+  test("never promises the secret gates every channel", () => {
+    // The old copy asserted channels:ingress was "authenticated with a
+    // per-plugin secret" unconditionally, which a self-verified channel makes
+    // false. Pinned so it cannot come back as a blanket claim.
+    const html = renderForm({
+      requested: ["channels:ingress"],
+      selfVerifiedChannels: ["events"],
+    });
+
+    expect(html).not.toContain("authenticated with a per-plugin secret");
+  });
+
   test("states the Node >= 24 floor the isolation depends on", () => {
     const html = renderForm();
 

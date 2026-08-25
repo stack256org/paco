@@ -10,7 +10,13 @@ mock.module("@/lib/admin/require-admin", () => ({
   },
 }));
 
-type FakeRow = { id: string; manifest: { netDomains?: string[] } };
+type FakeRow = {
+  id: string;
+  manifest: {
+    netDomains?: string[];
+    channels?: { name: string; auth: "shared-secret" | "self-verified" }[];
+  };
+};
 let rows: Map<string, FakeRow>;
 
 class FakePluginGrantEscalationError extends Error {
@@ -50,13 +56,13 @@ mock.module("@/lib/db/plugins", () => ({
   },
 }));
 
-const { getPluginNetDomainsAction } = await import("./manifest-actions");
+const { getPluginConsentDetailsAction } = await import("./manifest-actions");
 
-describe("getPluginNetDomainsAction", () => {
+describe("getPluginConsentDetailsAction", () => {
   test("rejects a non-admin caller", async () => {
     adminOk = false;
     rows = new Map();
-    await expect(getPluginNetDomainsAction("some-plugin")).rejects.toThrow(
+    await expect(getPluginConsentDetailsAction("some-plugin")).rejects.toThrow(
       "Not an administrator",
     );
     adminOk = true;
@@ -70,23 +76,59 @@ describe("getPluginNetDomainsAction", () => {
       ],
     ]);
 
-    const result = await getPluginNetDomainsAction("linear-bridge");
+    const result = await getPluginConsentDetailsAction("linear-bridge");
 
-    expect(result).toEqual({ ok: true, netDomains: ["api.linear.app"] });
+    expect(result).toEqual({
+      ok: true,
+      netDomains: ["api.linear.app"],
+      selfVerifiedChannels: [],
+    });
   });
 
   test("returns an empty list when the manifest declares no domains", async () => {
     rows = new Map([["no-net", { id: "no-net", manifest: {} }]]);
 
-    const result = await getPluginNetDomainsAction("no-net");
+    const result = await getPluginConsentDetailsAction("no-net");
 
-    expect(result).toEqual({ ok: true, netDomains: [] });
+    expect(result).toEqual({
+      ok: true,
+      netDomains: [],
+      selfVerifiedChannels: [],
+    });
+  });
+
+  test("returns only the channels declared self-verified, by name", async () => {
+    // A shared-secret channel must NOT appear here: the warning this drives
+    // is about the channels Paco stops checking a secret for, and listing a
+    // secret-gated one would make the consent screen overstate the risk.
+    rows = new Map([
+      [
+        "slack",
+        {
+          id: "slack",
+          manifest: {
+            channels: [
+              { name: "events", auth: "self-verified" },
+              { name: "commands", auth: "shared-secret" },
+            ],
+          },
+        },
+      ],
+    ]);
+
+    const result = await getPluginConsentDetailsAction("slack");
+
+    expect(result).toEqual({
+      ok: true,
+      netDomains: [],
+      selfVerifiedChannels: ["events"],
+    });
   });
 
   test("reports a plugin that does not exist, rather than throwing", async () => {
     rows = new Map();
 
-    const result = await getPluginNetDomainsAction("ghost");
+    const result = await getPluginConsentDetailsAction("ghost");
 
     expect(result.ok).toBe(false);
     if (!result.ok) {

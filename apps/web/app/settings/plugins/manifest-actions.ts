@@ -14,9 +14,12 @@ import { getPlugin } from "@/lib/db/plugins";
  * install or update, not a mutation, and keeping it apart means a shape
  * change to one file's actions never forces a merge against the other's.
  */
-export async function getPluginNetDomainsAction(
+export async function getPluginConsentDetailsAction(
   pluginId: string,
-): Promise<{ ok: true; netDomains: string[] } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; netDomains: string[]; selfVerifiedChannels: string[] }
+  | { ok: false; error: string }
+> {
   await requireAdmin();
 
   const row = await getPlugin(pluginId);
@@ -24,5 +27,19 @@ export async function getPluginNetDomainsAction(
     return { ok: false, error: `No plugin installed with id "${pluginId}"` };
   }
 
-  return { ok: true, netDomains: row.manifest.netDomains ?? [] };
+  return {
+    ok: true,
+    netDomains: row.manifest.netDomains ?? [],
+    /*
+     * The channels this plugin's manifest declares `auth: "self-verified"`,
+     * meaning the ingress route delivers their requests WITHOUT checking the
+     * per-plugin secret. Surfaced here for exactly the same reason
+     * `netDomains` is: the consent screen is the only place an operator sees
+     * it, and granting `channels:ingress` means something materially
+     * different for a plugin that has one.
+     */
+    selfVerifiedChannels: (row.manifest.channels ?? [])
+      .filter((channel) => channel.auth === "self-verified")
+      .map((channel) => channel.name),
+  };
 }

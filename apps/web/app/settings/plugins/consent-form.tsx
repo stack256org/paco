@@ -5,6 +5,13 @@ export interface ConsentFormProps {
   requested: Capability[];
   /** The manifest's exact `net:fetch` domain list, shown verbatim. */
   netDomains: string[];
+  /**
+   * The names of this plugin's channels declared `auth: "self-verified"` in
+   * its manifest — the ones Paco will NOT check its shared secret for. Shown
+   * verbatim under `channels:ingress`, for the same reason `netDomains` is:
+   * this is the operator's only chance to see it before granting.
+   */
+  selfVerifiedChannels?: readonly string[];
   grants: Capability[];
   onGrantsChange: (grants: Capability[]) => void;
   disabled?: boolean;
@@ -32,8 +39,11 @@ const CAPABILITY_COPY: Record<Capability, string> = {
   "ui:panel": "Show a sandboxed panel it controls inside the app.",
   "tasks:create": "Create a task on the board.",
   "channels:ingress":
-    "Receive inbound webhook requests sent to its own /api/channels URL, authenticated with a per-plugin secret.",
+    "Receive inbound webhook requests sent to its own /api/channels URL.",
 };
+
+/** Stable empty default for `selfVerifiedChannels`, so the prop's default does not break referential equality on every render. */
+const NO_SELF_VERIFIED_CHANNELS: readonly string[] = [];
 
 function withToggled(
   grants: Capability[],
@@ -71,6 +81,7 @@ function withToggled(
 export function ConsentForm({
   requested,
   netDomains,
+  selfVerifiedChannels = NO_SELF_VERIFIED_CHANNELS,
   grants,
   onGrantsChange,
   disabled = false,
@@ -135,6 +146,13 @@ export function ConsentForm({
                   {netDomains.length > 0
                     ? netDomains.join(", ")
                     : "none declared — this grant would allow no outbound requests"}
+                </span>
+              ) : null}
+              {capability === "channels:ingress" ? (
+                <span className="mt-1 block text-base-content/60 text-xs">
+                  {selfVerifiedChannels.length > 0
+                    ? `Requests are checked against a per-plugin secret, except for these channels, which this plugin verifies itself: ${selfVerifiedChannels.join(", ")}. Requests to those reach the plugin without Paco checking anything, and only the plugin's own signature check stands in the way.`
+                    : "Requests must carry a per-plugin secret, checked before the plugin sees them."}
                 </span>
               ) : null}
             </span>
