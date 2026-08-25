@@ -97,6 +97,21 @@ export interface ClaudeCodeOptions {
   settings?: Record<string, unknown>;
 
   /**
+   * MCP servers to expose to this session, keyed by server name, passed
+   * inline via `--mcp-config` rather than a file — same rationale as
+   * {@link settings}: nothing about a chat's configuration should be written
+   * into the user's repository.
+   *
+   * `--strict-mcp-config` (see {@link buildArgs}) is what makes this safe to
+   * add: only servers named here reach the session, never anything already
+   * configured on the host.
+   */
+  mcpServers?: Record<
+    string,
+    { command: string; args: string[]; env: Record<string, string> }
+  >;
+
+  /**
    * Keep the CLI's built-in slash commands available.
    *
    * Normal turns disable them, which also disables `/compact` — the CLI
@@ -142,6 +157,13 @@ export function buildArgs(options: ClaudeCodeOptions): string[] {
 
   if (options.settings) {
     args.push("--settings", JSON.stringify(options.settings));
+  }
+
+  if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
+    args.push(
+      "--mcp-config",
+      JSON.stringify({ mcpServers: options.mcpServers }),
+    );
   }
 
   if (options.model) {

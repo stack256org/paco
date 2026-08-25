@@ -36,7 +36,7 @@ export class ClaudeCodeBackend implements AgentBackend {
       id: "claude-code",
       resume: true,
       steering: "restart",
-      mcp: false,
+      mcp: true,
       effort: true,
       subagents: true,
     };

@@ -65,4 +65,40 @@ describe("buildArgs", () => {
 
     expect(args[args.indexOf("--fallback-model") + 1]).toBe("sonnet,haiku");
   });
+
+  test("omits --mcp-config when no mcpServers are given", () => {
+    const args = buildArgs({ cwd: "/tmp/ws" });
+
+    expect(args).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--verbose",
+      "--setting-sources",
+      "",
+      "--strict-mcp-config",
+      "--disable-slash-commands",
+    ]);
+  });
+
+  test("emits --mcp-config as inline JSON, and keeps --strict-mcp-config", () => {
+    const mcpServers = {
+      "paco-plugins": {
+        command: "/usr/bin/node",
+        args: ["scripts/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    };
+    const args = buildArgs({ cwd: "/tmp/ws", mcpServers });
+
+    const index = args.indexOf("--mcp-config");
+    expect(index).toBeGreaterThan(-1);
+    expect(args[index + 1]).toBe(JSON.stringify({ mcpServers }));
+
+    // The reproducibility contract: only servers named via --mcp-config are
+    // reachable, never anything already configured on the host.
+    expect(args).toContain("--strict-mcp-config");
+  });
 });

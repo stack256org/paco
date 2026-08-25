@@ -261,13 +261,41 @@ describe("ClaudeCodeBackend", () => {
     expect(result.finishReason).toBe("stop");
   });
 
+  test("carries mcpServers from backendOptions through to the CLI options", async () => {
+    script({
+      sessionId: "s-mcp",
+      chunks: [assistantText("hi")],
+      delayMs: 0,
+    });
+
+    const mcpServers = {
+      "paco-plugins": {
+        command: "/usr/bin/node",
+        args: ["scripts/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    };
+
+    const backend = new ClaudeCodeBackend();
+    const handle = backend.startTurn(
+      turnContext({ backendOptions: { mcpServers } }),
+    );
+
+    for await (const _chunk of handle.chunks) {
+      // Drain to completion.
+    }
+    await handle.result;
+
+    expect(stubCalls.at(-1)?.mcpServers).toEqual(mcpServers);
+  });
+
   test("capabilities() declares the claude-code backend", () => {
     const backend = new ClaudeCodeBackend();
     expect(backend.capabilities()).toEqual({
       id: "claude-code",
       resume: true,
       steering: "restart",
-      mcp: false,
+      mcp: true,
       effort: true,
       subagents: true,
     });

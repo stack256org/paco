@@ -51,6 +51,20 @@ mock.module("@paco/claude-code", () => ({
   DEFAULT_AGENTS: {},
   buildApprovalSettings: () => ({ hooks: {} }),
   ClaudeCodeBackend: class {
+    // `runAgentTurn` now resolves its backend through `backend-factory.ts`,
+    // which switches on `capabilities().id` to decide which options shape to
+    // build — the default-path tests below exercise that switch too, not
+    // just `startTurn`, so this stub needs a real-shaped `capabilities()`.
+    capabilities() {
+      return {
+        id: "claude-code" as const,
+        resume: true,
+        steering: "restart" as const,
+        mcp: true,
+        effort: true,
+        subagents: true,
+      };
+    }
     startTurn() {
       return {
         chunks: (async function* () {
@@ -111,6 +125,13 @@ function makeStructuredOutputOptions() {
     structuredOutput: { jsonSchema: { type: "object", properties: {} } },
     tools: ["Read", "Grep", "Glob", "Bash"],
     disallowedTools: ["Write", "Edit", "NotebookEdit"],
+    mcpServers: {
+      "paco-plugins": {
+        command: "/usr/bin/node",
+        args: ["scripts/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    },
   } as never;
 }
 
@@ -288,6 +309,13 @@ describe("runAgentTurn", () => {
       "Edit",
       "NotebookEdit",
     ]);
+    expect(backendOptions.mcpServers).toEqual({
+      "paco-plugins": {
+        command: "/usr/bin/node",
+        args: ["scripts/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    });
 
     const env = backendOptions.env as Record<string, string>;
     expect(env.GH_TOKEN).toBe("gh-token-abc");
@@ -295,6 +323,72 @@ describe("runAgentTurn", () => {
     expect(env.PACO_APPROVAL_URL).toBe("https://example.test/approve");
     expect(env.PACO_APPROVAL_TOKEN).toBe("approval-token-xyz");
     expect(env.PACO_APPROVAL_CHAT_ID).toBe("chat-123");
+  });
+
+  test("builds OpenFxBackendOptions, not Claude's shape, when the resolved backend reports id 'openfx'", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy: SpyBackend = {
+      lastCtx: undefined,
+      capabilities(): BackendCapabilities {
+        return {
+          id: "openfx",
+          resume: true,
+          steering: "restart",
+          mcp: true,
+          effort: false,
+          subagents: true,
+        };
+      },
+      startTurn(ctx: TurnContext): TurnHandle {
+        spy.lastCtx = ctx;
+        return {
+          chunks: (async function* () {
+            // no chunks: this backend only exists to record its TurnContext
+          })(),
+          result: Promise.resolve({
+            finishReason: "stop",
+            isError: false,
+            usage: zeroUsage(),
+            resumeToken: "openfx-session-1",
+          }),
+          steer: () => Promise.resolve(),
+          interrupt: () => {
+            // no-op: not exercised here
+          },
+        };
+      },
+    };
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: makeOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      chatId: "chat-123",
+      approval: {
+        url: "https://example.test/approve",
+        token: "approval-token-xyz",
+      },
+      onChunk: async () => {
+        // no-op: this test only inspects the recorded TurnContext
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    // Claude-only fields must not leak into an OpenFX turn's options.
+    expect(backendOptions.permissionMode).toBeUndefined();
+    expect(backendOptions.agents).toBeUndefined();
+    expect(backendOptions.settings).toBeUndefined();
+    expect(backendOptions.sessionId).toBeUndefined();
+    // The approval handler is wired in-process (see openfx-approval.ts),
+    // not via PACO_APPROVAL_URL/env vars.
+    expect(typeof backendOptions.onApprovalRequest).toBe("function");
+    expect(backendOptions.env).toBeUndefined();
   });
 
   test("surfaces a backend's structuredOutput on the step result", async () => {

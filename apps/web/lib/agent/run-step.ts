@@ -5,10 +5,12 @@ import {
   buildApprovalSettings,
   type ClaudeAgentDefinition,
   type ClaudeBackendOptions,
-  ClaudeCodeBackend,
   DEFAULT_AGENTS,
 } from "@paco/claude-code";
+import type { OpenFxBackendOptions } from "@paco/openfx-backend";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
+import { createOpenFxApprovalHandler } from "./approvals/openfx-approval";
+import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
 import { buildAppendSystemPrompt } from "./system-prompt";
 import type { AgentCallOptions, SteerController } from "./types";
 import { hostWorkspaceFor } from "./workspace-paths";
@@ -86,6 +88,12 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
   githubToken?: string;
   /** Chat id, so the approval hook can say which chat is asking. */
   chatId?: string;
+  /**
+   * Which `AgentBackend` this chat runs on (`chats.backend`) — resolved to a
+   * real backend instance via `resolveBackend`, unless `params.backend`
+   * already supplies one (see that field's own doc).
+   */
+  chatBackend?: BackendSelectionInput["backend"];
   /** Where the hook posts, and the secret it authenticates with. */
   approval?: { url: string; token: string };
   abortSignal?: AbortSignal;
@@ -96,6 +104,11 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
    */
   steerController?: SteerController;
   onChunk: (chunk: UIMessageChunk) => Promise<void>;
+  /**
+   * Overrides `resolveBackend(params.chatBackend)`. Real callers never set
+   * this — the chat's own `backend` column decides — but tests use it to
+   * inject `FakeBackend`/a spy without touching the database.
+   */
   backend?: AgentBackend;
 }): Promise<AgentStepResult<UI>> {
   const { options } = params;
@@ -109,68 +122,99 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     memorySection: options.memorySection,
   });
 
-  const backendOptions: ClaudeBackendOptions = {
-    ...(params.approval && params.chatId
-      ? { settings: buildApprovalSettings() }
-      : {}),
-    env: {
-      ...(params.githubToken
-        ? {
-            GH_TOKEN: params.githubToken,
-            GITHUB_TOKEN: params.githubToken,
-          }
-        : {}),
-      // Read by the PreToolUse hook, which runs as its own process and has
-      // no other way to know where Paco is or who it is acting for.
-      ...(params.approval && params.chatId
-        ? {
-            PACO_APPROVAL_URL: params.approval.url,
-            PACO_APPROVAL_TOKEN: params.approval.token,
-            PACO_APPROVAL_CHAT_ID: params.chatId,
-          }
-        : {}),
-    },
-    model: options.model?.id,
-    ...(options.model?.effort && { effort: options.model.effort }),
-    agents: resolveAgents(options),
-    ...(appendSystemPrompt && { appendSystemPrompt }),
-    ...(options.structuredOutput && {
-      jsonSchema: options.structuredOutput.jsonSchema,
-    }),
-    ...(options.tools && { tools: options.tools }),
-    ...(options.disallowedTools && {
-      disallowedTools: options.disallowedTools,
-    }),
-    /*
-     * The run is non-interactive, so anything that asks for approval is simply
-     * refused — there is no one to ask.
-     *
-     * `acceptEdits` sounds right but only covers file edits: the CLI still
-     * gates Bash, so the agent could write an app and then fail to install,
-     * build, or serve it. That was observed — it tried four times to start a
-     * dev server and gave up. `dontAsk` is worse, denying Bash outright.
-     *
-     * Bypassing the CLI's own prompts does not mean nothing is checked.
-     * A `PreToolUse` hook fires even in this mode, and Paco routes every
-     * tool call through it: reads and in-worktree edits proceed untouched,
-     * while anything that reaches outside the worktree or is destructive
-     * stops and asks the user. That is the approval an interactive session
-     * would give, without the modes that make the product unusable —
-     * `acceptEdits` gates Bash, so the agent could write an app and then not
-     * be allowed to start it, and `dontAsk` denies Bash outright.
-     */
-    permissionMode: "bypassPermissions",
-    // Resume keeps the CLI's own history so the full transcript is not
-    // replayed on every turn.
-    // --session-id requires a UUID; message ids are nanoids, so mint one.
-    ...(params.claudeSessionId ? {} : { sessionId: crypto.randomUUID() }),
-    ...(params.maxTurns !== undefined && { maxTurns: params.maxTurns }),
-    includePartialMessages: true,
-  };
+  const backend =
+    params.backend ?? (await resolveBackend({ backend: params.chatBackend }));
+  const backendId = backend.capabilities().id;
 
-  const backend = params.backend ?? new ClaudeCodeBackend();
+  const hostCwd = resolveHostCwd(options);
+
+  /*
+   * Each backend gets its own options shape (`ClaudeBackendOptions` vs.
+   * `OpenFxBackendOptions` — `TurnContext.backendOptions` is an intentionally
+   * untyped bag per backend, see `@paco/agent-backend`'s `interface.ts`), so
+   * this branches on which backend was actually resolved rather than trying
+   * to force one shape to describe both.
+   */
+  const backendOptions: ClaudeBackendOptions | OpenFxBackendOptions =
+    backendId === "openfx"
+      ? ({
+          model: options.model?.id,
+          // ACP delivers `session/request_permission` over the connection
+          // this backend already owns, so the same `decideApproval` policy
+          // Claude's PreToolUse hook uses is wired in-process here instead
+          // of through a spawned hook + HTTP round trip — see
+          // `openfx-approval.ts`'s doc.
+          ...(params.approval && params.chatId
+            ? {
+                onApprovalRequest: createOpenFxApprovalHandler({
+                  chatId: params.chatId,
+                  worktree: hostCwd,
+                }),
+              }
+            : {}),
+        } satisfies OpenFxBackendOptions)
+      : ({
+          ...(params.approval && params.chatId
+            ? { settings: buildApprovalSettings() }
+            : {}),
+          env: {
+            ...(params.githubToken
+              ? {
+                  GH_TOKEN: params.githubToken,
+                  GITHUB_TOKEN: params.githubToken,
+                }
+              : {}),
+            // Read by the PreToolUse hook, which runs as its own process and has
+            // no other way to know where Paco is or who it is acting for.
+            ...(params.approval && params.chatId
+              ? {
+                  PACO_APPROVAL_URL: params.approval.url,
+                  PACO_APPROVAL_TOKEN: params.approval.token,
+                  PACO_APPROVAL_CHAT_ID: params.chatId,
+                }
+              : {}),
+          },
+          model: options.model?.id,
+          ...(options.model?.effort && { effort: options.model.effort }),
+          agents: resolveAgents(options),
+          ...(appendSystemPrompt && { appendSystemPrompt }),
+          ...(options.structuredOutput && {
+            jsonSchema: options.structuredOutput.jsonSchema,
+          }),
+          ...(options.tools && { tools: options.tools }),
+          ...(options.disallowedTools && {
+            disallowedTools: options.disallowedTools,
+          }),
+          ...(options.mcpServers && { mcpServers: options.mcpServers }),
+          /*
+           * The run is non-interactive, so anything that asks for approval is simply
+           * refused — there is no one to ask.
+           *
+           * `acceptEdits` sounds right but only covers file edits: the CLI still
+           * gates Bash, so the agent could write an app and then fail to install,
+           * build, or serve it. That was observed — it tried four times to start a
+           * dev server and gave up. `dontAsk` is worse, denying Bash outright.
+           *
+           * Bypassing the CLI's own prompts does not mean nothing is checked.
+           * A `PreToolUse` hook fires even in this mode, and Paco routes every
+           * tool call through it: reads and in-worktree edits proceed untouched,
+           * while anything that reaches outside the worktree or is destructive
+           * stops and asks the user. That is the approval an interactive session
+           * would give, without the modes that make the product unusable —
+           * `acceptEdits` gates Bash, so the agent could write an app and then not
+           * be allowed to start it, and `dontAsk` denies Bash outright.
+           */
+          permissionMode: "bypassPermissions",
+          // Resume keeps the CLI's own history so the full transcript is not
+          // replayed on every turn.
+          // --session-id requires a UUID; message ids are nanoids, so mint one.
+          ...(params.claudeSessionId ? {} : { sessionId: crypto.randomUUID() }),
+          ...(params.maxTurns !== undefined && { maxTurns: params.maxTurns }),
+          includePartialMessages: true,
+        } satisfies ClaudeBackendOptions);
+
   const handle = backend.startTurn({
-    cwd: resolveHostCwd(options),
+    cwd: hostCwd,
     prompt: params.prompt,
     ...(params.claudeSessionId ? { resumeToken: params.claudeSessionId } : {}),
     ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),

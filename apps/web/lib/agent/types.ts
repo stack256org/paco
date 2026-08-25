@@ -78,6 +78,19 @@ export interface AgentCallOptions {
    * widens its `tools`).
    */
   disallowedTools?: string[];
+  /**
+   * MCP servers to expose to this turn (`--mcp-config`), keyed by server
+   * name.
+   *
+   * Built by `buildPluginMcpConfig` (`lib/plugins/mcp-bridge.ts`) from the
+   * plugins currently enabled and running; absent means no MCP servers at
+   * all, which keeps every turn that doesn't touch plugins exactly as
+   * isolated as `--strict-mcp-config` already makes it.
+   */
+  mcpServers?: Record<
+    string,
+    { command: string; args: string[]; env: Record<string, string> }
+  >;
 }
 
 /**
