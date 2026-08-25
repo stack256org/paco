@@ -439,8 +439,9 @@ export async function stopPluginHost(pluginId: string): Promise<void> {
 }
 
 /**
- * Every enabled, currently-running plugin's manifest and registered tools,
- * shaped exactly for `buildPluginMcpConfig` (`lib/plugins/mcp-bridge.ts`).
+ * Every enabled, currently-running, `tools:register`-granted plugin's
+ * manifest, grants and registered tools, shaped exactly for
+ * `buildPluginMcpConfig` (`lib/plugins/mcp-bridge.ts`).
  *
  * This is the "running registry" half of Task 12's `AgentCallOptions.mcpServers`
  * fix: `resolveChatMcpServers` (`lib/agent/chat-environment.ts`) calls
@@ -448,6 +449,14 @@ export async function stopPluginHost(pluginId: string): Promise<void> {
  * whose host has crashed (or is still `"starting"`) is correctly left out —
  * bridging tools for a host that cannot actually run them would just turn
  * every call into a timeout instead of an absent tool.
+ *
+ * `row.enabled` is NOT the only gate. Enabling a plugin says "run this";
+ * `row.grantedCapabilities` is what the operator consented to it *doing*,
+ * and the two are separate decisions on the install screen — an operator can
+ * deny every capability and still enable the plugin. A plugin without a
+ * granted `tools:register` therefore contributes nothing to the agent's
+ * `--mcp-config`, and `grantedCapabilities` travels with each entry so the
+ * bridge re-checks it rather than taking this filter on trust.
  *
  * Never throws: a failure to list plugins is logged and treated as "no
  * plugins to bridge", the same posture as `ensurePluginsStarted` itself.
@@ -473,6 +482,9 @@ export async function listEnabledPluginsForMcp(): Promise<
     if (!row.enabled) {
       continue;
     }
+    if (!row.grantedCapabilities.includes("tools:register")) {
+      continue;
+    }
     const host = registry.get(row.id);
     if (host?.state !== "running") {
       continue;
@@ -480,6 +492,7 @@ export async function listEnabledPluginsForMcp(): Promise<
     enabled.push({
       id: row.id,
       manifest: row.manifest,
+      grantedCapabilities: row.grantedCapabilities,
       tools: tools.get(row.id) ?? [],
     });
   }

@@ -121,6 +121,72 @@ never passed. A plugin cannot shell out, cannot start a worker thread, and
 cannot load a `.node` addon — each of which would step straight around
 everything else here.
 
+**A plugin cannot get a subprocess by asking Paco for one either.** That
+sentence used to be missing, and its absence made this whole document false: a
+`plugin.json` could declare `mcpServers`, and Paco copied each entry verbatim
+into the agent CLI's `--mcp-config`, which spawns `command` as a plain child
+process of Paco. Nothing in this file applied to it — no `--permission`, no
+module allowlist, no Node floor, no symlink scan, no `net:fetch` domain check —
+and it inherited Paco's environment. An operator could deny every capability on
+the consent screen and still have `{"command":"/bin/sh","args":["-c","…"]}`
+execute as the Paco user on the next turn.
+
+**Manifest-declared `mcpServers` entries are now refused outright**, for every
+plugin, first-party included. `apps/web/lib/plugins/mcp-bridge.ts` emits exactly
+one MCP server — see "How plugin tools reach the agent" below — and logs a
+warning naming each refused entry so a plugin that quietly does nothing can be
+diagnosed. The manifest schema still parses the field (a plugin declaring one
+installs and runs; the declaration is simply inert) rather than failing to
+parse, but nothing it names is ever started.
+
+Refused rather than put behind a grant, because a grant does not fix it. The
+honest label on that checkbox would be "may run any command on this server as
+you", which negates every other line of the consent screen at once; the screen
+never shows the command, and showing it would show something like
+`npx -y @vendor/thing`, whose actual code is not what the operator hashed at
+install (`plugins.contentHash`). And the sandboxed route already exists:
+`tools:register` gives the model a tool whose calls execute inside the worker
+this document describes.
+
+### How plugin tools reach the agent
+
+`tools:register` is bridged, and the bridge is the only thing in
+`--mcp-config`. It is one stdio server named `paco-plugins`, running Paco's own
+script on Paco's own Node binary; each `tools/call` is forwarded over loopback
+to `app/api/internal/plugin-tools/route.ts`, which invokes the tool in the
+plugin's running worker. The plugin never gets a process of its own out of it.
+
+Three properties hold there:
+
+1. **The operator's grant gates it, not the manifest.** A plugin whose
+   `tools:register` grant was denied contributes nothing to `--mcp-config`, and
+   is not in the bridge token's scope. Checked twice on purpose — once when the
+   running registry is read (`lib/plugins/registry.ts`, from
+   `plugins.granted_capabilities`), once in the bridge itself
+   (`lib/plugins/mcp-bridge.ts`) — because the manifest's rule that `mcpServers`
+   requires `tools:register` is a *declaration* check and was mistaken for a
+   grant check once already.
+2. **The bridge's bearer token is never in argv.** `--mcp-config` is passed a
+   `0600` file inside a `0700` directory, not inline JSON. Inline JSON put the
+   6-hour plugin-tools token (and any `env` alongside it) into the CLI's
+   argument vector, which `ps auxww` shows to every account on the machine and
+   which the agent's own `Bash` tool can read. AGENTS.md states the rule for
+   `gh`; `packages/sandbox/docker/sandbox.ts` states it for the Docker path.
+   `packages/claude-code/mcp-config-file.ts` is the fix here, and `run.ts`
+   removes the file when the run ends.
+3. **The agent does not inherit Paco's environment.** The CLI used to be
+   spawned with `{...process.env}`, which handed `APP_SECRET`, `POSTGRES_URL`,
+   `SMTP_PASSWORD` and `PACO_APPROVAL_TOKEN` to the agent and to everything it
+   spawns — including its `Bash` tool. It is now built from an allowlist
+   (`packages/claude-code/child-env.ts`), the same construction "No ambient
+   secrets" above describes for workers. A caller that needs a specific secret
+   in a specific turn passes it explicitly through `ClaudeCodeOptions.env`.
+
+   This is a narrower boundary than the worker's and should not be read as an
+   equal one. The agent is trusted code running the operator's own repository
+   with a `Bash` tool; the allowlist stops ambient secret *inheritance*, it does
+   not sandbox the agent.
+
 ### No network except through a consented allowlist
 
 The runtime's socket gate (Node >= 24) is the outer barrier. Inside it,
@@ -259,6 +325,40 @@ Be precise about this. The consent screen must not imply otherwise.
 - **Plugin dependencies are the plugin.** Anything under the plugin's root is
   readable and loadable by it. Reviewing a plugin means reviewing what it
   vendors.
+
+## Where each claim is enforced, and by which test
+
+The rule at the top of this file — *"do not add a claim here that no test
+proves"* — is only checkable if the mapping is written down. It is below. A
+claim that lost its test would otherwise look exactly like a claim that still
+has one, which is how this document came to assert "No subprocesses" while Paco
+was copying `plugin.json` `mcpServers` entries straight into a process spawn.
+
+| Claim | Enforced in | Pinned by |
+| --- | --- | --- |
+| Node >= 24 floor; refusal below it | `host.ts` (`assertRuntimeIsSupported`) | `host.test.ts` — "refuses to start a hardened worker on Node 22.x" |
+| Worker environment is exactly `PATH`, `PACO_PLUGIN_ID`, `PACO_PLUGIN_STATE_DIR` | `host.ts` | `host.test.ts` — "gives the worker exactly PATH, PACO_PLUGIN_ID and PACO_PLUGIN_STATE_DIR" |
+| Filesystem allowlist: reads outside it fail, writes land only in the state dir | `--permission` flags in `host.ts` | `host.test.ts` — "can write inside its state directory" / "cannot write outside its state directory", and the `/etc/hosts` read |
+| No symlink anywhere in the plugin tree | `host.ts` start-time scan | `host.test.ts` — "refuses to start a plugin whose directory contains a symlink", "refuses to start a plugin that ships a symlink out of its tree" |
+| Builtin-module allowlist, both routes, normalization fails closed | `worker-preload.ts` | `worker-preload.test.ts` |
+| `net:fetch` uses the operator's consented domains, exact host match | `host.ts` | `host.test.ts` — "uses the consented netDomains and ignores the manifest's", "rejects a subdomain of an allowed host", "rejects the parent domain of an allowed host" |
+| Grants are checked in the host; the granted list is intersected with the manifest | `host.ts` | `host.test.ts` — "denies an ungranted capability in the host…", "drops a granted capability the manifest does not declare", "drops registered tools when tools:register is not granted" |
+| Protocol limits; a worker that exceeds one is killed | `host.ts` | `host.test.ts` — the protocol-limit tests |
+| Manifest-declared `mcpServers` never start | `apps/web/lib/plugins/mcp-bridge.ts` | `mcp-bridge.test.ts` — "refuses a manifest-declared mcpServers entry outright", "refuses manifest-declared mcpServers even alongside tools it does bridge", "reports every refused server…" |
+| A denied `tools:register` reaches the agent as nothing | `lib/plugins/registry.ts`, `lib/plugins/mcp-bridge.ts` | `registry.test.ts` — "excludes a plugin whose tools:register grant the operator denied"; `mcp-bridge.test.ts` — "contributes nothing for a plugin whose tools:register grant was denied" |
+| The bridge's bearer token is not in argv | `packages/claude-code/mcp-config-file.ts`, `options.ts` | `run.test.ts` — "keeps the plugin-tools bearer token out of the process argv"; `options.test.ts`; `mcp-config-file.test.ts` |
+| The agent does not inherit Paco's environment | `packages/claude-code/child-env.ts`, `run.ts` | `run.test.ts` — "does not hand Paco's own secrets to the agent"; `child-env.test.ts` |
+| The bridge script scrubs its own inherited environment | `apps/web/scripts/plugin-mcp-server.ts` | `mcp-bridge.test.ts` — "keeps only the three documented PACO_\* variables…" |
+
+**Known gaps, stated rather than papered over:**
+
+- **"No subprocesses, threads, or native code" (the worker half) rests on the
+  absence of three flags, and no test asserts they are absent.** The behaviour
+  is real — `--allow-child-process`, `--allow-worker` and `--allow-addons` are
+  not in `host.ts`'s argument list — but a future edit could add one and
+  nothing would fail. An argv assertion on the spawned worker would close it.
+- Everything under "What is NOT enforced" is, by construction, not tested. That
+  list is the honest description of the residue, not a specification.
 
 ## The non-hardened mode
 

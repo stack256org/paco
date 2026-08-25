@@ -4,30 +4,87 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RegisteredTool } from "@paco/plugin-host";
-import type { PluginManifest } from "@paco/plugin-kit";
+import type { Capability, PluginManifest } from "@paco/plugin-kit";
 import { mintPluginToolsToken } from "@/lib/plugins/tools-token";
 
 /**
- * Bridges plugin-registered tools (and any MCP servers a plugin declares
- * verbatim in its manifest) into the CLI's `--mcp-config`, so a running turn
- * can call them like any other MCP tool.
+ * Bridges plugin-registered tools into the CLI's `--mcp-config`, so a running
+ * turn can call them like any other MCP tool.
  *
  * One aggregate "paco-plugins" server fronts every enabled plugin's
  * registered tools (Task 5's `tools:register` slot) behind a single stdio
  * MCP server that forwards each call to Paco's own internal route
  * (`app/api/internal/plugin-tools/route.ts`), which looks the call up in the
  * running `PluginHost` registry (`lib/plugins/registry.ts`) and invokes it.
- * Every `plugin.json` `mcpServers` entry is passed through as its own
- * server instead, namespaced by plugin id so two plugins can't collide on a
- * name.
+ * That is the ONLY server this file ever emits: it runs Paco's own script,
+ * on Paco's own Node, and every call it forwards lands back inside the
+ * plugin's sandboxed worker.
+ *
+ * Two gates decide what gets bridged, and both are checked here rather than
+ * trusted from upstream:
+ *
+ * 1. **The operator's `tools:register` grant.** A plugin whose grant was
+ *    denied contributes nothing, even if it is enabled and running and its
+ *    host somehow handed tools over. `PluginHost` already drops such tools
+ *    (`packages/plugin-host/host.ts`), but this is the process that decides
+ *    what the CLI can reach, and it reads the consented list itself.
+ * 2. **Manifest-declared `mcpServers` are refused outright.** See
+ *    {@link REFUSED_MCP_SERVERS_REASON}.
  */
 
-/** One plugin, its manifest, and the tools its running host registered. */
+/**
+ * One plugin, the operator's grants for it, and the tools its running host
+ * registered.
+ *
+ * `grantedCapabilities` is `plugins.grantedCapabilities` from the database —
+ * what the operator actually consented to on the install screen — never
+ * `manifest.capabilities`, which is only what the plugin asked for.
+ */
 export interface EnabledPluginForMcp {
   id: string;
   manifest: PluginManifest;
+  /** The operator's consented grants, from `plugins.grantedCapabilities`. */
+  grantedCapabilities: Capability[];
   tools: RegisteredTool[];
 }
+
+/**
+ * Why a `plugin.json` `mcpServers` entry never reaches the CLI.
+ *
+ * Such an entry is a `command`, `args` and `env` that the CLI spawns as a
+ * plain child process of Paco: no `--permission`, no builtin allowlist, no
+ * Node >= 24 floor, no symlink refusal, no `net:fetch` domain check — none
+ * of the containment `packages/plugin-host/SECURITY.md` describes, because
+ * none of it is in that path. It is host code execution as the Paco user,
+ * and passing it through made the entire plugin sandbox optional for any
+ * plugin that declared one.
+ *
+ * Refused rather than gated behind a grant, for three reasons.
+ *
+ * A grant is a checkbox, and the honest label for this one would be "may run
+ * any command on this server as you" — which negates every other line on the
+ * consent screen at once. Whatever an operator thought they were deciding by
+ * denying `net:fetch` or `storage:kv`, they were not deciding this.
+ *
+ * The consent screen never shows the command. It could be made to, but the
+ * thing shown would be a line like `npx -y @vendor/some-mcp-server`, which
+ * an operator cannot review — the code it fetches is not the code they
+ * hashed at install (`plugins.contentHash`), and a re-install can change the
+ * manifest while the grant persists.
+ *
+ * And there is already a sandboxed way to do the thing this feature exists
+ * for. A plugin that wants to give the model a tool registers it
+ * (`tools:register`) and it is bridged through "paco-plugins" above, where
+ * the call executes inside the plugin's own worker under every restriction
+ * SECURITY.md claims. Nothing needs the unsandboxed path.
+ *
+ * The manifest schema still parses `mcpServers` (`@paco/plugin-kit`'s
+ * `pluginManifestSchema`) so that a plugin declaring one installs and runs
+ * with a clear warning rather than failing to parse — the declaration is
+ * simply inert.
+ */
+export const REFUSED_MCP_SERVERS_REASON =
+  "manifest-declared mcpServers are not supported: they would run as ordinary child processes of Paco, outside the plugin sandbox entirely. Register tools with tools:register instead.";
 
 export interface BuildPluginMcpConfigOptions {
   /** Where the standalone MCP server posts tool-call requests. */
@@ -78,6 +135,24 @@ function pluginMcpServerScriptPath(): string {
 }
 
 /**
+ * Logs the manifest-declared `mcpServers` this bridge refused, once per
+ * plugin, naming every server so an operator whose plugin quietly does
+ * nothing can find out why. A warning rather than a failure: the spec's
+ * degradation invariant (Section 2) says a plugin must never fail the turn
+ * that touched it, and the rest of the plugin still works.
+ */
+function warnAboutRefusedServers(plugin: EnabledPluginForMcp): void {
+  const declared = plugin.manifest.mcpServers;
+  if (!declared) {
+    return;
+  }
+  console.warn(`plugin mcp bridge: ${REFUSED_MCP_SERVERS_REASON}`, {
+    id: plugin.id,
+    servers: Object.keys(declared),
+  });
+}
+
+/**
  * Builds the `--mcp-config` entries for every enabled plugin.
  *
  * `enabled` is deliberately not looked up here: the caller already has it
@@ -91,7 +166,11 @@ export function buildPluginMcpConfig(
 ): Record<string, McpServerSpec> {
   const config: Record<string, McpServerSpec> = {};
 
-  const pluginsWithTools = enabled.filter((plugin) => plugin.tools.length > 0);
+  const pluginsWithTools = enabled.filter(
+    (plugin) =>
+      plugin.tools.length > 0 &&
+      plugin.grantedCapabilities.includes("tools:register"),
+  );
   const toolEntries = pluginsWithTools.flatMap((plugin) =>
     plugin.tools.map((tool) => ({
       pluginId: plugin.id,
@@ -125,17 +204,7 @@ export function buildPluginMcpConfig(
   }
 
   for (const plugin of enabled) {
-    const mcpServers = plugin.manifest.mcpServers;
-    if (!mcpServers) {
-      continue;
-    }
-    for (const [name, server] of Object.entries(mcpServers)) {
-      config[`${plugin.id}-${name}`] = {
-        command: server.command,
-        args: [...server.args],
-        env: { ...server.env },
-      };
-    }
+    warnAboutRefusedServers(plugin);
   }
 
   return config;

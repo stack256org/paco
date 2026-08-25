@@ -32,7 +32,8 @@ const CAPABILITY_COPY: Record<Capability, string> = {
   "events:subscribe":
     "See every session event for chats in this instance — messages, tool calls, and status updates, including the human's.",
   "messages:post": "Post messages into a chat, as if a person had typed them.",
-  "tools:register": "Add its own tools that the model can call during a turn.",
+  "tools:register":
+    "Add its own tools that the model can call during a turn. Each call runs inside the plugin process described above, under every limit listed there — it cannot use this to run a program on this server.",
   "net:fetch":
     "Make outbound HTTP requests — restricted to exactly the domains listed below, and nowhere else.",
   "storage:kv": "Store and read its own private data on this server.",
@@ -63,7 +64,14 @@ function withToggled(
  *
  * Deliberately never says "sandboxed" or "fully isolated" for the process
  * boundary — that word is reserved for `ui:panel`'s line, where it is
- * literally true (`sandbox="allow-scripts"` on an iframe). The process
+ * literally true (`sandbox="allow-scripts"` on an iframe). `tools:register`
+ * draws the same contrast without borrowing the word: a tool call runs in
+ * the worker this panel already described, NOT as a program on the server.
+ * That contrast is the point, because a manifest may declare
+ * `mcpServers`, whose `command` would be spawned as a plain child of Paco
+ * with none of these limits; `lib/plugins/mcp-bridge.ts` refuses them
+ * outright, and the paragraph above says so, because "add its own tools"
+ * alone read as if it might cover both. The process
  * itself is not a container, has no CPU/memory limit, can force-kill the
  * host, is confined on disk to an explicit path allowlist (not "no file
  * access"), requires Node >= 24 to be isolated at all, and leaves
@@ -114,6 +122,12 @@ export function ConsentForm({
           Node &lt; 24, because that is the version where the network
           restriction above is backed by the runtime itself rather than by this
           process alone.
+        </p>
+        <p>
+          A plugin can also declare MCP servers of its own in its manifest.{" "}
+          <strong>Paco refuses those</strong>: they name a command that would
+          run as an ordinary program on this server, as you, outside every limit
+          described here. Nothing a plugin declares that way ever starts.
         </p>
       </div>
 

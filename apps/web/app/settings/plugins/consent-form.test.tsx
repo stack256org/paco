@@ -167,6 +167,27 @@ describe("ConsentForm", () => {
     expect(html).not.toContain("authenticated with a per-plugin secret");
   });
 
+  test("does not let tools:register read as a way to run a program on the server", () => {
+    // A manifest may declare `mcpServers`, whose `command` the CLI would
+    // otherwise spawn as a plain child of Paco — outside the worker, outside
+    // Node's permission model, with Paco's environment. `tools:register` is
+    // the capability that declaration is tied to, so this line is the only
+    // place an operator would look for it. Paco refuses those entries
+    // (`lib/plugins/mcp-bridge.ts`); the copy has to say so rather than
+    // leaving "add its own tools" to cover both.
+    const html = renderForm({ requested: ["tools:register"] });
+
+    expect(html).toContain("inside the plugin process described above");
+    expect(html).toContain("cannot use this to run a program on this server");
+  });
+
+  test("discloses that manifest-declared MCP servers are refused", () => {
+    const html = renderForm();
+
+    expect(html).toContain("MCP servers");
+    expect(html).toContain("Paco refuses");
+  });
+
   test("states the Node >= 24 floor the isolation depends on", () => {
     const html = renderForm();
 

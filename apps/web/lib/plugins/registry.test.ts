@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import type { PluginManifest } from "@paco/plugin-kit";
+import type { Capability, PluginManifest } from "@paco/plugin-kit";
 import type { PluginRow } from "@/lib/db/schema";
 
 mock.module("server-only", () => ({}));
@@ -112,7 +112,11 @@ const {
   stopPluginHost,
 } = await import("./registry.ts");
 
-function row(id: string, enabled = true): PluginRow {
+function row(
+  id: string,
+  enabled = true,
+  grantedCapabilities: Capability[] = ["tools:register"],
+): PluginRow {
   return {
     id,
     source: "local:/tmp",
@@ -123,9 +127,9 @@ function row(id: string, enabled = true): PluginRow {
       version: "1.0.0",
       description: "d",
       pacoApi: 1,
-      capabilities: [],
+      capabilities: ["tools:register"],
     } as PluginManifest,
-    grantedCapabilities: [],
+    grantedCapabilities,
     consentedNetDomains: [],
     enabled,
     ingressSecret: null,
@@ -572,6 +576,32 @@ describe("listEnabledPluginsForMcp", () => {
     ]);
     const pluginB = enabled.find((plugin) => plugin.id === "plugin-b");
     expect(pluginB?.tools).toEqual([]);
+
+    // The operator's grants travel with the plugin, so the bridge decides
+    // what to expose from the consented list rather than from the manifest.
+    expect(pluginA?.grantedCapabilities).toEqual(["tools:register"]);
+  });
+
+  test("excludes a plugin whose tools:register grant the operator denied", async () => {
+    // The exploit this closes: install from GitHub, deny every capability,
+    // enable anyway. Nothing about a running host is consent, so a plugin
+    // without the grant must not reach the CLI's --mcp-config at all.
+    startBehavior = async () => ({
+      tools: [{ name: "search", description: "d", inputSchema: {} }],
+    });
+    rows = [row("plugin-a", true, [])];
+
+    await ensurePluginsStarted();
+
+    expect(await listEnabledPluginsForMcp()).toEqual([]);
+  });
+
+  test("excludes a plugin granted other capabilities but not tools:register", async () => {
+    rows = [row("plugin-a", true, ["storage:kv", "events:subscribe"])];
+
+    await ensurePluginsStarted();
+
+    expect(await listEnabledPluginsForMcp()).toEqual([]);
   });
 
   test("is empty when no plugin has ever been started", async () => {
