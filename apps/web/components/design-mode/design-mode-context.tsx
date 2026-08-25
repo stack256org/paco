@@ -83,6 +83,51 @@ function makeAnnotationId(): string {
   return crypto.randomUUID();
 }
 
+/**
+ * Where a resolved design turn is remembered, per chat.
+ *
+ * The panel is anchored to the newest design turn in the transcript rather
+ * than to the newest message (see `latestDesignMessage` in
+ * `candidate-progress.ts`), which is what keeps Discard reachable after an
+ * ordinary chat turn. The cost of that is that a design turn's parts stay in
+ * the transcript forever, so "I already adopted or discarded these" has to be
+ * remembered somewhere or the panel would reopen on every reload for the rest
+ * of the chat's life.
+ *
+ * `localStorage` and not the database on purpose: the durable answer to
+ * "are these candidates still there" is the worktrees on disk, and nothing
+ * streams that to the browser today. Getting this wrong in the safe direction
+ * means the panel reappears for a set of candidates that are already gone —
+ * where Discard is an idempotent no-op and Accept fails with a clear message —
+ * rather than hiding the only handle on candidates that are still on disk,
+ * which is the bug this replaces.
+ */
+function dismissedKey(chatId: string): string {
+  return `paco:design-panel-resolved:${chatId}`;
+}
+
+function readDismissedTurnId(chatId: string): string | null {
+  try {
+    return window.localStorage.getItem(dismissedKey(chatId));
+  } catch {
+    // Private mode, or storage disabled. The panel simply stays open.
+    return null;
+  }
+}
+
+function writeDismissedTurnId(chatId: string, turnId: string | null): void {
+  try {
+    if (turnId) {
+      window.localStorage.setItem(dismissedKey(chatId), turnId);
+    } else {
+      window.localStorage.removeItem(dismissedKey(chatId));
+    }
+  } catch {
+    // Best-effort: failing to remember a dismissal only means the panel
+    // reopens on the next load, never that an action did not happen.
+  }
+}
+
 export function useDesignModeController(
   params: DesignModeControllerParams,
 ): DesignModeController {
@@ -107,6 +152,22 @@ export function useDesignModeController(
   const [dismissedTurnId, setDismissedTurnId] = useState<string | null>(null);
 
   const turnId = designTurnMessageId(messages);
+
+  // Restored after mount rather than in a `useState` initialiser: reading
+  // storage during render would make the server-rendered markup and the first
+  // client render disagree.
+  useEffect(() => {
+    setDismissedTurnId(readDismissedTurnId(chatId));
+  }, [chatId]);
+
+  /** Mark this turn resolved, here and for the next load of this chat. */
+  const dismissTurn = useCallback(
+    (id: string | null) => {
+      setDismissedTurnId(id);
+      writeDismissedTurnId(chatId, id);
+    },
+    [chatId],
+  );
 
   const candidates = useMemo(
     () => designCandidateViews(messages, candidatePreviews),
@@ -205,7 +266,7 @@ export function useDesignModeController(
           return;
         }
         appendMessage(result.message);
-        setDismissedTurnId(turnId);
+        dismissTurn(turnId);
       } catch (acceptError) {
         setError(
           acceptError instanceof Error
@@ -216,7 +277,7 @@ export function useDesignModeController(
         setBusy(null);
       }
     },
-    [appendMessage, chatId, sessionId, turnId],
+    [appendMessage, chatId, dismissTurn, sessionId, turnId],
   );
 
   const handleDiscard = useCallback(async () => {
@@ -228,7 +289,7 @@ export function useDesignModeController(
         setError(result.error);
         return;
       }
-      setDismissedTurnId(turnId);
+      dismissTurn(turnId);
     } catch (discardError) {
       setError(
         discardError instanceof Error
@@ -238,7 +299,7 @@ export function useDesignModeController(
     } finally {
       setBusy(null);
     }
-  }, [chatId, sessionId, turnId]);
+  }, [chatId, dismissTurn, sessionId, turnId]);
 
   const panelProps: DesignPanelProps | null =
     turnId && turnId !== dismissedTurnId && candidates.length > 0

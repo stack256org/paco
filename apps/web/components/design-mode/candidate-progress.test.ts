@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { WebAgentUIMessage } from "@/app/types";
-import { designCandidateViews, isDesignTurn } from "./candidate-progress";
+import {
+  designCandidateViews,
+  designTurnMessageId,
+  isDesignTurn,
+} from "./candidate-progress";
 
 function progressPart(
   candidate: number,
@@ -38,13 +42,37 @@ describe("isDesignTurn", () => {
     );
   });
 
-  test("is false when the design turn is no longer the latest one", () => {
+  test("survives an ordinary chat turn taken after the design turn", () => {
+    // This used to be false, and it is the whole reason candidates could
+    // become unreclaimable: the panel — and with it the only Discard control
+    // in the product — rendered from the NEWEST assistant message, so one
+    // ordinary reply after a design turn hid it permanently while two or
+    // three worktrees and branches stayed on disk.
     expect(
       isDesignTurn([
         assistant([progressPart(1, "completed")], "old"),
         assistant([{ type: "text", text: "later" }], "new"),
       ]),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  test("anchors on the design turn itself, not on the newest message", () => {
+    expect(
+      designTurnMessageId([
+        assistant([progressPart(1, "completed")], "design"),
+        assistant([{ type: "text", text: "later" }], "chat"),
+      ]),
+    ).toBe("design");
+  });
+
+  test("the newest design turn wins when there have been several", () => {
+    expect(
+      designTurnMessageId([
+        assistant([progressPart(1, "completed")], "first"),
+        assistant([{ type: "text", text: "in between" }], "chat"),
+        assistant([progressPart(1, "running")], "second"),
+      ]),
+    ).toBe("second");
   });
 
   test("is false for an empty conversation", () => {
@@ -115,5 +143,31 @@ describe("designCandidateViews", () => {
         previews,
       ),
     ).toEqual([]);
+  });
+
+  test("still renders the design turn's candidates after an ordinary reply", () => {
+    const views = designCandidateViews(
+      [
+        assistant([progressPart(1, "completed"), progressPart(2, "completed")]),
+        assistant([{ type: "text", text: "sure, here you go" }], "later"),
+      ],
+      previews,
+    );
+
+    expect(views.map((view) => view.index)).toEqual([1, 2]);
+  });
+
+  test("an older design turn's parts never leak into a newer one", () => {
+    // The reason the original only ever looked at the newest message: two
+    // design turns in one chat must not merge into one panel.
+    const views = designCandidateViews(
+      [
+        assistant([progressPart(3, "completed")], "first"),
+        assistant([progressPart(1, "running")], "second"),
+      ],
+      previews,
+    );
+
+    expect(views.map((view) => view.index)).toEqual([1]);
   });
 });
