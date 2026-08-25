@@ -66,8 +66,13 @@ function makeRequest(options: {
   forgedPrefix?: string;
   /** Set false to simulate a proxy that sent no X-Real-IP. */
   realIp?: false;
+  /** Anything else the caller wants on the wire, verbatim. */
+  extraHeaders?: Record<string, string>;
 }): Request {
   const headers = new Headers({ "content-type": "application/json" });
+  for (const [name, value] of Object.entries(options.extraHeaders ?? {})) {
+    headers.set(name, value);
+  }
   if (options.secret !== null) {
     headers.set("x-paco-channel-secret", options.secret ?? CORRECT_SECRET);
   }
@@ -327,9 +332,14 @@ describe("POST /api/channels/[pluginId]/[channel]", () => {
     expect(seenArgs[0]).toBe("events");
     expect(seenArgs[2]).toEqual({ a: 1 });
     expect(seenArgs[3]).toBe('{"a":1}');
+    // Paco's own ingress credential is consumed by this route and must NOT
+    // be handed on to the untrusted worker.
     expect(
       (seenArgs[1] as Record<string, string>)["x-paco-channel-secret"],
-    ).toBe(CORRECT_SECRET);
+    ).toBeUndefined();
+    expect((seenArgs[1] as Record<string, string>)["content-type"]).toBe(
+      "application/json",
+    );
   });
 
   test("mirrors a non-JSON raw body as an undefined parsed body, unchanged raw bytes", async () => {
@@ -543,6 +553,89 @@ describe("POST /api/channels/[pluginId]/[channel]", () => {
     }
 
     expect(last?.status).toBe(429);
+  });
+
+  /** Registers a running plugin and captures the headers the worker sees. */
+  function captureHeaders(): () => Record<string, string> {
+    let seen: Record<string, string> = {};
+    pluginRow = { id: "running-plugin", ingressSecret: seal(CORRECT_SECRET) };
+    registry = new Map([
+      [
+        "running-plugin",
+        {
+          state: "running",
+          deliverIngress: (
+            _channel: string,
+            headers: Record<string, string>,
+          ) => {
+            seen = headers;
+            return Promise.resolve({ ok: true, status: 200 });
+          },
+        },
+      ],
+    ]);
+    return () => seen;
+  }
+
+  test("never forwards the operator's credentials to the plugin worker", async () => {
+    const seen = captureHeaders();
+
+    await POST(
+      makeRequest({
+        extraHeaders: {
+          cookie: "paco.session_token=super-secret-session",
+          authorization: "Bearer an-operator-token",
+          "proxy-authorization": "Basic abc",
+        },
+      }),
+      paramsFor("running-plugin", "events"),
+    );
+
+    // The endpoint is public and unauthenticated on a self-verified channel,
+    // so a cross-site POST that carries the operator's Paco session cookie
+    // would otherwise hand a third-party plugin a live session it can
+    // exfiltrate over net:fetch.
+    expect(seen()).not.toHaveProperty("cookie");
+    expect(seen()).not.toHaveProperty("authorization");
+    expect(seen()).not.toHaveProperty("proxy-authorization");
+    expect(seen()).not.toHaveProperty("x-paco-channel-secret");
+  });
+
+  test("keeps the Slack signature headers a self-verified channel needs", async () => {
+    const seen = captureHeaders();
+
+    await POST(
+      makeRequest({
+        extraHeaders: {
+          "x-slack-signature": "v0=abc123",
+          "x-slack-request-timestamp": "1700000000",
+          "x-slack-retry-num": "2",
+        },
+      }),
+      paramsFor("running-plugin", "events"),
+    );
+
+    expect(seen()["x-slack-signature"]).toBe("v0=abc123");
+    expect(seen()["x-slack-request-timestamp"]).toBe("1700000000");
+    expect(seen()["x-slack-retry-num"]).toBe("2");
+  });
+
+  test("drops anything not on the allowlist, including infrastructure headers", async () => {
+    const seen = captureHeaders();
+
+    await POST(
+      makeRequest({
+        ip: "203.0.113.9",
+        extraHeaders: { "x-some-unknown-header": "value" },
+      }),
+      paramsFor("running-plugin", "events"),
+    );
+
+    expect(seen()).not.toHaveProperty("x-some-unknown-header");
+    // The proxy headers are how this route identifies a rate-limit bucket;
+    // the worker has no business seeing the caller's network position.
+    expect(seen()).not.toHaveProperty("x-real-ip");
+    expect(seen()).not.toHaveProperty("x-forwarded-for");
   });
 
   test("413s a body larger than the cap, without reaching the worker", async () => {

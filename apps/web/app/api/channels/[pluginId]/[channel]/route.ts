@@ -66,6 +66,10 @@ import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
  *    unauthenticated caller can reach; for `"self-verified"` it IS such a
  *    boundary, which is why the cap and both rate limiters above are load
  *    bearing there.
+ * 7. Only an allowlisted subset of the request's headers is handed to the
+ *    worker — see `FORWARDED_HEADERS`. Everything the operator's browser or
+ *    Paco's own proxy attached, this route's own ingress secret included,
+ *    stops here.
  */
 
 /** Matches `pluginManifestSchema.name` (`packages/plugin-kit/manifest.ts`). */
@@ -80,6 +84,62 @@ const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
 const CHANNEL_PATTERN = /^[a-z0-9_-]{1,64}$/;
 
 const INGRESS_SECRET_HEADER = "x-paco-channel-secret";
+
+/**
+ * The only request headers a plugin worker is ever shown.
+ *
+ * This route used to copy `request.headers` verbatim into the ingress
+ * message. That is a credential handover: the endpoint is public, and on a
+ * `"self-verified"` channel it is unauthenticated, so a cross-site POST that
+ * carries the operator's Paco session cookie handed a third-party plugin a
+ * live session — which it can read in its `channels/*` handler and ship
+ * straight back out through `net:fetch`. `SameSite=Lax` turns away the plain
+ * cross-site case, but design previews are served from a subdomain of the
+ * app's own domain in the natural deployment, which makes agent-authored
+ * preview HTML same-site and the cookie eligible again.
+ *
+ * An allowlist, not a denylist: a denylist has to enumerate every header
+ * that will ever carry a secret, and the next proxy or provider to add one
+ * silently defeats it. The cost is that a channel needing a header not
+ * listed here requires a change to this file, which is the intended
+ * tradeoff — nothing reaches untrusted plugin code without someone
+ * deciding it should.
+ *
+ * Deliberately absent, beyond the obvious `cookie`/`authorization`:
+ * `x-paco-channel-secret` (Paco's own ingress credential, consumed by this
+ * route and no business of the plugin's) and the proxy headers
+ * `x-real-ip`/`x-forwarded-for` (this route's rate-limit identity, not
+ * something a worker needs to know).
+ */
+const FORWARDED_HEADERS: readonly string[] = [
+  // Every channel: how to interpret the raw body it is handed.
+  "content-type",
+  "content-length",
+  "user-agent",
+  // Slack, whose Event Subscriptions cannot attach a custom header and
+  // sign the raw body instead — the whole reason `"self-verified"` exists.
+  "x-slack-signature",
+  "x-slack-request-timestamp",
+  "x-slack-retry-num",
+  "x-slack-retry-reason",
+  // GitHub-shaped webhooks, the other common signed-body provider.
+  "x-github-event",
+  "x-github-delivery",
+  "x-hub-signature",
+  "x-hub-signature-256",
+];
+
+/** Copies only `FORWARDED_HEADERS` out of the inbound request. */
+function forwardableHeaders(request: Request): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const name of FORWARDED_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) {
+      headers[name] = value;
+    }
+  }
+  return headers;
+}
 
 /** Requests accepted per plugin+channel+source IP in one window, before a 429. */
 const RATE_LIMIT = 60;
@@ -309,10 +369,7 @@ export async function POST(
   }
   const rawBody = bodyResult.text;
   const body = parseJsonBody(rawBody);
-  const headers: Record<string, string> = {};
-  for (const [name, value] of request.headers.entries()) {
-    headers[name] = value;
-  }
+  const headers = forwardableHeaders(request);
 
   const outcome = await host.deliverIngress(channel, headers, body, rawBody);
 
