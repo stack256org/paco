@@ -79,9 +79,13 @@ const isFirstChatMessageSpy = mock(async () => true);
 const updateChatSpy = mock(async () => {
   routeEvents.push("update-chat");
 });
-const appendSessionEventsSpy = mock(
+let appendSessionEventsStrictShouldThrow = false;
+const appendSessionEventsStrictSpy = mock(
   async (_chatId: string, _events: unknown[]) => {
     routeEvents.push("append-session-events");
+    if (appendSessionEventsStrictShouldThrow) {
+      throw new Error("insert failed");
+    }
   },
 );
 
@@ -191,7 +195,7 @@ mock.module("@/lib/db/sessions", () => ({
 }));
 
 mock.module("@/lib/db/session-events", () => ({
-  appendSessionEvents: appendSessionEventsSpy,
+  appendSessionEventsStrict: appendSessionEventsStrictSpy,
 }));
 
 mock.module("@/lib/db/user-preferences", () => ({
@@ -256,6 +260,43 @@ function createValidRequest() {
   );
 }
 
+/**
+ * Mirrors what `use-session-chat-runtime`'s `sendAutomaticallyWhen` submits
+ * after `ask_user_question` resolves: the same conversation, with an
+ * assistant message appended whose last part is the answered question. This
+ * is the routine "continue the same turn" request, not a new user message.
+ */
+function createAssistantAutoSubmitRequest() {
+  return createRequest(
+    JSON.stringify({
+      sessionId: "session-1",
+      chatId: "chat-1",
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          parts: [{ type: "text", text: "Fix the bug" }],
+        },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          parts: [
+            { type: "text", text: "Let me ask you a question." },
+            {
+              type: "tool-ask_user_question",
+              toolCallId: "call-1",
+              toolName: "ask_user_question",
+              state: "output-available",
+              input: { questions: [] },
+              output: { answers: { "0": "Yes" } },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+}
+
 describe("/api/chat route", () => {
   beforeEach(() => {
     isSandboxActive = true;
@@ -271,6 +312,7 @@ describe("/api/chat route", () => {
     existingUserMessageCount = 0;
     existingChatMessage = null;
     existingScopedChatMessage = null;
+    appendSessionEventsStrictShouldThrow = false;
     preferencesState = {
       autoCommitPush: true,
       autoCreatePr: false,
@@ -282,7 +324,7 @@ describe("/api/chat route", () => {
     touchChatSpy.mockClear();
     isFirstChatMessageSpy.mockClear();
     updateChatSpy.mockClear();
-    appendSessionEventsSpy.mockClear();
+    appendSessionEventsStrictSpy.mockClear();
     currentAuthSession = {
       user: {
         id: "user-1",
@@ -553,7 +595,7 @@ describe("/api/chat route", () => {
     expect(startCalls).toHaveLength(1);
   });
 
-  test("buffers a message as steer/buffered instead of starting a second workflow when a turn is active", async () => {
+  test("buffers a user message as steer/buffered and reconnects to the live stream when a turn is active", async () => {
     if (!chatRecord) throw new Error("chatRecord must be set");
     chatRecord.activeStreamId = "wrun_existing-456";
     existingRunStatus = "running";
@@ -563,6 +605,7 @@ describe("/api/chat route", () => {
     const response = await POST(createValidRequest());
 
     expect(response.ok).toBe(true);
+    expect(response.headers.get("x-workflow-run-id")).toBe("wrun_existing-456");
     expect(startCalls).toHaveLength(0);
     expect(compareAndSetChatActiveStreamIdSpy).not.toHaveBeenCalled();
     expect(createChatMessageIfNotExistsSpy).toHaveBeenCalledWith({
@@ -571,8 +614,8 @@ describe("/api/chat route", () => {
       role: "user",
       parts: expect.objectContaining({ id: "user-1", role: "user" }),
     });
-    expect(appendSessionEventsSpy).toHaveBeenCalledTimes(1);
-    expect(appendSessionEventsSpy).toHaveBeenCalledWith("chat-1", [
+    expect(appendSessionEventsStrictSpy).toHaveBeenCalledTimes(1);
+    expect(appendSessionEventsStrictSpy).toHaveBeenCalledWith("chat-1", [
       { type: "steer/buffered", messageId: "user-1", text: "Fix the bug" },
     ]);
   });
@@ -588,11 +631,45 @@ describe("/api/chat route", () => {
     const response = await POST(createValidRequest());
 
     expect(response.ok).toBe(true);
+    expect(response.headers.get("x-workflow-run-id")).toBe("wrun_existing-456");
     expect(startCalls).toHaveLength(0);
-    expect(appendSessionEventsSpy).toHaveBeenCalledTimes(1);
-    expect(appendSessionEventsSpy).toHaveBeenCalledWith("chat-1", [
+    expect(appendSessionEventsStrictSpy).toHaveBeenCalledTimes(1);
+    expect(appendSessionEventsStrictSpy).toHaveBeenCalledWith("chat-1", [
       { type: "steer/buffered", messageId: "user-1", text: "Fix the bug" },
     ]);
+  });
+
+  test("reconnects to the live stream without buffering when the request is an assistant tool-result auto-submit", async () => {
+    if (!chatRecord) throw new Error("chatRecord must be set");
+    chatRecord.activeStreamId = "wrun_existing-456";
+    existingRunStatus = "running";
+
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(createAssistantAutoSubmitRequest());
+
+    expect(response.ok).toBe(true);
+    expect(response.headers.get("x-workflow-run-id")).toBe("wrun_existing-456");
+    expect(startCalls).toHaveLength(0);
+    expect(createChatMessageIfNotExistsSpy).not.toHaveBeenCalled();
+    expect(appendSessionEventsStrictSpy).not.toHaveBeenCalled();
+  });
+
+  test("returns 503 when the steer/buffered append fails durably", async () => {
+    if (!chatRecord) throw new Error("chatRecord must be set");
+    chatRecord.activeStreamId = "wrun_existing-456";
+    existingRunStatus = "running";
+    appendSessionEventsStrictShouldThrow = true;
+
+    const { POST } = await routeModulePromise;
+
+    const response = await POST(createValidRequest());
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "Couldn't save your message. Try sending it again.",
+    });
+    expect(startCalls).toHaveLength(0);
   });
 
   test("starts new workflow when existing run is completed and clears the stale stream id first", async () => {

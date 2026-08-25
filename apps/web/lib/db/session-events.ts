@@ -6,6 +6,28 @@ import { db } from "@/lib/db/client";
 import { sessionEvents } from "@/lib/db/schema";
 
 /**
+ * Append events to a chat's log, throwing on insert failure.
+ *
+ * Use this where the caller must know the write actually landed before
+ * promising the client anything durable happened (e.g. buffering a mid-turn
+ * message: silently losing that write would strand the message). For
+ * additive/best-effort recording, use `appendSessionEvents` instead.
+ */
+export async function appendSessionEventsStrict(
+  chatId: string,
+  events: SessionEvent[],
+): Promise<void> {
+  if (events.length === 0) {
+    return;
+  }
+  await db
+    .insert(sessionEvents)
+    .values(
+      events.map((event) => ({ chatId, type: event.type, payload: event })),
+    );
+}
+
+/**
  * Append events to a chat's log.
  *
  * Never throws: the log is additive context in Section 1, and a failed append
@@ -15,15 +37,8 @@ export async function appendSessionEvents(
   chatId: string,
   events: SessionEvent[],
 ): Promise<void> {
-  if (events.length === 0) {
-    return;
-  }
   try {
-    await db
-      .insert(sessionEvents)
-      .values(
-        events.map((event) => ({ chatId, type: event.type, payload: event })),
-      );
+    await appendSessionEventsStrict(chatId, events);
   } catch (error) {
     console.error("session-events: append failed", {
       chatId,

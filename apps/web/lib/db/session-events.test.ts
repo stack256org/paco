@@ -84,8 +84,12 @@ const fakeDb = {
 
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
-const { appendSessionEvents, listSessionEvents, listUnconsumedSteerEvents } =
-  await import("./session-events");
+const {
+  appendSessionEvents,
+  appendSessionEventsStrict,
+  listSessionEvents,
+  listUnconsumedSteerEvents,
+} = await import("./session-events");
 
 describe("session events", () => {
   test("append then list round-trips in order", async () => {
@@ -145,5 +149,22 @@ describe("session events", () => {
         { type: "steer/buffered", messageId: "x", text: "y" },
       ]),
     ).resolves.toBeUndefined();
+  });
+
+  test("strict append round-trips like the tolerant variant", async () => {
+    const chatId = "chat-4";
+    await appendSessionEventsStrict(chatId, [
+      { type: "steer/buffered", messageId: "s1", text: "one" },
+    ]);
+    const rows = await listSessionEvents(chatId);
+    expect(rows.map((r) => r.event.type)).toEqual(["steer/buffered"]);
+  });
+
+  test("strict append throws on a bad chat id", async () => {
+    await expect(
+      appendSessionEventsStrict(BAD_CHAT_ID, [
+        { type: "steer/buffered", messageId: "x", text: "y" },
+      ]),
+    ).rejects.toThrow();
   });
 });

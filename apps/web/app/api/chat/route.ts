@@ -14,7 +14,7 @@ import {
   touchChat,
   updateChat,
 } from "@/lib/db/sessions";
-import { appendSessionEvents } from "@/lib/db/session-events";
+import { appendSessionEventsStrict } from "@/lib/db/session-events";
 import { createCancelableReadableStream } from "@/lib/chat/create-cancelable-readable-stream";
 import { NOT_YOURS } from "@/lib/error-copy";
 import { getServerSession } from "@/lib/session/get-server-session";
@@ -30,6 +30,8 @@ type WebAgentUIMessageChunk = InferUIMessageChunk<WebAgentUIMessage>;
 
 const STILL_WORKING =
   "Paco is still working on your last message. Wait for it to finish, or press Stop.";
+
+const STEER_BUFFER_FAILED = "Couldn't save your message. Try sending it again.";
 
 export async function POST(req: Request) {
   // 1. Validate session
@@ -77,18 +79,35 @@ export async function POST(req: Request) {
     );
   }
 
-  // Guard: if a turn is already active for this chat, buffer this message as
-  // a durable steer/buffered event instead of starting a duplicate workflow.
-  // A later turn (Task 10) consumes the buffered event per the chat's
-  // turnPolicy — this layer only needs to record it and avoid double-running.
+  // Guard: if a workflow is already running for this chat, reconnect to it
+  // instead of starting a duplicate. This prevents auto-submit from spawning
+  // parallel workflows when the client sees completed tool calls mid-loop.
+  //
+  // If the request that reconnects us is itself a new user message (as
+  // opposed to an assistant tool-result auto-submit continuing the same
+  // turn), also record it as a durable steer/buffered event before
+  // reconnecting — Task 10's consumer decides whether that buffered message
+  // cancels (steer) or waits out (queue) the turn we are joining here.
   if (chat.activeStreamId) {
     const existingStreamResolution = await reconcileExistingActiveStream(
       chatId,
       chat.activeStreamId,
     );
 
-    if (existingStreamResolution.action === "active") {
-      return bufferMidTurnMessage(chatId, messages);
+    if (existingStreamResolution.action === "resume") {
+      const buffered = await bufferMidTurnMessage(chatId, messages);
+      if (!buffered.ok) {
+        return Response.json({ error: STEER_BUFFER_FAILED }, { status: 503 });
+      }
+
+      return createUIMessageStreamResponse({
+        stream: existingStreamResolution.stream,
+        headers: { "x-workflow-run-id": existingStreamResolution.runId },
+      });
+    }
+
+    if (existingStreamResolution.action === "conflict") {
+      return Response.json({ error: STILL_WORKING }, { status: 409 });
     }
   }
 
@@ -141,10 +160,15 @@ export async function POST(req: Request) {
 
 type ExistingActiveStreamResolution =
   | {
-      action: "active";
+      action: "resume";
+      runId: string;
+      stream: ReadableStream<WebAgentUIMessageChunk>;
     }
   | {
       action: "ready";
+    }
+  | {
+      action: "conflict";
     };
 
 const ACTIVE_STREAM_RECONCILIATION_MAX_ATTEMPTS = 3;
@@ -165,7 +189,13 @@ async function reconcileExistingActiveStream(
       const existingRun = getRun(currentStreamId);
       const status = await existingRun.status;
       if (status === "running" || status === "pending") {
-        return { action: "active" };
+        return {
+          action: "resume",
+          runId: currentStreamId,
+          stream: createCancelableReadableStream(
+            existingRun.getReadable<WebAgentUIMessageChunk>(),
+          ),
+        };
       }
     } catch {
       // Workflow not found or inaccessible — try to clear the stale stream ID.
@@ -184,38 +214,45 @@ async function reconcileExistingActiveStream(
     currentStreamId = latestChat?.activeStreamId ?? null;
   }
 
-  // Retries exhausted and the slot is still contested — treat it the same as
-  // a confirmed-running turn rather than rejecting the message.
-  return currentStreamId ? { action: "active" } : { action: "ready" };
+  return currentStreamId ? { action: "conflict" } : { action: "ready" };
 }
 
 /**
- * A turn is active for this chat: record the incoming message as a durable
- * steer/buffered event instead of starting a second workflow run. Both
- * turnPolicy values buffer identically here — which one cancels vs. queues
- * the active turn is decided by the consumer (Task 10).
+ * If the request reconnecting us to the active turn ends in a new user
+ * message (rather than an assistant tool-result auto-submit), persist that
+ * message and record it as a durable steer/buffered event. Both turnPolicy
+ * values buffer identically here — which one cancels vs. queues the active
+ * turn is decided by the consumer (Task 10).
+ *
+ * The append must not be silently lossy: it uses the strict variant so a DB
+ * failure surfaces to the caller instead of being swallowed while the client
+ * is told its message was saved.
  */
 async function bufferMidTurnMessage(
   chatId: string,
   messages: WebAgentUIMessage[],
-): Promise<Response> {
-  await Promise.all([
-    persistLatestUserMessage(chatId, messages),
-    persistAssistantMessagesWithToolResults(chatId, messages),
-  ]);
-
+): Promise<{ ok: true } | { ok: false }> {
   const latestMessage = messages[messages.length - 1];
-  if (latestMessage?.role === "user") {
-    await appendSessionEvents(chatId, [
+  if (!latestMessage || latestMessage.role !== "user") {
+    return { ok: true };
+  }
+
+  await persistLatestUserMessage(chatId, messages);
+
+  try {
+    await appendSessionEventsStrict(chatId, [
       {
         type: "steer/buffered",
         messageId: latestMessage.id,
         text: extractMessageText(latestMessage),
       },
     ]);
+  } catch (error) {
+    console.error("Failed to append steer/buffered event:", error);
+    return { ok: false };
   }
 
-  return Response.json({ ok: true });
+  return { ok: true };
 }
 
 function extractMessageText(message: WebAgentUIMessage): string {
