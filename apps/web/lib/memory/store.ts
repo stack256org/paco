@@ -9,7 +9,7 @@ export interface MemoryEntry {
   body: string;
   /**
    * Who requested the promotion — set only on `source: "promoted"` entries
-   * written via `promoteToOrgMemory` (`lib/memory/promote.ts`). Absent for
+   * written via `promoteToOrgMemory` (`lib/memory/org-writer.ts`). Absent for
    * every other source, and absent on older files written before this field
    * existed; both parse the same way, as `undefined`.
    */

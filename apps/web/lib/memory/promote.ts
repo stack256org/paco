@@ -6,33 +6,20 @@ import { SIGNED_OUT } from "@/lib/error-copy";
 import { getMemberRole } from "@/lib/org/membership";
 import { getOrganization } from "@/lib/org/organization";
 import { getServerSession } from "@/lib/session/get-server-session";
-import { orgMemoryDir } from "./paths";
-import { writeMemory } from "./store";
+import { promoteToOrgMemory } from "./org-writer";
 
 /**
- * Writes an entry straight into an organisation's shared memory.
+ * This module is `"use server"`, so EVERY exported async function in it is a
+ * POST-able endpoint whose action id ships to the browser (a client
+ * component, `app/settings/memory/memory-page-content.tsx`, imports it).
+ * Nothing may be exported from here that is not itself authorized.
  *
- * The only writer of org memory allowed by the plan's memory invariants
- * (org memory is written ONLY by explicit promotion, never by automatic
- * distillation) — always tagged `source: "promoted"`, never `"distilled"`
- * or `"manual"`, so the settings page can tell a promoted entry apart from
- * one an admin typed by hand. `promotedBy` is carried into the written file
- * (`store.ts`'s optional `MemoryEntry.promotedBy`) as the promotion's
- * provenance.
+ * That is why the actual org-memory writer lives in `./org-writer.ts`, an
+ * ordinary module: it takes `organizationId` and `promotedBy` as arguments
+ * and checks nothing, so exporting it from here would hand any caller a
+ * forged-author write into org-shared memory — which is injected into agent
+ * turns by `load-for-turn.ts`.
  */
-export async function promoteToOrgMemory(params: {
-  organizationId: string;
-  title: string;
-  body: string;
-  promotedBy: string;
-}): Promise<{ slug: string }> {
-  return await writeMemory(orgMemoryDir(params.organizationId), {
-    title: params.title,
-    body: params.body,
-    source: "promoted",
-    promotedBy: params.promotedBy,
-  });
-}
 
 export type PromoteMemoryResult =
   | { ok: true; promoted: true; slug: string }
