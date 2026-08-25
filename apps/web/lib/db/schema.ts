@@ -1,6 +1,8 @@
+import type { Capability, PluginManifest } from "@paco/plugin-kit";
 import type { SandboxState } from "@paco/sandbox";
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   bigserial,
   boolean,
   index,
@@ -661,8 +663,10 @@ export const plugins = pgTable("plugins", {
   version: text("version").notNull(),
   /** sha256 over the installed tree. */
   contentHash: text("content_hash").notNull(),
-  manifest: jsonb("manifest").notNull(),
-  grantedCapabilities: jsonb("granted_capabilities").notNull(),
+  manifest: jsonb("manifest").$type<PluginManifest>().notNull(),
+  grantedCapabilities: jsonb("granted_capabilities")
+    .$type<Capability[]>()
+    .notNull(),
   enabled: boolean("enabled").notNull().default(false),
   installedAt: timestamp("installed_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -670,3 +674,81 @@ export const plugins = pgTable("plugins", {
 
 export type PluginRow = typeof plugins.$inferSelect;
 export type NewPluginRow = typeof plugins.$inferInsert;
+
+/**
+ * The task board's state machine (Section 3 Global Constraints, binding,
+ * single source of truth): `todo → running → review → done`, with `blocked`
+ * reachable from `running` (approval pending) and `failed` reachable from
+ * `running`/`review`, `review → running` on reviewer rejection (bounded: two
+ * automatic rejections, then `blocked` for a human). Plus two edges Task 8's
+ * UI needs and this task ships: `failed → todo` (retry) and `blocked →
+ * running` (human unblock). See `lib/tasks/state.ts` for `canTransition`,
+ * the single place this list is enforced.
+ */
+export const TASK_STATUSES = [
+  "todo",
+  "running",
+  "blocked",
+  "review",
+  "done",
+  "failed",
+] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/** Who created a task: a person, the planner, a schedule, or a channel integration. */
+export const TASK_ORIGINS = ["user", "planner", "schedule", "channel"] as const;
+export type TaskOrigin = (typeof TASK_ORIGINS)[number];
+
+/**
+ * A unit of agent work tracked on the org's task board (spec Section 3).
+ *
+ * A task owns a chat only once started — `chatId` is null for every `todo`
+ * task and is set when `startTaskAction` creates the worktree-backed chat
+ * that executes it. `parentTaskId` self-references so a planner can
+ * decompose one goal into a tree of subtasks; the FK cascades so deleting a
+ * parent removes its subtree instead of leaving orphaned children pointing
+ * at nothing.
+ */
+export const tasks = pgTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    /** The session whose repo the task works in. */
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    /** The chat executing it, created when the task is started. */
+    chatId: text("chat_id").references(() => chats.id, {
+      onDelete: "set null",
+    }),
+    parentTaskId: text("parent_task_id").references(
+      (): AnyPgColumn => tasks.id,
+      { onDelete: "cascade" },
+    ),
+    title: text("title").notNull(),
+    /** The full prompt/goal text handed to the executor. */
+    goal: text("goal").notNull(),
+    status: text("status", { enum: TASK_STATUSES }).notNull().default("todo"),
+    /** Roster name; null means the orchestrator's default agent. */
+    assignedAgent: text("assigned_agent"),
+    reviewerRejections: integer("reviewer_rejections").notNull().default(0),
+    origin: text("origin", { enum: TASK_ORIGINS }).notNull().default("user"),
+    resultSummary: text("result_summary"),
+    createdBy: text("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("tasks_org_id_status_idx").on(table.organizationId, table.status),
+    index("tasks_session_id_idx").on(table.sessionId),
+    index("tasks_parent_task_id_idx").on(table.parentTaskId),
+  ],
+);
+
+export type Task = typeof tasks.$inferSelect;
+export type NewTask = typeof tasks.$inferInsert;

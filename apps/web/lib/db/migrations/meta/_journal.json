@@ -36,6 +36,13 @@
       "when": 1787666327779,
       "tag": "0004_bizarre_serpent_society",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787667065634,
+      "tag": "0005_common_fenris",
+      "breakpoints": true
     }
   ]
 }
