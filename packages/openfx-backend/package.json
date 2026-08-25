@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@paco/agent-backend": "workspace:*"
+    "@paco/agent-backend": "workspace:*",
+    "ai": "catalog:"
   },
   "devDependencies": {
     "@paco/tsconfig": "workspace:*",

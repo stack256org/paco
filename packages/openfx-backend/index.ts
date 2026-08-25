@@ -1,5 +1,19 @@
 export { AcpError } from "./acp-error.ts";
 export {
+  AcpChunkMapper,
+  type AcpSessionUpdate,
+  type AcpToolCallContentItem,
+  type AcpToolCallKind,
+  type AcpToolCallStatus,
+  type AgentMessageChunkUpdate,
+  type AvailableCommandsUpdate,
+  type SessionInfoUpdate,
+  type ToolCallCreatedUpdate,
+  type ToolCallStatusUpdate,
+  type UnknownSessionUpdate,
+  type UserMessageChunkUpdate,
+} from "./chunk-mapper.ts";
+export {
   AcpClient,
   type AcpClientOptions,
   type ContentBlock,
