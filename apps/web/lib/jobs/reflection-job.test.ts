@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 mock.module("server-only", () => ({}));
 
@@ -139,5 +141,32 @@ describe("startReflectionJob", () => {
     await workHandler?.([{ data: {} }]);
 
     expect(reflectSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Registering the job here does nothing on a real deployment unless
+ * something actually calls `startReflectionJob` at boot — `workers.ts` and
+ * `schedule-job.ts` are both wired into `instrumentation.ts`'s `register()`,
+ * and this must be too, or the "0 4 * * *" cron never gets created and
+ * reflection silently never runs.
+ *
+ * There is no `instrumentation.test.ts` to extend the way the brief asked
+ * for (no sibling job has one either — `workers.ts` and `schedule-job.ts`
+ * are both verified this same way: nothing exercises `register()` directly),
+ * so this is a source-scan guard instead: it fails loudly if a future edit
+ * to `instrumentation.ts` ever drops the wiring, which a purely
+ * behavioral test of this module never could (this module has no way to
+ * observe whether anything outside it calls its own exported function).
+ */
+describe("startReflectionJob wiring", () => {
+  test("instrumentation.ts's register() calls startReflectionJob at boot", async () => {
+    const instrumentationSource = await fs.readFile(
+      path.join(import.meta.dir, "..", "..", "instrumentation.ts"),
+      "utf-8",
+    );
+
+    expect(instrumentationSource).toContain("@/lib/jobs/reflection-job");
+    expect(instrumentationSource).toContain("startReflectionJob()");
   });
 });

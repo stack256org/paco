@@ -11,13 +11,17 @@ interface FakeRow {
 }
 
 let selectRows: FakeRow[] = [];
+let lastLimitArg: number | undefined;
 
 /**
  * Fluent chain matching `reflect.ts`'s exact query shape:
- * `db.select({...}).from(sessionEvents).innerJoin(...).innerJoin(...).innerJoin(...).where(...).orderBy(...)`.
- * The arguments each link is handed are irrelevant to this fake — the
- * mocked rows already stand in for whatever a real join+filter would
- * produce, in the order a real `orderBy(desc(...))` would return them.
+ * `db.select({...}).from(sessionEvents).innerJoin(...).innerJoin(...).innerJoin(...).where(...).orderBy(...).limit(...)`.
+ * The arguments each link is handed (besides `limit`'s) are irrelevant to
+ * this fake — the mocked rows already stand in for whatever a real
+ * join+filter would produce, in the order a real `orderBy(desc(...))` would
+ * return them. `limit` both records what it was called with (so a test can
+ * assert the cap is pushed into the query) and actually applies it, the way
+ * a real `LIMIT` clause would.
  */
 const fakeDb = {
   select: (_columns: unknown) => ({
@@ -26,7 +30,12 @@ const fakeDb = {
         innerJoin: (_t2: unknown, _c2: unknown) => ({
           innerJoin: (_t3: unknown, _c3: unknown) => ({
             where: (_condition: unknown) => ({
-              orderBy: (_order: unknown) => Promise.resolve(selectRows),
+              orderBy: (_order: unknown) => ({
+                limit: (n: number) => {
+                  lastLimitArg = n;
+                  return Promise.resolve(selectRows.slice(0, n));
+                },
+              }),
             }),
           }),
         }),
@@ -97,6 +106,7 @@ function turnRow(overrides?: Partial<FakeRow> & { prompt?: string }): FakeRow {
 
 beforeEach(() => {
   selectRows = [];
+  lastLimitArg = undefined;
   createdTasks = [];
   generateObjectResult = { proposals: [] };
   createTaskSpy.mockClear();
@@ -164,6 +174,49 @@ describe("reflectOnRecentSessions gathering", () => {
 
     const transcript = generateObjectSpy.mock.calls[0]?.[0] as string;
     expect(transcript).toContain("keep-me");
+  });
+
+  test("pushes the 50-turn cap into the query itself, not just a JS slice", async () => {
+    // Only 5 rows on hand this time — the point is *what argument* the
+    // query chain's `limit()` link receives, not how many rows come back.
+    selectRows = Array.from({ length: 5 }, (_, i) =>
+      turnRow({ prompt: `prompt-${i}` }),
+    );
+
+    await reflectOnRecentSessions({ organizationId: ORG_ID });
+
+    expect(lastLimitArg).toBe(50);
+  });
+
+  test("truncates a single oversized turn to 2000 chars with a marker", async () => {
+    const hugePrompt = "A".repeat(3000);
+    selectRows = [turnRow({ prompt: hugePrompt })];
+
+    await reflectOnRecentSessions({ organizationId: ORG_ID });
+
+    const transcript = generateObjectSpy.mock.calls[0]?.[0] as string;
+    // The cut lands exactly at 2000 chars, immediately followed by the
+    // marker — not the full 3000-char prompt.
+    expect(transcript).toContain(`${"A".repeat(2000)}… [truncated]`);
+    expect(transcript).not.toContain("A".repeat(2001));
+  });
+
+  test("truncates the assembled transcript overall when many turns combine past the cap", async () => {
+    // 40 turns just under the per-turn cap (1900 chars each) sum to 76,000
+    // chars — comfortably past the 60,000-char overall cap — while no
+    // single turn trips the per-turn truncation on its own.
+    const justUnderPerTurnCap = "B".repeat(1900);
+    selectRows = Array.from({ length: 40 }, () =>
+      turnRow({ prompt: justUnderPerTurnCap }),
+    );
+
+    await reflectOnRecentSessions({ organizationId: ORG_ID });
+
+    const transcript = generateObjectSpy.mock.calls[0]?.[0] as string;
+    // <transcript> + </transcript> wrapper plus the truncation marker add a
+    // small, fixed amount of overhead on top of the 60,000-char body cap.
+    expect(transcript.length).toBeLessThanOrEqual(60_000 + 200);
+    expect(transcript).toContain("… [truncated]");
   });
 });
 

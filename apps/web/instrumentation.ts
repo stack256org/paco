@@ -5,8 +5,9 @@
  * cannot run on the edge runtime:
  *
  * - the Workflow SDK's world, which drives durable workflow runs
- * - the pg-boss workers, which deliver queued email and fire cron
- *   schedules (`lib/db/schema.ts`'s `schedules` table) out of band
+ * - the pg-boss workers, which deliver queued email, fire cron
+ *   schedules (`lib/db/schema.ts`'s `schedules` table), and run the daily
+ *   reflection job (`lib/memory/reflect.ts`) out of band
  *
  */
 export async function register() {
@@ -32,4 +33,7 @@ export async function register() {
 
   const { startScheduleJob } = await import("@/lib/jobs/schedule-job");
   await startScheduleJob();
+
+  const { startReflectionJob } = await import("@/lib/jobs/reflection-job");
+  await startReflectionJob();
 }

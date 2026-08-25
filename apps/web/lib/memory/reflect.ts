@@ -34,6 +34,24 @@ const MAX_TURNS = 50;
 const DEFAULT_SINCE_DAYS = 7;
 const MAX_PROPOSALS = 3;
 
+/**
+ * Per-turn text bound. A `turn/start` prompt is unbounded user input, and up
+ * to `MAX_TURNS` of them are concatenated into one model call — without a
+ * per-turn cap, one huge pasted prompt in a single turn could blow out the
+ * whole call's context on its own. Truncated text is marked, not silently
+ * cut, so the model does not mistake a cut-off sentence for the whole thought.
+ */
+const MAX_TURN_TEXT_CHARS = 2000;
+
+/**
+ * Overall transcript bound, independent of the per-turn cap above. Belt and
+ * suspenders: `MAX_TURNS * MAX_TURN_TEXT_CHARS` already bounds the total, but
+ * this caps the assembled string directly so nothing about how the turns are
+ * grouped or labeled can push the final prompt past a known size.
+ */
+const MAX_TRANSCRIPT_CHARS = 60_000;
+const TRUNCATION_MARKER = "\u2026 [truncated]";
+
 const proposalSchema = z.object({
   title: z.string().min(1).max(80),
   rationale: z.string().min(1).max(600),
@@ -84,9 +102,16 @@ function isTurnStart(
  *
  * Scoped through `organizationMembers` rather than assuming every session
  * belongs to the (currently singleton) organisation, so this stays correct
- * if that ever changes. The cap is applied in JS, not just left to the
- * query, so it holds regardless of how many rows the database (or, in
- * tests, a fake standing in for it) actually returns.
+ * if that ever changes. The `INNER JOIN` on `organizationMembers` is
+ * deliberate, not an oversight: a session whose owning user has left the
+ * organisation (no membership row left to join against) drops out of
+ * reflection along with them — an ex-member's turns are not a source of
+ * ongoing "project" friction for the org to keep learning from.
+ *
+ * The cap is pushed into the query itself (`orderBy(desc(...))` +
+ * `limit(MAX_TURNS)`), so the database only ever hands back at most
+ * `MAX_TURNS` rows instead of the whole 7-day window; the JS-side slice
+ * below is a defensive backstop, not the primary enforcement.
  */
 async function gatherRecentTurns(
   organizationId: string,
@@ -115,7 +140,8 @@ async function gatherRecentTurns(
         gte(sessionEvents.createdAt, since),
       ),
     )
-    .orderBy(desc(sessionEvents.createdAt));
+    .orderBy(desc(sessionEvents.createdAt))
+    .limit(MAX_TURNS);
 
   const turns: GatheredTurn[] = [];
   for (const row of rows) {
@@ -131,6 +157,18 @@ async function gatherRecentTurns(
   }
 
   return turns.slice(0, MAX_TURNS);
+}
+
+/**
+ * Truncates to at most `maxChars`, marking the cut rather than silently
+ * dropping the rest — a truncated-but-unmarked prompt can read as a
+ * complete (if odd) thought, which would be worse than an obviously cut one.
+ */
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}${TRUNCATION_MARKER}`;
 }
 
 /** Groups turns by session and wraps them as delimited, labeled DATA. */
@@ -151,12 +189,16 @@ function buildTranscript(turns: GatheredTurn[]): string {
     // order reads more naturally for spotting a repeated instruction.
     const prompts = sessionTurns
       .toReversed()
-      .map((turn) => `- ${turn.prompt}`)
+      .map((turn) => `- ${truncate(turn.prompt, MAX_TURN_TEXT_CHARS)}`)
       .join("\n");
     sections.push(`Session ${chatId}:\n${prompts}`);
   }
 
-  return `<transcript>\n${sections.join("\n\n")}\n</transcript>`;
+  // Per-turn truncation already bounds the total, but the assembled string
+  // is capped directly too, independent of how many sessions/turns went in.
+  const body = truncate(sections.join("\n\n"), MAX_TRANSCRIPT_CHARS);
+
+  return `<transcript>\n${body}\n</transcript>`;
 }
 
 function buildTaskGoal(proposal: ReflectOutput["proposals"][number]): string {
