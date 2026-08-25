@@ -15,13 +15,15 @@ const COLUMN_LABEL: Record<TaskStatus, string> = {
 /** How many skeleton placeholders a loading column shows. */
 const SKELETON_ROWS = [0, 1];
 
-export type PendingAction = "start" | "retry" | "unblock";
+export type PendingAction = "start" | "start-subtasks" | "retry" | "unblock";
 
 export interface TaskColumnsProps {
   /** `null` while the first load is in flight — renders column skeletons. */
   tasks: TaskBoardItem[] | null;
   pending: Record<string, PendingAction | undefined>;
   onStart: (taskId: string) => void;
+  /** Starts every `todo` leaf under a planner grouping node. */
+  onStartSubtasks: (taskId: string) => void;
   onRetry: (taskId: string) => void;
   onUnblock: (taskId: string) => void;
 }
@@ -43,6 +45,7 @@ export function TaskColumns({
   tasks,
   pending,
   onStart,
+  onStartSubtasks,
   onRetry,
   onUnblock,
 }: TaskColumnsProps) {
@@ -87,6 +90,7 @@ export function TaskColumns({
                     key={task.id}
                     onRetry={() => onRetry(task.id)}
                     onStart={() => onStart(task.id)}
+                    onStartSubtasks={() => onStartSubtasks(task.id)}
                     onUnblock={() => onUnblock(task.id)}
                     pendingAction={pending[task.id] ?? null}
                     task={task}

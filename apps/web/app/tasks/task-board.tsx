@@ -6,6 +6,7 @@ import { toast } from "@/lib/toast";
 import {
   listOrgTasksAction,
   retryTaskAction,
+  startSubtasksAction,
   startTaskAction,
   type TaskBoardItem,
   unblockTaskAction,
@@ -148,6 +149,11 @@ export function TaskBoard() {
           }
           onStart={(taskId) =>
             void runAction(taskId, "start", () => startTaskAction(taskId))
+          }
+          onStartSubtasks={(taskId) =>
+            void runAction(taskId, "start-subtasks", () =>
+              startSubtasksAction(taskId),
+            )
           }
           onUnblock={handleUnblock}
           pending={pending}

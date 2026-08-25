@@ -34,6 +34,7 @@ function renderColumns(tasks: TaskBoardItem[] | null) {
     <TaskColumns
       onRetry={noop}
       onStart={noop}
+      onStartSubtasks={noop}
       onUnblock={noop}
       pending={{}}
       tasks={tasks}
@@ -107,10 +108,34 @@ describe("TaskColumns", () => {
     expect(html).toContain("Start");
   });
 
-  test("Start is not shown for a todo task with children (a planner grouping node)", () => {
+  test("a todo grouping node offers Start subtasks instead of Start", () => {
     const html = renderColumns([task({ status: "todo", isLeaf: false })]);
 
-    expect(html).not.toContain("Start");
+    // `startTask` refuses a task with children, so offering it Start would
+    // be a button that can only fail. Without SOME action it is a dead card
+    // — one per plan, forever — so it gets the action that does apply.
+    expect(html).toContain("Start subtasks");
+    expect(html).not.toContain("Start</button>");
+  });
+
+  test("a todo leaf offers Start, never Start subtasks", () => {
+    const html = renderColumns([task({ status: "todo", isLeaf: true })]);
+
+    expect(html).toContain("Start</button>");
+    expect(html).not.toContain("Start subtasks");
+  });
+
+  test("Start subtasks is not offered for a grouping node in any other status", () => {
+    for (const status of [
+      "running",
+      "blocked",
+      "review",
+      "done",
+      "failed",
+    ] as const) {
+      const html = renderColumns([task({ status, isLeaf: false })]);
+      expect(html).not.toContain("Start subtasks");
+    }
   });
 
   test("Start is not shown for a task in any other status", () => {

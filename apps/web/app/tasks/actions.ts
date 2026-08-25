@@ -9,6 +9,8 @@ import {
   getTask,
   listTasks,
   TaskTransitionError,
+  type TaskTreeNode,
+  taskTree,
   transitionTaskStatus,
 } from "@/lib/db/tasks";
 import { NOT_YOURS, SIGNED_OUT } from "@/lib/error-copy";
@@ -249,6 +251,83 @@ export async function startTaskAction(
 ): Promise<StartTaskResult> {
   const { organizationId } = await requireOrgMembership();
   return await startTask(organizationId, taskId);
+}
+
+export type StartSubtasksResult =
+  | { ok: true; started: number }
+  | { ok: false; error: string };
+
+/** Every `todo` leaf under these nodes, depth first. */
+function todoLeaves(nodes: TaskTreeNode[]): TaskTreeNode[] {
+  const found: TaskTreeNode[] = [];
+  for (const node of nodes) {
+    if (node.children.length === 0) {
+      if (node.status === "todo") {
+        found.push(node);
+      }
+    } else {
+      found.push(...todoLeaves(node.children));
+    }
+  }
+  return found;
+}
+
+/**
+ * Starts every `todo` leaf under a planner grouping node.
+ *
+ * The planner files a root task holding the tree plus one child per unit of
+ * work, all `todo` (`planGoal` in `lib/tasks/planner.ts`). The root is not a
+ * unit of work — `startTask` refuses a task with children — so it has no
+ * legal transition out of `todo` and, before this, no button either: one
+ * permanently dead card per plan, and no way to set a whole plan going
+ * short of clicking each subtask in turn. This is that affordance.
+ *
+ * Sequential rather than concurrent: each start creates a chat and, on its
+ * first turn, a worktree, and a plan is decomposed into a handful of
+ * subtasks, not hundreds.
+ *
+ * `ok: false` only when NOTHING started — a plan where some subtasks
+ * started and others did not has already changed the board, so the caller
+ * must refresh rather than treat the whole call as a failure; the subtasks
+ * that did not start are still sitting in `todo` with their own Start
+ * button, which is where a human would look anyway.
+ */
+export async function startSubtasksAction(
+  taskId: string,
+): Promise<StartSubtasksResult> {
+  const { organizationId } = await requireOrgMembership();
+
+  const node = await taskTree(organizationId, taskId);
+  if (!node) {
+    return { ok: false, error: `Task "${taskId}" not found` };
+  }
+  if (node.children.length === 0) {
+    return {
+      ok: false,
+      error: `Task "${taskId}" has no subtasks — start it directly instead.`,
+    };
+  }
+
+  const leaves = todoLeaves(node.children);
+  if (leaves.length === 0) {
+    return { ok: false, error: "No subtasks are waiting to start." };
+  }
+
+  let started = 0;
+  let firstError: string | null = null;
+  for (const leaf of leaves) {
+    const result = await startTask(organizationId, leaf.id);
+    if (result.ok) {
+      started += 1;
+    } else {
+      firstError ??= result.error;
+    }
+  }
+
+  if (started === 0) {
+    return { ok: false, error: firstError ?? "No subtask could be started." };
+  }
+  return { ok: true, started };
 }
 
 export type TaskActionResult = { ok: true } | { ok: false; error: string };

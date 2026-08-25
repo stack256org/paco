@@ -1,5 +1,6 @@
 import {
   Bot,
+  ListChecks,
   Loader2,
   MessageSquare,
   Play,
@@ -21,12 +22,13 @@ const ORIGIN_LABEL: Record<TaskOrigin, string> = {
   reflection: "Reflection",
 };
 
-type PendingAction = "start" | "retry" | "unblock" | null;
+type PendingAction = "start" | "start-subtasks" | "retry" | "unblock" | null;
 
 export interface TaskCardProps {
   task: TaskBoardItem;
   pendingAction: PendingAction;
   onStart: () => void;
+  onStartSubtasks: () => void;
   onRetry: () => void;
   onUnblock: () => void;
 }
@@ -36,14 +38,19 @@ export interface TaskCardProps {
  *
  * The only status-specific action ever rendered is the single one legal
  * from that status in `lib/tasks/state.ts`: Start only for a `todo` leaf,
- * Retry only for `failed`, Unblock only for `blocked`. A task with children
- * is a planner grouping node, never a unit of work itself (`startTask`
- * refuses it directly), so it gets no Start button even in `todo`.
+ * Retry only for `failed`, Unblock only for `blocked`.
+ *
+ * A task with children is a planner grouping node, never a unit of work
+ * itself (`startTask` refuses it directly), so it gets "Start subtasks"
+ * instead of Start — the action that actually applies to it. Without that
+ * it had no button and no legal transition out of `todo` at all, which left
+ * every plan's root card dead on the board forever.
  */
 export function TaskCard({
   task,
   pendingAction,
   onStart,
+  onStartSubtasks,
   onRetry,
   onUnblock,
 }: TaskCardProps) {
@@ -103,6 +110,22 @@ export function TaskCard({
                 <Play aria-hidden="true" className="size-3" />
               )}
               Start
+            </button>
+          ) : null}
+
+          {task.status === "todo" && !task.isLeaf ? (
+            <button
+              className="btn btn-ghost btn-xs gap-1"
+              disabled={busy}
+              onClick={onStartSubtasks}
+              type="button"
+            >
+              {pendingAction === "start-subtasks" ? (
+                <Loader2 aria-hidden="true" className="size-3 animate-spin" />
+              ) : (
+                <ListChecks aria-hidden="true" className="size-3" />
+              )}
+              Start subtasks
             </button>
           ) : null}
 

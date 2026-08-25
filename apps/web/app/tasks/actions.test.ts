@@ -130,6 +130,27 @@ mock.module("@/lib/db/tasks", () => ({
     Promise.resolve(
       tasksStore.filter((task) => task.organizationId === organizationId),
     ),
+  taskTree: (organizationId: string, rootId: string) => {
+    const build = (id: string): unknown => {
+      const row = tasksStore.find(
+        (task) => task.id === id && task.organizationId === organizationId,
+      );
+      if (!row) {
+        return;
+      }
+      return {
+        ...row,
+        children: tasksStore
+          .filter(
+            (task) =>
+              task.parentTaskId === id &&
+              task.organizationId === organizationId,
+          )
+          .map((child) => build(child.id)),
+      };
+    };
+    return Promise.resolve(build(rootId));
+  },
   transitionTaskStatus: (
     organizationId: string,
     taskId: string,
@@ -174,10 +195,17 @@ let startTaskResult:
   | { ok: true; chatId: string }
   | { ok: false; error: string } = { ok: true, chatId: "chat-1" };
 let startTaskCalls: Array<{ organizationId: string; taskId: string }> = [];
+/** Per-task overrides, for a plan where only some subtasks start. */
+let startTaskResultByTaskId = new Map<
+  string,
+  { ok: true; chatId: string } | { ok: false; error: string }
+>();
 mock.module("@/lib/tasks/start", () => ({
   startTask: (organizationId: string, taskId: string) => {
     startTaskCalls.push({ organizationId, taskId });
-    return Promise.resolve(startTaskResult);
+    return Promise.resolve(
+      startTaskResultByTaskId.get(taskId) ?? startTaskResult,
+    );
   },
 }));
 
@@ -200,6 +228,7 @@ const {
   listMySessionsForTaskAction,
   listOrgTasksAction,
   retryTaskAction,
+  startSubtasksAction,
   startTaskAction,
   unblockTaskAction,
 } = await import("./actions");
@@ -240,6 +269,7 @@ beforeEach(() => {
   planGoalResult = { ok: true, rootTaskId: "root-1", taskIds: ["child-1"] };
   startTaskCalls = [];
   startTaskResult = { ok: true, chatId: "chat-1" };
+  startTaskResultByTaskId = new Map();
   kickExecutorFixTurnCalls = [];
   kickExecutorFixTurnResult = Promise.resolve();
 });
@@ -675,5 +705,110 @@ describe("unblockTaskAction", () => {
 
     expect(result).toEqual({ ok: false, error: "no sandbox" });
     expect(tasksStore[0]?.status).toBe("todo");
+  });
+});
+
+describe("startSubtasksAction", () => {
+  function plan(): FakeTask[] {
+    const base = {
+      organizationId: "org-1",
+      sessionId: "session-1",
+      goal: "g",
+      assignedAgent: null,
+      origin: "planner",
+      reviewerRejections: 0,
+      chatId: null,
+      resultSummary: null,
+      createdBy: "user-1",
+    };
+    return [
+      {
+        ...base,
+        id: "root-1",
+        parentTaskId: null,
+        title: "The plan",
+        status: "todo",
+      },
+      {
+        ...base,
+        id: "child-1",
+        parentTaskId: "root-1",
+        title: "First",
+        status: "todo",
+      },
+      {
+        ...base,
+        id: "child-2",
+        parentTaskId: "root-1",
+        title: "Second",
+        status: "todo",
+      },
+    ];
+  }
+
+  test("starts every todo leaf under a grouping node, and not the node itself", async () => {
+    tasksStore = plan();
+
+    const result = await startSubtasksAction("root-1");
+
+    expect(result).toEqual({ ok: true, started: 2 });
+    expect(startTaskCalls).toEqual([
+      { organizationId: "org-1", taskId: "child-1" },
+      { organizationId: "org-1", taskId: "child-2" },
+    ]);
+  });
+
+  test("skips subtasks that are no longer todo", async () => {
+    tasksStore = plan();
+    const child = tasksStore[1];
+    if (child) {
+      child.status = "done";
+    }
+
+    const result = await startSubtasksAction("root-1");
+
+    expect(result).toEqual({ ok: true, started: 1 });
+    expect(startTaskCalls).toEqual([
+      { organizationId: "org-1", taskId: "child-2" },
+    ]);
+  });
+
+  test("one subtask failing to start does not fail the whole plan", async () => {
+    tasksStore = plan();
+    startTaskResultByTaskId.set("child-1", { ok: false, error: "no sandbox" });
+
+    const result = await startSubtasksAction("root-1");
+
+    expect(result).toEqual({ ok: true, started: 1 });
+  });
+
+  test("surfaces the first error when nothing could be started", async () => {
+    tasksStore = plan();
+    startTaskResult = { ok: false, error: "no sandbox" };
+
+    const result = await startSubtasksAction("root-1");
+
+    expect(result).toEqual({ ok: false, error: "no sandbox" });
+  });
+
+  test("a leaf task is directed to Start instead", async () => {
+    tasksStore = [plan()[1] as FakeTask];
+
+    const result = await startSubtasksAction("child-1");
+
+    expect(result.ok).toBe(false);
+    expect(startTaskCalls).toHaveLength(0);
+  });
+
+  test("a plan whose subtasks have all been started already says so", async () => {
+    tasksStore = plan();
+    for (const task of tasksStore.slice(1)) {
+      task.status = "running";
+    }
+
+    const result = await startSubtasksAction("root-1");
+
+    expect(result.ok).toBe(false);
+    expect(startTaskCalls).toHaveLength(0);
   });
 });
