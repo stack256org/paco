@@ -1,5 +1,6 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { plugins } from "@/lib/db/schema";
+import type { Capability, PluginManifest } from "@paco/plugin-kit";
 
 // The module under test is server-only; the marker package throws outside a
 // server component and has nothing to do with what is being tested.
@@ -118,13 +119,19 @@ const {
   upsertPlugin,
 } = await import("./plugins");
 
-function manifestWithCapabilities(capabilities: string[]) {
+function manifestWithCapabilities(
+  capabilities: Capability[],
+  id = "my-plugin",
+): PluginManifest {
   return {
-    name: "my-plugin",
+    name: id,
     version: "1.0.0",
     description: "Does a thing.",
     pacoApi: 1,
     capabilities,
+    ...(capabilities.includes("net:fetch")
+      ? { netDomains: ["api.example.com"] }
+      : {}),
   };
 }
 
@@ -194,6 +201,92 @@ describe("upsertPlugin / getPlugin", () => {
     store = [];
     const row = await getPlugin("nope");
     expect(row).toBeUndefined();
+  });
+
+  test("throws when the supplied manifest is invalid", async () => {
+    store = [];
+    await expect(
+      upsertPlugin({
+        id: "my-plugin",
+        source: "local:/tmp/my-plugin",
+        version: "1.0.0",
+        contentHash: "hash",
+        manifest: { garbage: true } as unknown as PluginManifest,
+        grantedCapabilities: [],
+      }),
+    ).rejects.toThrow();
+    expect(store).toHaveLength(0);
+  });
+
+  test("trims a supplied grant that is outside the manifest's capabilities, without throwing", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["events:subscribe"]),
+      grantedCapabilities: ["events:subscribe", "net:fetch"],
+    });
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.grantedCapabilities).toEqual(["events:subscribe"]);
+  });
+
+  test("trims a previously granted capability the new manifest no longer declares", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["events:subscribe", "net:fetch"]),
+      grantedCapabilities: [],
+    });
+    await setPluginGrants("my-plugin", ["events:subscribe", "net:fetch"]);
+
+    // Re-install with a manifest that no longer declares "net:fetch",
+    // carrying the previous grants forward the way a real installer would.
+    const before = await getPlugin("my-plugin");
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "2.0.0",
+      contentHash: "hash2",
+      manifest: manifestWithCapabilities(["events:subscribe"]),
+      grantedCapabilities: before?.grantedCapabilities ?? [],
+    });
+
+    const after = await getPlugin("my-plugin");
+    expect(after?.grantedCapabilities).toEqual(["events:subscribe"]);
+  });
+
+  test("a plain re-install with grantedCapabilities: [] preserves an existing grant the manifest still declares", async () => {
+    store = [];
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.0",
+      contentHash: "hash",
+      manifest: manifestWithCapabilities(["events:subscribe"]),
+      grantedCapabilities: [],
+    });
+    await setPluginGrants("my-plugin", ["events:subscribe"]);
+
+    // The installer always passes grantedCapabilities: [] on upsert; the
+    // existing grant must not be wiped just because the manifest is
+    // unchanged and re-declares the same capability.
+    await upsertPlugin({
+      id: "my-plugin",
+      source: "local:/tmp/my-plugin",
+      version: "1.0.1",
+      contentHash: "hash3",
+      manifest: manifestWithCapabilities(["events:subscribe"]),
+      grantedCapabilities: [],
+    });
+
+    const row = await getPlugin("my-plugin");
+    expect(row?.grantedCapabilities).toEqual(["events:subscribe"]);
   });
 });
 
@@ -284,6 +377,26 @@ describe("setPluginGrants", () => {
     await expect(
       setPluginGrants("does-not-exist", ["events:subscribe"]),
     ).rejects.toThrow();
+  });
+
+  test("throws even for an empty grants request when the manifest is unparseable, and logs it", async () => {
+    store = [
+      makeRow({
+        id: "my-plugin",
+        manifest: { garbage: true } as unknown as PluginManifest,
+        grantedCapabilities: [],
+      }),
+    ];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {
+      // silence expected log during the test
+    });
+
+    await expect(setPluginGrants("my-plugin", [])).rejects.toThrow(
+      PluginGrantEscalationError,
+    );
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 });
 
