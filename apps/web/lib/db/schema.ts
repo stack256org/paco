@@ -593,3 +593,47 @@ export const instanceSettings = pgTable("instance_settings", {
 });
 
 export type InstanceSettings = typeof instanceSettings.$inferSelect;
+
+/**
+ * An organisation's subagent roster: the `--agents` definitions available in
+ * every chat, editable by the organisation instead of hardcoded in
+ * `@paco/claude-code`'s `DEFAULT_AGENTS`.
+ *
+ * `definition` is validated with `agentDefinitionSchema`
+ * (`apps/web/lib/agent/agent-definition-schema.ts`) on every write and every
+ * read — the column itself is untyped JSONB, so nothing stops a row from
+ * predating a schema change or being written by something other than
+ * `upsertRosterAgent`. An invalid row is skipped with a `console.error`
+ * rather than passed through: a bad definition must not become a fatal error
+ * for every turn in the organisation.
+ *
+ * `builtin` marks the seeded defaults (explorer/executor/reviewer/designer):
+ * editable like any other row, but `deleteRosterAgent` refuses to remove
+ * them, so an organisation can always get back to a working roster by
+ * resetting a row rather than needing to reconstruct one from scratch.
+ */
+export const rosterAgents = pgTable(
+  "roster_agents",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    /** Becomes the agent's key in `--agents`. */
+    name: text("name").notNull(),
+    definition: jsonb("definition").notNull(),
+    builtin: boolean("builtin").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("roster_agents_org_name_idx").on(
+      table.organizationId,
+      table.name,
+    ),
+  ],
+);
+
+export type RosterAgent = typeof rosterAgents.$inferSelect;
+export type NewRosterAgent = typeof rosterAgents.$inferInsert;
