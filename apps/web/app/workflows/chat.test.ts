@@ -572,39 +572,26 @@ const TEST_FALLBACK_DESIGNER_AGENT = {
 /** Set by a test to control what `runDesignTurn` resolves/throws. */
 let designTurnOutcomesOverride: TestDesignOutcome[] | undefined;
 let designTurnShouldFailAll = false;
-/** Set by a test to simulate `createCandidates` itself throwing. */
-let createCandidatesShouldThrow = false;
-/** Set by a test to simulate `runDesignTurn` throwing something other than `DesignTurnAllFailedError`. */
-let runDesignTurnShouldThrowUnexpectedError = false;
 const createCandidatesSpy = mock(
   (params: {
     chatId: string;
     baseBranch: string;
     count: number;
     sessionWorkspace: string;
-  }) => {
-    if (createCandidatesShouldThrow) {
-      return Promise.reject(new Error("could not create worktree"));
-    }
-    return Promise.resolve(
+  }) =>
+    Promise.resolve(
       Array.from({ length: params.count }, (_, i): TestDesignCandidate => ({
         index: i + 1,
         branch: `design/${params.chatId}/${i + 1}`,
         worktreeDir: `${params.sessionWorkspace}/designs/${params.chatId}/${i + 1}`,
       })),
-    );
-  },
-);
-const removeCandidatesSpy = mock(
-  (_params: { sessionWorkspace: string; chatId: string }) =>
-    Promise.resolve(),
+    ),
 );
 const runDesignTurnSpy = mock(
   async (params: {
     candidates: TestDesignCandidate[];
     prompt: string;
     designerAgent: unknown;
-    agentOptions: { sandbox: { environmentDetails?: string } };
     onProgress: (progress: {
       candidate: number;
       status: string;
@@ -646,10 +633,6 @@ const runDesignTurnSpy = mock(
       });
     }
 
-    if (runDesignTurnShouldThrowUnexpectedError) {
-      throw new Error("the backend crashed");
-    }
-
     if (designTurnShouldFailAll) {
       throw new TestDesignTurnAllFailedError(outcomes);
     }
@@ -660,7 +643,6 @@ const runDesignTurnSpy = mock(
 
 mock.module("@/lib/design/candidates", () => ({
   createCandidates: createCandidatesSpy,
-  removeCandidates: removeCandidatesSpy,
 }));
 mock.module("@/lib/design/design-turn", () => ({
   runDesignTurn: runDesignTurnSpy,
