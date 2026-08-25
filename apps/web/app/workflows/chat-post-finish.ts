@@ -661,27 +661,6 @@ export async function runAutoCreatePrStep(params: {
 }
 
 /**
- * Ceiling on one distillation call.
- *
- * This step runs after the stream is already closed and the turn's result
- * has been delivered, so awaiting it doesn't cost the user anything — but an
- * awaited step with no ceiling could still wedge the workflow's own
- * durability bookkeeping on a hung CLI process. 90s is generous for a
- * Haiku-tier, tools-off, single-turn call.
- */
-const DISTILL_TIMEOUT_MS = 90_000;
-
-/**
- * Run post-turn memory distillation as a durable, awaited step.
- *
- * Runs after the stream has been cleared, so awaiting it never delays
- * anything the user is waiting on. `distillTurn` itself never throws (see
- * the plan's memory invariants — a failed distillation must never fail the
- * turn), but this still guards with a timeout and a `catch`: a step that
- * awaits a callee must not depend on that callee's contract holding forever,
- * and a hung CLI process would otherwise wedge this step indefinitely.
- */
-/**
  * Task completion + the reviewer gate.
  *
  * Runs after a turn finishes for whichever chat it belongs to. Most chats
@@ -724,6 +703,27 @@ export async function runTaskCompletionStep(params: {
   }
 }
 
+/**
+ * Ceiling on one distillation call.
+ *
+ * This step runs after the stream is already closed and the turn's result
+ * has been delivered, so awaiting it doesn't cost the user anything — but an
+ * awaited step with no ceiling could still wedge the workflow's own
+ * durability bookkeeping on a hung CLI process. 90s is generous for a
+ * Haiku-tier, tools-off, single-turn call.
+ */
+const DISTILL_TIMEOUT_MS = 90_000;
+
+/**
+ * Run post-turn memory distillation as a durable, awaited step.
+ *
+ * Runs after the stream has been cleared, so awaiting it never delays
+ * anything the user is waiting on. `distillTurn` itself never throws (see
+ * the plan's memory invariants — a failed distillation must never fail the
+ * turn), but this still guards with a timeout and a `catch`: a step that
+ * awaits a callee must not depend on that callee's contract holding forever,
+ * and a hung CLI process would otherwise wedge this step indefinitely.
+ */
 export async function distillTurnMemoryStep(params: {
   chatId: string;
   sessionRepoDir: string;

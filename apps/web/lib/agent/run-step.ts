@@ -138,6 +138,9 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
       jsonSchema: options.structuredOutput.jsonSchema,
     }),
     ...(options.tools && { tools: options.tools }),
+    ...(options.disallowedTools && {
+      disallowedTools: options.disallowedTools,
+    }),
     /*
      * The run is non-interactive, so anything that asks for approval is simply
      * refused — there is no one to ask.

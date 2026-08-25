@@ -67,6 +67,17 @@ export interface AgentCallOptions {
    * granting it edit tools.
    */
   tools?: string[];
+  /**
+   * Explicitly denies tools even if `tools` would otherwise allow them
+   * (`--disallowedTools`).
+   *
+   * `tools` is an allow-list; this is the belt-and-suspenders complement for
+   * a caller that wants to be certain a tool is unavailable regardless of
+   * how `tools` is configured elsewhere (e.g. a reviewer turn that must
+   * never edit the thing it is reviewing, even if a custom roster row
+   * widens its `tools`).
+   */
+  disallowedTools?: string[];
 }
 
 /**
