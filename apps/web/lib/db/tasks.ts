@@ -114,18 +114,12 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   if (!row) {
     throw new Error("createTask: insert returned no row");
   }
-  // A no-op today, deliberately: `CreateTaskInput` has no `chatId` field,
-  // so `row.chatId` is always null right here — a task only ever gets a
-  // chat later, via `transitionTaskStatus`'s `patch.chatId` (see
-  // `startTask` in `lib/tasks/start.ts`). This call exists anyway so the
-  // event fires automatically the moment (if ever) a caller creates a task
-  // with a chat already attached — do not "clean this up" as dead code.
-  await appendTaskLifecycleEvent(row.chatId, {
-    type: "task/created",
-    taskId: row.id,
-    title: row.title,
-    origin: row.origin,
-  });
+  // No `task/created` event here, deliberately: `task/created` is a CHAT
+  // log entry, and a task has no chat at creation — `CreateTaskInput` has
+  // no `chatId` field and a proposal task may never get one at all. Emitting
+  // it here was a call that could never fire, which is why nothing could
+  // ever observe a task being created. It is emitted from
+  // `transitionTaskStatus` instead, the moment a chat is first attached.
   return row;
 }
 
@@ -219,6 +213,9 @@ export type TaskTransitionPatch = Partial<
  * write — e.g. `chatId` when starting a task, or `reviewerRejections` when
  * applying a reviewer verdict — without going around the state-machine
  * check to do it.
+ *
+ * Also where a task's `task/created` event fires — see the guard below for
+ * why it cannot fire at creation time.
  */
 export async function transitionTaskStatus(
   organizationId: string,
@@ -257,6 +254,19 @@ export async function transitionTaskStatus(
       to,
       `Task "${taskId}" status changed concurrently while transitioning "${current.status}" -> "${to}"`,
     );
+  }
+  // The first transition to attach a chat is the first moment this task has
+  // a log to be recorded in at all, so its creation event leads that log
+  // here rather than at `createTask` (where there was no chat, and the event
+  // therefore never fired). Guarded on the chat being NEW to the task so a
+  // later transition cannot re-announce a task the chat already knows.
+  if (!current.chatId && row.chatId) {
+    await appendTaskLifecycleEvent(row.chatId, {
+      type: "task/created",
+      taskId: row.id,
+      title: row.title,
+      origin: row.origin,
+    });
   }
   await appendTaskLifecycleEvent(row.chatId, {
     type: "task/status",

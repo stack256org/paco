@@ -467,6 +467,64 @@ describe("transitionTaskStatus", () => {
     expect(updated.chatId).toBe("chat-1");
   });
 
+  test("emits task/created on the chat the first time one is attached", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+      origin: "planner",
+    });
+    appendedEvents = [];
+    appendSessionEventsMock.mockClear();
+
+    await transitionTaskStatus("org-1", task.id, "running", {
+      chatId: "chat-1",
+    });
+
+    // `createTask` cannot emit this — a task has no chat until it starts, so
+    // there is no log to write to. The chat's first sight of the task is
+    // this transition, and the creation event has to lead its log.
+    expect(appendedEvents.map((call) => call.chatId)).toEqual([
+      "chat-1",
+      "chat-1",
+    ]);
+    expect(appendedEvents[0]?.events).toEqual([
+      {
+        type: "task/created",
+        taskId: task.id,
+        title: "Title",
+        origin: "planner",
+      },
+    ]);
+    expect(appendedEvents[1]?.events).toEqual([
+      { type: "task/status", taskId: task.id, from: "todo", to: "running" },
+    ]);
+  });
+
+  test("does not re-emit task/created on later transitions", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+    await transitionTaskStatus("org-1", task.id, "running", {
+      chatId: "chat-1",
+    });
+    appendedEvents = [];
+
+    await transitionTaskStatus("org-1", task.id, "review");
+    await transitionTaskStatus("org-1", task.id, "done");
+
+    const types = appendedEvents.flatMap((call) =>
+      call.events.map((event) => (event as { type: string }).type),
+    );
+    expect(types).toEqual(["task/status", "task/status"]);
+  });
+
   test("blocked -> todo can attach the session a proposal task never had", async () => {
     store = [];
     const task = await createTask({
