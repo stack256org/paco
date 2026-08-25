@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
+import { cleanupMcpConfigFile } from "./mcp-config-file.ts";
 import { buildArgs, DEFAULT_AGENTS } from "./options.ts";
 
 describe("buildArgs", () => {
@@ -83,7 +85,7 @@ describe("buildArgs", () => {
     ]);
   });
 
-  test("emits --mcp-config as inline JSON, and keeps --strict-mcp-config", () => {
+  test("emits --mcp-config as a private file path, never inline JSON, and keeps --strict-mcp-config", () => {
     const mcpServers = {
       "paco-plugins": {
         command: "/usr/bin/node",
@@ -95,7 +97,16 @@ describe("buildArgs", () => {
 
     const index = args.indexOf("--mcp-config");
     expect(index).toBeGreaterThan(-1);
-    expect(args[index + 1]).toBe(JSON.stringify({ mcpServers }));
+    const value = args[index + 1] as string;
+
+    // Inline JSON would put the plugin-tools bearer token in this process's
+    // argv, where `ps auxww` — and the agent's own Bash tool — can read it.
+    // AGENTS.md: "The token goes in the environment, never in argv."
+    expect(args.join(" ")).not.toContain("secret");
+    expect(value).not.toContain("{");
+    expect(JSON.parse(readFileSync(value, "utf-8"))).toEqual({ mcpServers });
+
+    cleanupMcpConfigFile(args);
 
     // The reproducibility contract: only servers named via --mcp-config are
     // reachable, never anything already configured on the host.
