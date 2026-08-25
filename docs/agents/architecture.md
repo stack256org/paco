@@ -70,6 +70,31 @@ Paco answers. `decideApproval` decides: reads, in-worktree writes, and ordinary
 development commands proceed; destructive or out-of-tree actions raise a prompt
 in the chat and wait for the user.
 
+`Bash` is decided the same way `Write` is, rather than by pattern-matching the
+command string. The line is tokenized and split on control operators, and every
+write target is resolved against the worktree; anything the parse cannot
+statically understand asks. The command head must be on a short allowlist, and
+heads that take another program as an argument (`sh`, `python3`, `xargs`,
+`sudo`, `npx`, …) always ask, because half-checking one of those is precisely
+how the previous regex denylist failed.
+
+### What this does not stop
+
+The agent may write a file inside its worktree without asking and then run it —
+`node script.js`, `./scripts/x.sh` and `pnpm build` are all allowed, because
+that is the product. So a deliberately hostile agent can still reach the host
+in two steps, including overwriting the hook itself at
+`~/.paco/hooks/pre-tool-use.mjs`; the hook is verified once per turn, not once
+per step, and a turn is up to 500 steps.
+
+Nothing inside this process closes that, and it is worth being plain about why:
+the agent runs as the same OS user as Paco, so any protection Paco applies to
+its own files is protection the agent can remove. The real boundary is
+OS-level — a separate user, or running the CLI itself inside the container
+rather than on the host. What the current design buys is that the escape is no
+longer one unremarkable `Bash` call, and that both steps appear in the
+transcript.
+
 ## GitHub
 
 Through the `gh` CLI, with a per-user token stored encrypted. No GitHub App, no

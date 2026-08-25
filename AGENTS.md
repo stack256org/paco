@@ -36,7 +36,11 @@ A session is a git repository; a chat is a worktree of it on branch `chat/<chatI
 
 ## Tool approval
 
-The agent runs with the CLI's prompts bypassed, so `packages/claude-code/approval-policy.ts` is the gate. When adding a tool or a dangerous command pattern, add it there and add a test: an unrecognised tool asks the user, which is safe but noisy, and a missing dangerous-command pattern is silent.
+The agent runs with the CLI's prompts bypassed, so `packages/claude-code/approval-policy.ts` is the gate. It is an **allowlist**, not a denylist: an unrecognised tool asks the user, and so does an unrecognised shell command. `Bash` is tokenized — quoting removed, line continuations and heredocs honoured, the line split on control operators — and anything whose meaning cannot be determined statically (`$VAR`, `$(…)`, backticks, subshells) stops the parse and asks. Every redirection target and every operand of a byte-moving command is checked against the worktree.
+
+When adding a command head to that allowlist, add a test with it. Asking too often is safe but noisy; the failure that matters is a command that proceeds silently.
+
+This replaced a regex denylist, for the reason recorded in `packages/plugin-host/SECURITY.md` about its own allowlist: a denylist over shell strings cannot be finished. `G=push; git $G --force` and `git push --for''ce` both walked through the old one.
 
 ## Database & Migrations
 
