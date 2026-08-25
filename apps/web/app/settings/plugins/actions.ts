@@ -12,11 +12,7 @@ import {
   setPluginEnabled,
   setPluginGrants,
 } from "@/lib/db/plugins";
-import {
-  installPlugin,
-  pluginDir,
-  type InstallSource,
-} from "@/lib/plugins/install";
+import { installPlugin, pluginDir } from "@/lib/plugins/install";
 import { startPluginHost, stopPluginHost } from "@/lib/plugins/registry";
 
 /**
