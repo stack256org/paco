@@ -21,8 +21,42 @@ mock.module("@/lib/db/github-tokens", () => ({
 // The workflow now records session events for every turn via
 // TurnEventRecorder, which appends through this module. Stub it so the
 // workflow tests stay hermetic instead of touching a real Postgres client.
+//
+// `pendingSteerEvents` also backs `listUnconsumedSteerEvents`, so both the
+// steer monitor's polling and the workflow's own continuation loop read the
+// same in-memory buffer a test primes with `bufferSteerMessage`.
+type PendingSteerEvent = { id: number; messageId: string; text: string };
+let pendingSteerEvents: PendingSteerEvent[] = [];
+let nextSteerEventId = 1;
+
+function bufferSteerMessage(messageId: string, text: string) {
+  pendingSteerEvents = [
+    ...pendingSteerEvents,
+    { id: nextSteerEventId++, messageId, text },
+  ];
+}
+
+const appendSessionEventsSpy = mock(
+  async (_chatId: string, events: Array<Record<string, unknown>>) => {
+    for (const event of events) {
+      if (
+        event.type === "steer/consumed" &&
+        typeof event.messageId === "string"
+      ) {
+        pendingSteerEvents = pendingSteerEvents.filter(
+          (pending) => pending.messageId !== event.messageId,
+        );
+      }
+    }
+  },
+);
+const listUnconsumedSteerEventsSpy = mock(() =>
+  Promise.resolve(pendingSteerEvents),
+);
+
 mock.module("@/lib/db/session-events", () => ({
-  appendSessionEvents: mock(() => Promise.resolve()),
+  appendSessionEvents: appendSessionEventsSpy,
+  listUnconsumedSteerEvents: listUnconsumedSteerEventsSpy,
 }));
 
 // ── Spy state ──────────────────────────────────────────────────────
@@ -146,7 +180,10 @@ let testChatRecord: {
   id: string;
   sessionId: string;
   modelId: string | null;
+  turnPolicy: "steer" | "queue";
 };
+/** Backs `getChatClaudeSessionId`/`setChatClaudeSessionId` below. */
+let testClaudeSessionId: string | null = null;
 let testPreferences: {
   defaultModelId: string;
   defaultDiffMode: "unified";
@@ -163,7 +200,11 @@ let agentAssistantParts: Array<Record<string, unknown>> | undefined;
 let agentFinishReason = "stop";
 let agentTotalUsage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 };
 let agentInputMessages: unknown;
-let agentTurnCalls: Array<{ prompt: string; maxTurns?: number }> = [];
+let agentTurnCalls: Array<{
+  prompt: string;
+  maxTurns?: number;
+  claudeSessionId?: string;
+}> = [];
 /** Stands in for the user pressing stop, which reaches the CLI as an abort. */
 let agentAbortsTurn = false;
 
@@ -196,15 +237,40 @@ mock.module("@/lib/agent/run-step", () => ({
     prompt: string;
     messageId: string;
     maxTurns?: number;
+    claudeSessionId?: string;
     originalMessages?: Array<Record<string, unknown>>;
+    abortSignal?: AbortSignal;
     onChunk: (chunk: Record<string, unknown>) => Promise<void>;
   }) => {
     agentInputMessages = params.prompt;
-    agentTurnCalls.push({ prompt: params.prompt, maxTurns: params.maxTurns });
+    agentTurnCalls.push({
+      prompt: params.prompt,
+      maxTurns: params.maxTurns,
+      claudeSessionId: params.claudeSessionId,
+    });
 
     if (agentAbortsTurn) {
       throw Object.assign(new Error("The user stopped this run"), {
         name: "AbortError",
+      });
+    }
+
+    // Steer test support: while a message is still buffered and the chat is
+    // on the steer policy, behave like a turn that hasn't finished yet and
+    // let the workflow's real AbortController-based steer monitor (Task 10)
+    // cancel it — mirrors production instead of a canned immediate throw.
+    if (
+      params.abortSignal &&
+      testChatRecord.turnPolicy === "steer" &&
+      pendingSteerEvents.length > 0
+    ) {
+      if (params.abortSignal.aborted) {
+        throw Object.assign(new Error("Steered"), { name: "AbortError" });
+      }
+      await new Promise((_resolve, reject) => {
+        params.abortSignal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("Steered"), { name: "AbortError" }));
+        });
       });
     }
 
@@ -294,11 +360,16 @@ mock.module("ai", () => ({
     }),
 }));
 
+const setChatClaudeSessionIdSpy = mock((_chatId: string, sessionId: string) => {
+  testClaudeSessionId = sessionId;
+  return Promise.resolve();
+});
+
 mock.module("@/lib/db/sessions", () => ({
   getChatById: async () => testChatRecord,
   getSessionById: async () => testSessionRecord,
-  getChatClaudeSessionId: async () => null,
-  setChatClaudeSessionId: async () => undefined,
+  getChatClaudeSessionId: () => Promise.resolve(testClaudeSessionId),
+  setChatClaudeSessionId: setChatClaudeSessionIdSpy,
 }));
 
 mock.module("@/lib/db/user-preferences", () => ({
@@ -376,7 +447,9 @@ beforeEach(() => {
     id: "chat-1",
     sessionId: "session-1",
     modelId: null,
+    turnPolicy: "steer",
   };
+  testClaudeSessionId = null;
   testPreferences = {
     defaultModelId: "anthropic/claude-haiku-4.5",
     defaultDiffMode: "unified",
@@ -386,6 +459,11 @@ beforeEach(() => {
     alertsEnabled: true,
     alertSoundEnabled: true,
   };
+  pendingSteerEvents = [];
+  nextSteerEventId = 1;
+  appendSessionEventsSpy.mockClear();
+  listUnconsumedSteerEventsSpy.mockClear();
+  setChatClaudeSessionIdSpy.mockClear();
   Object.values(spies).forEach((s) => s.mockClear());
 });
 
@@ -1334,5 +1412,100 @@ describe("auto-save levels", () => {
     expect(metadataChunks[0]?.messageMetadata.lastStepFinishReason).toBe(
       "stop",
     );
+  });
+});
+
+/**
+ * Task 10: a message buffered mid-turn (Task 9's steer/buffered events)
+ * either cancels the active turn (steer) or waits for it (queue), and either
+ * way runs as a continuation turn afterward — consumed exactly once, recorded
+ * as steer/consumed.
+ */
+describe("turn steering", () => {
+  function consumedEvents() {
+    return appendSessionEventsSpy.mock.calls
+      .flatMap(([, events]) => events as Array<Record<string, unknown>>)
+      .filter((event) => event.type === "steer/consumed");
+  }
+
+  test("steer policy: a buffered message aborts the turn and runs as a continuation", async () => {
+    disableAutoSave();
+    testChatRecord.turnPolicy = "steer";
+    testClaudeSessionId = "existing-claude-session";
+    bufferSteerMessage("buffered-1", "Actually, do this instead");
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls).toEqual([
+      expect.objectContaining({
+        prompt: "Hello",
+        claudeSessionId: "existing-claude-session",
+      }),
+      expect.objectContaining({
+        prompt: "Actually, do this instead",
+        claudeSessionId: "existing-claude-session",
+      }),
+    ]);
+    expect(consumedEvents()).toEqual([
+      { type: "steer/consumed", messageId: "buffered-1", mode: "steer" },
+    ]);
+    expect(pendingSteerEvents).toEqual([]);
+  });
+
+  test("queue policy: the primary turn completes untouched, then the buffered message follows", async () => {
+    disableAutoSave();
+    testChatRecord.turnPolicy = "queue";
+    bufferSteerMessage("buffered-2", "Follow-up instruction");
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls.map((call) => call.prompt)).toEqual([
+      "Hello",
+      "Follow-up instruction",
+    ]);
+    expect(consumedEvents()).toEqual([
+      { type: "steer/consumed", messageId: "buffered-2", mode: "queue" },
+    ]);
+    expect(pendingSteerEvents).toEqual([]);
+  });
+
+  test("two buffered messages are each consumed exactly once, in order, as separate continuation turns", async () => {
+    disableAutoSave();
+    testChatRecord.turnPolicy = "steer";
+    bufferSteerMessage("buffered-1", "First follow-up");
+    bufferSteerMessage("buffered-2", "Second follow-up");
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls.map((call) => call.prompt)).toEqual([
+      "Hello",
+      "First follow-up",
+      "Second follow-up",
+    ]);
+    expect(consumedEvents()).toEqual([
+      { type: "steer/consumed", messageId: "buffered-1", mode: "steer" },
+      { type: "steer/consumed", messageId: "buffered-2", mode: "steer" },
+    ]);
+    expect(pendingSteerEvents).toEqual([]);
+  });
+
+  test("does not auto-continue a turn the user genuinely stopped", async () => {
+    // A user stop is not a steer: nothing buffered caused it, so a message
+    // that happens to be pending should not be picked up as a continuation.
+    // Uses the queue policy so no steer monitor is armed to race the forced
+    // stop — the guard under test is the workflow loop's own condition, not
+    // which of two abort sources gets there first.
+    disableAutoSave();
+    testChatRecord.turnPolicy = "queue";
+    agentAbortsTurn = true;
+    bufferSteerMessage("buffered-3", "Should not run");
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls.map((call) => call.prompt)).toEqual(["Hello"]);
+    expect(consumedEvents()).toEqual([]);
+    expect(pendingSteerEvents).toEqual([
+      { id: 1, messageId: "buffered-3", text: "Should not run" },
+    ]);
   });
 });

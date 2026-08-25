@@ -9,6 +9,7 @@ import {
   type UIMessageChunk,
 } from "ai";
 import type { ClaudeRunUsage } from "@paco/claude-code";
+import type { TurnPolicy } from "@paco/agent-backend";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { appUrl } from "@/lib/app-url";
@@ -18,6 +19,10 @@ import {
 } from "@/lib/sandbox/setup-failure-copy";
 import { approvalToken } from "@/lib/agent/approvals/token";
 import { getGithubToken } from "@/lib/db/github-tokens";
+import {
+  appendSessionEvents,
+  listUnconsumedSteerEvents,
+} from "@/lib/db/session-events";
 import type { AgentCallOptions } from "@/lib/agent/types";
 import {
   getChatClaudeSessionId,
@@ -93,6 +98,8 @@ type ChatModelRuntime = {
   /** Send that commit to GitHub. Implies a connected repository. */
   autoPushEnabled: boolean;
   autoCreatePrEnabled: boolean;
+  /** What happens when a message arrives while this chat's turn is running. */
+  turnPolicy: TurnPolicy;
 };
 
 type Writable = WritableStream<UIMessageChunk>;
@@ -216,6 +223,7 @@ async function resolveChatModelRuntime(params: {
     autoCommitEnabled: autoCommitLocalEnabled || autoPushEnabled,
     autoPushEnabled,
     autoCreatePrEnabled,
+    turnPolicy: chat.turnPolicy ?? "steer",
   };
 }
 
@@ -586,55 +594,100 @@ export async function runAgentWorkflow(options: Options) {
      * runs: `maxSteps` is passed to the CLI as `--max-turns`, and a run that
      * hits it comes back as `error_max_turns` → a "length" finish reason.
      */
-    let result: Awaited<ReturnType<typeof runAgentStep>>;
+    const turnPolicy = modelRuntime.turnPolicy;
 
-    try {
-      result = await runAgentStep(
-        modelMessages,
-        // The prompt comes from the whole message list, not just the newest
-        // entry: when a stopped run is resumed the newest entry is the partial
-        // assistant message, and reading only that yields an empty prompt.
-        extractLatestUserText(options.messages),
-        originalMessagesForStep,
-        assistantId,
-        writable,
-        workflowRunId,
-        options.chatId,
-        options.sessionId,
-        options.userId,
-        selectedModelId,
-        modelId,
-        agentOptions,
-        1,
-        options.maxSteps,
-        checkpoint,
-      );
-    } catch (error) {
-      if (isStepTimingError(error)) {
-        stepTimings.push(error.stepTiming);
+    /**
+     * Run one agent turn and fold its result into the workflow's running
+     * state. Used for the primary turn and for every continuation turn that
+     * consumes a buffered steer message — both go through the identical
+     * step invocation, including the recorder and checkpoint threaded above.
+     */
+    const runTurn = async (prompt: string, stepNumber: number) => {
+      let stepResult: Awaited<ReturnType<typeof runAgentStep>>;
+
+      try {
+        stepResult = await runAgentStep(
+          modelMessages,
+          prompt,
+          originalMessagesForStep,
+          assistantId,
+          writable,
+          workflowRunId,
+          options.chatId,
+          options.sessionId,
+          options.userId,
+          selectedModelId,
+          modelId,
+          agentOptions,
+          stepNumber,
+          options.maxSteps,
+          checkpoint,
+        );
+      } catch (error) {
+        if (isStepTimingError(error)) {
+          stepTimings.push(error.stepTiming);
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    stepTimings.push(result.stepTiming);
-    pendingAssistantResponse =
-      result.responseMessage ?? pendingAssistantResponse;
-    shouldRefreshCachedDiff =
-      shouldRefreshCachedDiff ||
-      shouldRefreshDiffCacheForParts(pendingAssistantResponse.parts);
-    modelMessages.push(...result.responseMessages);
-    wasAborted = wasAborted || result.stepWasAborted;
-    finalFinishReason = result.finishReason;
-    exhaustedMaxSteps = result.finishReason === "length";
+      stepTimings.push(stepResult.stepTiming);
+      pendingAssistantResponse =
+        stepResult.responseMessage ?? pendingAssistantResponse;
+      shouldRefreshCachedDiff =
+        shouldRefreshCachedDiff ||
+        shouldRefreshDiffCacheForParts(pendingAssistantResponse.parts);
+      modelMessages.push(...stepResult.responseMessages);
+      wasAborted = wasAborted || stepResult.stepWasAborted;
+      finalFinishReason = stepResult.finishReason;
+      exhaustedMaxSteps = stepResult.finishReason === "length";
 
-    if (result.stepUsage) {
-      totalUsage = totalUsage
-        ? addLanguageModelUsage(totalUsage, result.stepUsage)
-        : result.stepUsage;
-    }
+      if (stepResult.stepUsage) {
+        totalUsage = totalUsage
+          ? addLanguageModelUsage(totalUsage, stepResult.stepUsage)
+          : stepResult.stepUsage;
+      }
 
-    if (sandboxState) {
-      await refreshLifecycleActivity(options.sessionId);
+      if (sandboxState) {
+        await refreshLifecycleActivity(options.sessionId);
+      }
+
+      return stepResult;
+    };
+
+    // The prompt comes from the whole message list, not just the newest
+    // entry: when a stopped run is resumed the newest entry is the partial
+    // assistant message, and reading only that yields an empty prompt.
+    let result = await runTurn(extractLatestUserText(options.messages), 1);
+
+    /*
+     * Consume buffered messages as continuation turns, oldest first, exactly
+     * once. The consumed event is appended BEFORE the continuation turn
+     * runs: a crash between the two loses the buffered message rather than
+     * double-running it, and durable-workflow replay of the step would
+     * otherwise re-consume it. That asymmetry with the invariant is
+     * deliberate — the message is still in `chatMessages` (Task 9 persisted
+     * it), so nothing is lost from history, only from auto-continuation.
+     *
+     * A turn the user genuinely stopped (aborted, but not by steering) ends
+     * the loop instead of continuing: that abort didn't come from a buffered
+     * message, so nothing here should auto-resume the turn.
+     */
+    let nextStepNumber = 2;
+    while (!result.stepWasAborted || result.stepWasSteered) {
+      const pending = await listUnconsumedSteerEvents(options.chatId);
+      const next = pending[0];
+      if (!next) {
+        break;
+      }
+      await appendSessionEvents(options.chatId, [
+        {
+          type: "steer/consumed",
+          messageId: next.messageId,
+          mode: turnPolicy,
+        },
+      ]);
+      result = await runTurn(next.text, nextStepNumber);
+      nextStepNumber += 1;
     }
 
     if (totalUsage) {
@@ -955,8 +1008,24 @@ const runAgentStep = async (
   // the turn's end even though the recorder itself is created part-way
   // through the try block.
   let recorder: TurnEventRecorder | undefined;
+  // Set by the steer monitor when a buffered message aborts this turn, so the
+  // abort-catch branch below can tell a steer-abort apart from a user stop —
+  // the two mean different things to the workflow's continuation loop.
+  let steeredMessage: { messageId: string; text: string } | undefined;
+  let steerMonitor: { stop: () => void } | undefined;
 
   try {
+    // Read fresh rather than threaded in from an earlier step: this step can
+    // replay independently under the durable workflow runtime, and the chat's
+    // current policy is what decides whether a steer monitor is armed at all.
+    const chat = await getChatById(chatId);
+    const turnPolicy: TurnPolicy = chat?.turnPolicy ?? "steer";
+    if (turnPolicy === "steer") {
+      steerMonitor = startSteerMonitor(chatId, abortController, (steered) => {
+        steeredMessage = steered;
+      });
+    }
+
     // Claude Code keeps its own conversation history, so only the newest user
     // turn is sent; prior turns are recovered with `--resume`.
     const claudeSessionId = await getChatClaudeSessionId(chatId);
@@ -981,9 +1050,8 @@ const runAgentStep = async (
      */
     const approvalUrl = `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
 
-    // Policy is hardcoded to "steer" until Task 10 makes it dynamic per turn.
     recorder = new TurnEventRecorder(chatId, crypto.randomUUID());
-    await recorder.start({ messageId, prompt, policy: "steer" });
+    await recorder.start({ messageId, prompt, policy: turnPolicy });
     recorder.assertPromptLogged(prompt);
 
     const step = await runAgentTurn<WebAgentUIMessage>({
@@ -1082,6 +1150,7 @@ const runAgentStep = async (
       stepUsage,
       stepCost: step.costUsd,
       stepWasAborted: false,
+      stepWasSteered: false,
       stepTiming: buildStepTiming(
         stepNumber,
         stepStartedAt,
@@ -1094,6 +1163,34 @@ const runAgentStep = async (
 
     if (isAbortError(error)) {
       const abortedFinishReason: FinishReason = "stop";
+
+      if (steeredMessage) {
+        // The signal fired because the steer monitor saw a buffered message,
+        // not because the user pressed stop: record what steered it, and let
+        // the workflow's continuation loop pick the buffered message back up.
+        await recorder?.finish({
+          finishReason: "stop",
+          isError: false,
+          steered: { text: steeredMessage.text },
+        });
+        return {
+          responseMessage: undefined,
+          responseMessages: [] as ModelMessage[],
+          finishReason: abortedFinishReason,
+          rawFinishReason: undefined,
+          stepUsage: undefined,
+          stepCost: undefined,
+          stepWasAborted: false,
+          stepWasSteered: true,
+          stepTiming: buildStepTiming(
+            stepNumber,
+            stepStartedAt,
+            stepFinishedAt,
+            abortedFinishReason,
+          ),
+        };
+      }
+
       await recorder?.finish({ finishReason: "stop", isError: false });
       return {
         responseMessage: undefined,
@@ -1103,6 +1200,7 @@ const runAgentStep = async (
         stepUsage: undefined,
         stepCost: undefined,
         stepWasAborted: true,
+        stepWasSteered: false,
         stepTiming: buildStepTiming(
           stepNumber,
           stepStartedAt,
@@ -1127,6 +1225,7 @@ const runAgentStep = async (
     throw errorWithStepTiming;
   } finally {
     stopMonitor.stop();
+    steerMonitor?.stop();
   }
 };
 
@@ -1165,6 +1264,49 @@ function startStopMonitor(runId: string, abortController: AbortController) {
       shouldStop = true;
     },
     done,
+  };
+}
+
+/**
+ * Polls for steer/buffered events during a turn (steer policy only) and
+ * aborts the in-flight turn when one arrives; the workflow loop then consumes
+ * the buffer as a continuation turn. Same lifecycle as startStopMonitor.
+ *
+ * `onSteerDetected` is handed the buffered message that triggered the abort,
+ * not just a boolean: the abort-catch branch needs its text to record on
+ * `turn/end` as `steered`, and re-querying after the fact would race the
+ * workflow's own consumption loop over which message is "next".
+ */
+function startSteerMonitor(
+  chatId: string,
+  abortController: AbortController,
+  onSteerDetected: (steered: { messageId: string; text: string }) => void,
+) {
+  let shouldStop = false;
+
+  const poll = async () => {
+    while (!shouldStop && !abortController.signal.aborted) {
+      try {
+        const pending = await listUnconsumedSteerEvents(chatId);
+        const next = pending[0];
+        if (next) {
+          onSteerDetected(next);
+          abortController.abort();
+          return;
+        }
+      } catch {
+        // Polling must never kill a turn; try again next tick.
+      }
+      await delay(1000);
+    }
+  };
+
+  void poll();
+
+  return {
+    stop() {
+      shouldStop = true;
+    },
   };
 }
 
