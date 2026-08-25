@@ -16,7 +16,11 @@ const running: PluginHost[] = [];
 /** Every fixture plugin root gets this so `.js` slot files load as ESM. */
 const ESM_PACKAGE_JSON = JSON.stringify({ type: "module" });
 
-function manifest(name: string, capabilities: Capability[]) {
+function manifest(
+  name: string,
+  capabilities: Capability[],
+  netDomains?: string[],
+) {
   return JSON.stringify({
     name,
     version: "1.0.0",
@@ -24,7 +28,7 @@ function manifest(name: string, capabilities: Capability[]) {
     pacoApi: 1,
     capabilities,
     ...(capabilities.includes("net:fetch")
-      ? { netDomains: ["example.com"] }
+      ? { netDomains: netDomains ?? ["example.com"] }
       : {}),
   });
 }
@@ -37,12 +41,13 @@ async function writePlugin(
   name: string,
   capabilities: Capability[],
   files: Record<string, string>,
+  netDomains?: string[],
 ): Promise<PluginDescriptor> {
   const pluginDir = path.join(rootDir, name);
   await mkdir(pluginDir, { recursive: true });
   await writeFile(
     path.join(pluginDir, "plugin.json"),
-    manifest(name, capabilities),
+    manifest(name, capabilities, netDomains),
   );
   await writeFile(path.join(pluginDir, "package.json"), ESM_PACKAGE_JSON);
 
@@ -316,6 +321,202 @@ describe("PluginHost capability enforcement", () => {
           entry.message.includes("capability not granted: net:fetch"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("PluginHost net:fetch allowlist", () => {
+  const FETCH_TOOL = `export default {
+    name: "call",
+    description: "Fetches a url through the capability api.",
+    inputSchema: {},
+    async execute(input, api) {
+      try {
+        return { allowed: true, response: await api.fetch({ url: input.url }) };
+      } catch (error) {
+        return { allowed: false, message: String(error.message) };
+      }
+    },
+  };
+  `;
+
+  /**
+   * One fixture for the whole allowlist: the manifest grants net:fetch for
+   * exactly `api.example.com`, and each test drives a different target url
+   * through the same worker.
+   */
+  async function fetchHost(netDomains: string[]): Promise<{
+    host: PluginHost;
+    reached: unknown[];
+    logs: HostLogEntry[];
+  }> {
+    const descriptor = await writePlugin(
+      "fetch-plugin",
+      ["tools:register", "net:fetch"],
+      { "tools/call.js": FETCH_TOOL },
+      netDomains,
+    );
+    const reached: unknown[] = [];
+    const logs: HostLogEntry[] = [];
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "net:fetch"],
+      handlers: {
+        "net:fetch": (_pluginId, payload) => {
+          reached.push(payload);
+          return Promise.resolve({ status: 200, headers: {}, body: "ok" });
+        },
+      },
+      logs,
+    });
+    await host.start();
+    return { host, reached, logs };
+  }
+
+  async function attempt(
+    host: PluginHost,
+    url: string,
+  ): Promise<{ allowed: boolean; message?: string; response?: unknown }> {
+    const outcome = await host.invokeTool("call", { url });
+    if (!outcome.ok) {
+      throw new Error(`invokeTool failed: ${outcome.error}`);
+    }
+    return outcome.output as {
+      allowed: boolean;
+      message?: string;
+      response?: unknown;
+    };
+  }
+
+  test("passes an exactly-matching host through to the handler", async () => {
+    const { host, reached } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "https://api.example.com/v1/issues");
+
+    expect(result.allowed).toBe(true);
+    expect(result.response).toEqual({ status: 200, headers: {}, body: "ok" });
+    expect(reached).toEqual([{ url: "https://api.example.com/v1/issues" }]);
+  });
+
+  test("allows plain http as well as https", async () => {
+    const { host, reached } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "http://api.example.com/");
+
+    expect(result.allowed).toBe(true);
+    expect(reached).toHaveLength(1);
+  });
+
+  test("rejects a subdomain of an allowed host", async () => {
+    const { host, reached, logs } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "https://evil.api.example.com/steal");
+
+    expect(result).toEqual({
+      allowed: false,
+      message: "net:fetch denied: host evil.api.example.com not in netDomains",
+    });
+    expect(reached).toEqual([]);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.level === "warn" &&
+          entry.message.includes(
+            "net:fetch denied: host evil.api.example.com not in netDomains",
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects the parent domain of an allowed host", async () => {
+    const { host, reached } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "https://example.com/");
+
+    expect(result).toEqual({
+      allowed: false,
+      message: "net:fetch denied: host example.com not in netDomains",
+    });
+    expect(reached).toEqual([]);
+  });
+
+  test("rejects a non-http scheme", async () => {
+    const { host, reached, logs } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "file:///etc/passwd");
+
+    expect(result).toEqual({
+      allowed: false,
+      message: "net:fetch denied: scheme file: not allowed",
+    });
+    expect(reached).toEqual([]);
+    expect(logs.some((entry) => entry.level === "warn")).toBe(true);
+  });
+
+  test("rejects an unparsable url", async () => {
+    const { host, reached } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "not a url at all");
+
+    expect(result.allowed).toBe(false);
+    expect(result.message).toBe(
+      "net:fetch denied: unparsable url not a url at all",
+    );
+    expect(reached).toEqual([]);
+  });
+
+  test("rejects a payload with no url at all", async () => {
+    const descriptor = await writePlugin(
+      "urlless-plugin",
+      ["tools:register", "net:fetch"],
+      {
+        "tools/call.js": `export default {
+          name: "call",
+          description: "Sends a malformed fetch payload.",
+          inputSchema: {},
+          async execute(input, api) {
+            try {
+              return { allowed: true, response: await api.fetch({ nope: 1 }) };
+            } catch (error) {
+              return { allowed: false, message: String(error.message) };
+            }
+          },
+        };
+        `,
+      },
+      ["api.example.com"],
+    );
+    let reached = 0;
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "net:fetch"],
+      handlers: {
+        "net:fetch": () => {
+          reached++;
+          return Promise.resolve(null);
+        },
+      },
+    });
+    await host.start();
+
+    const outcome = await host.invokeTool("call", {});
+
+    expect(outcome).toEqual({
+      ok: true,
+      output: {
+        allowed: false,
+        message: "net:fetch denied: payload has no url",
+      },
+    });
+    expect(reached).toBe(0);
+  });
+
+  test("matches hostnames case-insensitively", async () => {
+    const { host, reached } = await fetchHost(["api.example.com"]);
+
+    const result = await attempt(host, "https://API.EXAMPLE.COM/x");
+
+    expect(result.allowed).toBe(true);
+    expect(reached).toHaveLength(1);
   });
 });
 

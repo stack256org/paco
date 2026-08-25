@@ -2,6 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as path from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
+import { z } from "zod";
 import {
   encodeMessage,
   type HostToWorkerMessage,
@@ -19,6 +20,15 @@ const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 3000;
 /** Ceiling on retained worker stderr, so a chatty plugin cannot grow it. */
 const MAX_STDERR_BYTES = 16_000;
+
+/** Schemes a plugin may fetch. Anything else is a way out of the allowlist. */
+const ALLOWED_FETCH_PROTOCOLS = new Set(["http:", "https:"]);
+
+/**
+ * The only part of a `net:fetch` payload the host needs to police. Everything
+ * else (method, headers, body) is the handler's concern.
+ */
+const fetchPayloadSchema = z.object({ url: z.string() });
 
 /**
  * Absolute path to the worker entry script.
@@ -77,7 +87,7 @@ interface PendingToolCall {
 /**
  * Runs one plugin in its own process and enforces its capability grant.
  *
- * Two invariants shape everything below:
+ * Three invariants shape everything below:
  *
  * 1. The worker's environment is built from scratch. `process.env` holds the
  *    app secret, the database URL and every provider token; a plugin must
@@ -85,6 +95,9 @@ interface PendingToolCall {
  *    more — not a filtered copy, a fresh object.
  * 2. Grant checks happen here, before any handler runs. The worker is
  *    untrusted code and can ask for anything; asking is not receiving.
+ * 3. `net:fetch` is narrowed further, still in the host: the target must be
+ *    http(s) and its hostname must match `manifest.netDomains` exactly. See
+ *    `checkNetFetchAllowlist`.
  *
  * Background failures — a crash, a protocol violation, a hung tool — resolve
  * into values (`state`, `onCrash`, `ToolOutcome`) and are never thrown into
@@ -400,6 +413,23 @@ export class PluginHost {
       return;
     }
 
+    if (capability === "net:fetch") {
+      const denial = this.checkNetFetchAllowlist(payload);
+      if (denial) {
+        this.logger({
+          level: "warn",
+          message: `plugin ${this.pluginId}: ${denial}`,
+        });
+        this.send({
+          kind: "capability-result",
+          requestId,
+          ok: false,
+          error: denial,
+        });
+        return;
+      }
+    }
+
     const handler = this.handlers[capability];
     if (!handler) {
       this.send({
@@ -422,6 +452,54 @@ export class PluginHost {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * Enforces the manifest's `netDomains` allowlist for `net:fetch`, in the
+   * host, before the request can reach a handler. Returns the denial reason,
+   * or `undefined` when the request is allowed.
+   *
+   * The rules, in order:
+   *
+   * 1. The payload must carry a string `url`, and it must parse as an
+   *    absolute URL. An unparsable target cannot be checked, so it is denied.
+   * 2. The scheme must be `http:` or `https:`. `file:`, `data:` and friends
+   *    have no hostname to match and would read the host filesystem.
+   * 3. The hostname must be an EXACT, case-insensitive member of
+   *    `manifest.netDomains`. There is no subdomain matching in either
+   *    direction: a grant for `api.linear.app` covers neither
+   *    `evil.api.linear.app` nor `linear.app`.
+   * 4. An absent or empty `netDomains` denies everything. A manifest that
+   *    requests `net:fetch` cannot validly omit it, so reaching this branch
+   *    means the grant is unusable rather than unlimited.
+   *
+   * The web app's `net:fetch` handler checks the same list again. That is
+   * deliberate: this is the first gate, not the only one.
+   */
+  private checkNetFetchAllowlist(payload: unknown): string | undefined {
+    const parsed = fetchPayloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      return "net:fetch denied: payload has no url";
+    }
+
+    let target: URL;
+    try {
+      target = new URL(parsed.data.url);
+    } catch {
+      return `net:fetch denied: unparsable url ${parsed.data.url}`;
+    }
+
+    if (!ALLOWED_FETCH_PROTOCOLS.has(target.protocol)) {
+      return `net:fetch denied: scheme ${target.protocol} not allowed`;
+    }
+
+    const allowed = this.descriptor.manifest.netDomains ?? [];
+    const hostname = target.hostname.toLowerCase();
+    if (!allowed.some((domain) => domain.toLowerCase() === hostname)) {
+      return `net:fetch denied: host ${hostname} not in netDomains`;
+    }
+
+    return undefined;
   }
 
   /**
