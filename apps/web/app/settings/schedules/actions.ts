@@ -1,6 +1,6 @@
 "use server";
 
-import { isAdmin } from "@/lib/admin/require-admin";
+import { isAdmin, requireAdmin } from "@/lib/admin/require-admin";
 import type { Schedule } from "@/lib/db/schema";
 import {
   createSchedule,
@@ -58,23 +58,21 @@ async function requireOrgMembership(): Promise<{
 /**
  * The gate for every schedule write (create, edit, delete, enable/disable,
  * run now): admin only, per this app's usual write/read split for a
- * collaboratively-viewed settings surface (`requireAdmin`,
- * `lib/admin/require-admin.ts`).
+ * collaboratively-viewed settings surface.
+ *
+ * `requireAdmin` (`lib/admin/require-admin.ts`) IS the check; this only adds
+ * the organisation a write needs to be scoped to. It used to inline a
+ * line-for-line copy of that helper instead of importing it — exactly the
+ * duplication its docstring exists to prevent, and exactly how one of the
+ * two copies ends up stale after a refactor. Nothing about the behaviour
+ * changed with the swap: `requireAdmin` throws `SIGNED_OUT` then `NOT_YOURS`
+ * off the same `getServerSession`/`isAdmin` pair the copy did.
  */
 async function requireOrgAdmin(): Promise<{
   userId: string;
   organizationId: string;
 }> {
-  const userId = await (async () => {
-    const session = await getServerSession();
-    if (!session?.user?.id) {
-      throw new Error(SIGNED_OUT);
-    }
-    if (!(await isAdmin(session.user.id))) {
-      throw new Error(NOT_YOURS);
-    }
-    return session.user.id;
-  })();
+  const userId = await requireAdmin();
 
   const organization = await getOrganization();
   if (!organization) {
@@ -160,6 +158,19 @@ export type ScheduleActionResult =
   | { success: true }
   | { success: false; error: string; fieldErrors?: Record<string, string> };
 
+/**
+ * The presence checks — the ones that decide which input box to blame.
+ *
+ * `cron` is checked for emptiness only, deliberately: whether the expression
+ * PARSES is settled downstream by `validateCron` (`lib/db/schedules.ts`),
+ * which both `createSchedule` and `updateSchedule` call before they write.
+ * That is the same `cron-parser` `CronExpressionParser`, with the same
+ * `strict: false`, that pg-boss's own `schedule()` validates against
+ * internally, so a malformed expression can never reach pg-boss through
+ * either write path. Re-parsing it here would be a second, drifting copy of
+ * that rule for no gain; both callers already surface the parser's own
+ * message as `fieldErrors.cron`.
+ */
 function validateInput(
   input: ScheduleFormInput,
 ): { name: string; cron: string; goal: string } | ScheduleActionResult {
@@ -226,6 +237,45 @@ async function requireOwnSession(
 }
 
 /**
+ * Confirms `assignedAgent`, when given, names a currently-enabled roster
+ * agent before it is ever written into a schedule row.
+ *
+ * Shared by create and edit for the same reason `requireOwnSession` is: an
+ * edit is caller input too. A schedule stores the name and `buildTaskPrompt`
+ * (`lib/tasks/start.ts`) reads it straight back out — "Delegate this work to
+ * the \"<name>\" subagent" — so a name nothing in the roster answers to
+ * becomes an instruction to delegate to an agent that does not exist, on
+ * every fire, unattended.
+ *
+ * A hard error rather than the planner's silent null (`lib/tasks/planner.ts`
+ * clears an unknown name it invented itself): this is the same situation
+ * `createTaskAction` (`app/tasks/actions.ts`) treats as a validation error —
+ * a human picked from a list that should only ever have offered valid names,
+ * so a name off that list is a bug worth reporting, not noise worth
+ * swallowing. Enabled-ness is included: `getRoster` omits disabled rows, so
+ * an agent switched off after the schedule was written is rejected on the
+ * next edit.
+ */
+async function requireKnownAgent(
+  organizationId: string,
+  assignedAgent: string | null | undefined,
+): Promise<ScheduleActionResult | null> {
+  if (!assignedAgent) {
+    return null;
+  }
+  const roster = await getRoster(organizationId);
+  if (assignedAgent in roster) {
+    return null;
+  }
+  const message = `"${assignedAgent}" is not an enabled agent.`;
+  return {
+    success: false,
+    error: message,
+    fieldErrors: { assignedAgent: message },
+  };
+}
+
+/**
  * Creates a schedule, then registers its pg-boss cron entry
  * (`syncScheduleRegistration`) so it actually starts firing — a schedule row
  * with no registration would sit in the database forever without a
@@ -245,6 +295,14 @@ export async function createScheduleAction(
   const ownershipError = await requireOwnSession(userId, input.sessionId);
   if (ownershipError) {
     return ownershipError;
+  }
+
+  const agentError = await requireKnownAgent(
+    organizationId,
+    input.assignedAgent,
+  );
+  if (agentError) {
+    return agentError;
   }
 
   const result = await createSchedule({
@@ -290,6 +348,14 @@ export async function updateScheduleAction(
   const ownershipError = await requireOwnSession(userId, input.sessionId);
   if (ownershipError) {
     return ownershipError;
+  }
+
+  const agentError = await requireKnownAgent(
+    organizationId,
+    input.assignedAgent,
+  );
+  if (agentError) {
+    return agentError;
   }
 
   const result = await updateSchedule(organizationId, scheduleId, {

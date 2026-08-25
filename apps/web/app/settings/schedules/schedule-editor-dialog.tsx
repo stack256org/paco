@@ -280,6 +280,9 @@ export function ScheduleEditorDialog({
                 ))}
               </SelectContent>
             </Select>
+            {fieldErrors.assignedAgent ? (
+              <p className="text-error text-xs">{fieldErrors.assignedAgent}</p>
+            ) : null}
           </div>
 
           {formError ? (

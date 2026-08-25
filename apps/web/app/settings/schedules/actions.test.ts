@@ -14,8 +14,19 @@ mock.module("@/lib/session/get-server-session", () => ({
   getServerSession: async () => (signedIn ? { user: { id: "user-1" } } : null),
 }));
 
+const requireAdminMock = mock(async () => {
+  if (!signedIn) {
+    throw new Error("Sign in to continue.");
+  }
+  if (!adminOk) {
+    throw new Error("That isn't yours.");
+  }
+  return "user-1";
+});
+
 mock.module("@/lib/admin/require-admin", () => ({
   isAdmin: async (_userId: string) => adminOk,
+  requireAdmin: requireAdminMock,
 }));
 
 mock.module("@/lib/org/membership", () => ({
@@ -36,11 +47,10 @@ mock.module("@/lib/db/sessions", () => ({
   getSessionsByUserId: async (_userId: string) => mySessions,
 }));
 
+let roster: Record<string, unknown> = { explorer: {}, executor: {} };
+
 mock.module("@/lib/db/roster", () => ({
-  getRoster: async (_organizationId: string) => ({
-    explorer: {},
-    executor: {},
-  }),
+  getRoster: async (_organizationId: string) => roster,
 }));
 
 // ── @/lib/db/schedules ───────────────────────────────────────────
@@ -199,8 +209,10 @@ beforeEach(() => {
   memberRole = "member";
   organization = { id: "org-1" };
   mySessions = [{ id: "session-1", title: "My repo", status: "running" }];
+  roster = { explorer: {}, executor: {} };
   store = [];
   fireResult = { ok: true, taskId: "task-1" };
+  requireAdminMock.mockClear();
   listSchedulesMock.mockClear();
   getScheduleMock.mockClear();
   createScheduleMock.mockClear();
@@ -265,6 +277,27 @@ describe("write gate", () => {
     expect(result.success).toBe(true);
     expect(syncScheduleRegistrationMock).toHaveBeenCalledTimes(1);
   });
+
+  /*
+   * The gate has to BE `requireAdmin`, not a line-for-line copy of it —
+   * which is the duplication `lib/admin/require-admin.ts`'s own docstring
+   * exists to prevent ("an admin check that exists in two places is an admin
+   * check that will exist in one place after the next refactor"). Asserting
+   * the shared helper was actually called is the only way to hold that,
+   * since a copy behaves identically right up until one of them changes.
+   */
+  test("every write goes through the shared requireAdmin helper", async () => {
+    adminOk = true;
+    store = [makeSchedule()];
+
+    await createScheduleAction(VALID_INPUT);
+    await updateScheduleAction("sched-1", VALID_INPUT);
+    await setScheduleEnabledAction("sched-1", false);
+    await runScheduleNowAction("sched-1");
+    await deleteScheduleAction("sched-1");
+
+    expect(requireAdminMock).toHaveBeenCalledTimes(5);
+  });
 });
 
 describe("canManageSchedulesAction", () => {
@@ -313,6 +346,72 @@ describe("createScheduleAction validation", () => {
 
     expect(result.success).toBe(false);
   });
+
+  /*
+   * A schedule that names an agent the roster has never heard of still
+   * fires: `buildTaskPrompt` (`lib/tasks/start.ts`) reads the stored name
+   * straight out of the row and instructs the executor to delegate to it.
+   * The picker only ever offers enabled names, and `createTaskAction`
+   * validates the same field on the task path — this is the one write that
+   * did not.
+   */
+  test("an assignedAgent that is not in the roster is rejected", async () => {
+    adminOk = true;
+
+    const result = await createScheduleAction({
+      ...VALID_INPUT,
+      assignedAgent: "ghost",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.fieldErrors?.assignedAgent).toBeDefined();
+    }
+    expect(createScheduleMock).not.toHaveBeenCalled();
+    expect(syncScheduleRegistrationMock).not.toHaveBeenCalled();
+  });
+
+  test("an assignedAgent that IS in the roster is accepted", async () => {
+    adminOk = true;
+
+    const result = await createScheduleAction({
+      ...VALID_INPUT,
+      assignedAgent: "explorer",
+    });
+
+    expect(result.success).toBe(true);
+    expect(store[0]?.assignedAgent).toBe("explorer");
+  });
+
+  test("a null assignedAgent stays null without consulting the roster", async () => {
+    adminOk = true;
+    roster = {};
+
+    const result = await createScheduleAction({
+      ...VALID_INPUT,
+      assignedAgent: null,
+    });
+
+    expect(result.success).toBe(true);
+    expect(store[0]?.assignedAgent).toBeNull();
+  });
+
+  /*
+   * `getRoster` seeds `DEFAULT_ROSTER` lazily, so an agent disabled after a
+   * schedule was written simply drops out of the map — the same "enabled
+   * roster row" test `createTaskAction` applies.
+   */
+  test("an agent that has since been disabled is rejected", async () => {
+    adminOk = true;
+    roster = { executor: {} };
+
+    const result = await createScheduleAction({
+      ...VALID_INPUT,
+      assignedAgent: "explorer",
+    });
+
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("updateScheduleAction validation", () => {
@@ -350,6 +449,21 @@ describe("updateScheduleAction validation", () => {
     expect(syncScheduleRegistrationMock).not.toHaveBeenCalled();
     // The stored row must be untouched by the refused write.
     expect(store[0]?.sessionId).toBe("session-1");
+  });
+
+  /** Same reasoning as the session check: an edit is caller input too. */
+  test("retargeting an existing schedule at an unknown agent is rejected", async () => {
+    adminOk = true;
+    store = [makeSchedule()];
+
+    const result = await updateScheduleAction("sched-1", {
+      ...VALID_INPUT,
+      assignedAgent: "ghost",
+    });
+
+    expect(result.success).toBe(false);
+    expect(updateScheduleMock).not.toHaveBeenCalled();
+    expect(store[0]?.assignedAgent).toBeNull();
   });
 });
 
