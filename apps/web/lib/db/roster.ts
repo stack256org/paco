@@ -156,6 +156,82 @@ export async function upsertRosterAgent(
 }
 
 /**
+ * Rename a non-builtin roster agent, replacing its definition in the same
+ * step.
+ *
+ * Atomic: the insert under `toName` and the delete of `fromName` either both
+ * happen or neither does, inside one `db.transaction`. A conflict on
+ * `toName` is detected via `onConflictDoNothing().returning()` returning no
+ * row — not a preceding `select` a concurrent write could slip in after —
+ * and a builtin `fromName` is refused before anything is written.
+ */
+export async function renameRosterAgent(
+  organizationId: string,
+  fromName: string,
+  toName: string,
+  definition: unknown,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isValidRosterName(toName)) {
+    return {
+      ok: false,
+      error: `Invalid agent name: "${toName}" must match ${ROSTER_NAME_PATTERN}`,
+    };
+  }
+
+  const parsed = agentDefinitionSchema.safeParse(definition);
+  if (!parsed.success) {
+    return { ok: false, error: parsed.error.message };
+  }
+
+  return await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select({ builtin: rosterAgents.builtin })
+      .from(rosterAgents)
+      .where(
+        and(
+          eq(rosterAgents.organizationId, organizationId),
+          eq(rosterAgents.name, fromName),
+        ),
+      );
+
+    if (!existing) {
+      return { ok: false, error: `No roster agent named "${fromName}"` };
+    }
+    if (existing.builtin) {
+      return { ok: false, error: "Builtin agents cannot be renamed" };
+    }
+
+    const inserted = await tx
+      .insert(rosterAgents)
+      .values({
+        id: nanoid(),
+        organizationId,
+        name: toName,
+        definition: parsed.data,
+        builtin: false,
+        enabled: true,
+      })
+      .onConflictDoNothing({ target: ROSTER_ORG_NAME_TARGET })
+      .returning({ id: rosterAgents.id });
+
+    if (inserted.length === 0) {
+      return { ok: false, error: `An agent named "${toName}" already exists.` };
+    }
+
+    await tx
+      .delete(rosterAgents)
+      .where(
+        and(
+          eq(rosterAgents.organizationId, organizationId),
+          eq(rosterAgents.name, fromName),
+        ),
+      );
+
+    return { ok: true };
+  });
+}
+
+/**
  * Remove one roster agent — refused for a builtin row.
  *
  * Builtin rows stay editable (`upsertRosterAgent` does not check `builtin`)

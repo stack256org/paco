@@ -16,6 +16,7 @@ import {
   agentToFormState,
   buildSaveInput,
   emptyFormState,
+  normalizeCustomTool,
 } from "./agent-form-state";
 
 interface AgentEditorDialogProps {
@@ -77,12 +78,10 @@ export function AgentEditorDialog({
   const title = agent ? `Edit ${agent.name}` : "New agent";
 
   function addCustomTool() {
-    const trimmed = newTool.trim();
-    if (!trimmed || form.tools.includes(trimmed)) {
-      setNewTool("");
-      return;
+    const tool = normalizeCustomTool(form.tools, newTool);
+    if (tool) {
+      setForm((prev) => ({ ...prev, tools: [...prev.tools, tool] }));
     }
-    setForm((prev) => ({ ...prev, tools: [...prev.tools, trimmed] }));
     setNewTool("");
   }
 

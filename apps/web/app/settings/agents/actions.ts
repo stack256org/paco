@@ -1,6 +1,7 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
+import { nanoid } from "nanoid";
 import {
   agentDefinitionSchema,
   type AgentDefinition,
@@ -9,6 +10,7 @@ import { requireAdmin } from "@/lib/admin/require-admin";
 import { db } from "@/lib/db/client";
 import {
   deleteRosterAgent,
+  renameRosterAgent,
   setRosterAgentEnabled,
   upsertRosterAgent,
 } from "@/lib/db/roster";
@@ -20,11 +22,15 @@ import { getOrganization } from "@/lib/org/organization";
  *
  * That constant is private to its module, and this file is not allowed to
  * change `roster.ts` (a different task owns it), so the pattern is
- * duplicated here for a fast, field-level error message. `upsertRosterAgent`
+ * duplicated here for a fast, field-level error message. Every write below
+ * (`upsertRosterAgent`, `renameRosterAgent`, the create path's own insert)
  * re-checks the same rule server-side regardless — this copy only decides
  * which input box gets blamed, never whether the write is allowed.
  */
 const ROSTER_NAME_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** Same columns `roster.ts` conflicts every upsert/rename against. */
+const ROSTER_ORG_NAME_TARGET = [rosterAgents.organizationId, rosterAgents.name];
 
 /** One roster row, with the metadata the admin-only list view needs. */
 export interface RosterAgentRow {
@@ -87,6 +93,19 @@ export type SaveRosterAgentResult =
   | { success: true }
   | { success: false; error: string; fieldErrors?: Record<string, string> };
 
+const NAME_FIELD_ERROR: SaveRosterAgentResult = {
+  success: false,
+  error: "That name is not valid.",
+  fieldErrors: {
+    name: "Use lowercase letters, numbers, and hyphens, starting with a letter (up to 32 characters).",
+  },
+};
+
+function nameTakenError(name: string): SaveRosterAgentResult {
+  const message = `An agent named "${name}" already exists.`;
+  return { success: false, error: message, fieldErrors: { name: message } };
+}
+
 /**
  * Create a new roster agent, or replace an existing one — renaming it in the
  * same step when `name` differs from `originalName`.
@@ -97,6 +116,15 @@ export type SaveRosterAgentResult =
  * codebase (see `instance-settings-actions.ts`), because an admin check that
  * silently returned `{ success: false }` would look, to a broken caller,
  * exactly like a validation error rather than a security boundary.
+ *
+ * Three distinct, all-atomic paths — none of them a select-then-write a
+ * concurrent caller could slip between:
+ * - create (`originalName` is `null`): an `INSERT ... ON CONFLICT DO
+ *   NOTHING`, right here — not `upsertRosterAgent`, whose `DO UPDATE` would
+ *   silently overwrite whatever (builtin or not) already owns that name.
+ * - edit in place (`originalName === name`): `upsertRosterAgent`.
+ * - rename (`originalName !== name`): `renameRosterAgent`, which moves the
+ *   row inside one transaction (see `lib/db/roster.ts`).
  */
 export async function saveRosterAgent(input: {
   originalName: string | null;
@@ -108,13 +136,7 @@ export async function saveRosterAgent(input: {
   const { originalName, name, definition } = input;
 
   if (!ROSTER_NAME_PATTERN.test(name)) {
-    return {
-      success: false,
-      error: "That name is not valid.",
-      fieldErrors: {
-        name: "Use lowercase letters, numbers, and hyphens, starting with a letter (up to 32 characters).",
-      },
-    };
+    return NAME_FIELD_ERROR;
   }
 
   const parsedDefinition = agentDefinitionSchema.safeParse(definition);
@@ -135,67 +157,47 @@ export async function saveRosterAgent(input: {
     };
   }
 
-  const [existingByOriginalName] = originalName
-    ? await db
-        .select({ builtin: rosterAgents.builtin })
-        .from(rosterAgents)
-        .where(
-          and(
-            eq(rosterAgents.organizationId, organization.id),
-            eq(rosterAgents.name, originalName),
-          ),
-        )
-    : [];
+  if (originalName === null) {
+    const inserted = await db
+      .insert(rosterAgents)
+      .values({
+        id: nanoid(),
+        organizationId: organization.id,
+        name,
+        definition: parsedDefinition.data,
+        builtin: false,
+        enabled: true,
+      })
+      .onConflictDoNothing({ target: ROSTER_ORG_NAME_TARGET })
+      .returning({ id: rosterAgents.id });
 
-  if (originalName && !existingByOriginalName) {
-    return {
-      success: false,
-      error: `No roster agent named "${originalName}".`,
-    };
+    return inserted.length > 0 ? { success: true } : nameTakenError(name);
   }
 
-  const renaming = originalName !== null && originalName !== name;
-
-  if (renaming && existingByOriginalName?.builtin) {
-    return {
-      success: false,
-      error: "Builtin agents cannot be renamed.",
-      fieldErrors: { name: "Builtin agents cannot be renamed." },
-    };
+  if (originalName === name) {
+    const result = await upsertRosterAgent(
+      organization.id,
+      name,
+      parsedDefinition.data,
+    );
+    return result.ok
+      ? { success: true }
+      : { success: false, error: result.error };
   }
 
-  // A brand-new agent or a rename both land on a name nothing should already
-  // own — `upsertRosterAgent` would otherwise silently overwrite whatever is
-  // already sitting at that name, builtin included.
-  if (originalName === null || renaming) {
-    const [collision] = await db
-      .select({ id: rosterAgents.id })
-      .from(rosterAgents)
-      .where(
-        and(
-          eq(rosterAgents.organizationId, organization.id),
-          eq(rosterAgents.name, name),
-        ),
-      );
-    if (collision) {
-      const message = `An agent named "${name}" already exists.`;
-      return { success: false, error: message, fieldErrors: { name: message } };
-    }
-  }
-
-  const result = await upsertRosterAgent(
+  const result = await renameRosterAgent(
     organization.id,
+    originalName,
     name,
     parsedDefinition.data,
   );
   if (!result.ok) {
-    return { success: false, error: result.error };
+    return {
+      success: false,
+      error: result.error,
+      fieldErrors: { name: result.error },
+    };
   }
-
-  if (renaming && originalName) {
-    await deleteRosterAgent(organization.id, originalName);
-  }
-
   return { success: true };
 }
 

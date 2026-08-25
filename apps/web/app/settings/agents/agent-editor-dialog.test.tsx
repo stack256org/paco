@@ -7,6 +7,7 @@ import {
   buildSaveInput,
   emptyFormState,
   formStateToDefinition,
+  normalizeCustomTool,
 } from "./agent-form-state";
 
 function agent(overrides: Partial<RosterAgentRow> = {}): RosterAgentRow {
@@ -235,5 +236,28 @@ describe("form state -> save payload: save calls the action with edited values",
     const definition = formStateToDefinition(state, null);
 
     expect(definition.maxTurns).toBeUndefined();
+  });
+});
+
+describe("normalizeCustomTool", () => {
+  test("trims surrounding whitespace", () => {
+    expect(normalizeCustomTool([], "  MyTool  ")).toBe("MyTool");
+  });
+
+  test("rejects an entry with whitespace inside it", () => {
+    expect(normalizeCustomTool([], "My Tool")).toBeNull();
+  });
+
+  test("rejects a blank entry", () => {
+    expect(normalizeCustomTool([], "   ")).toBeNull();
+  });
+
+  test("rejects a case-insensitive duplicate, keeping the existing casing", () => {
+    expect(normalizeCustomTool(["Read"], "read")).toBeNull();
+    expect(normalizeCustomTool(["Read"], "READ")).toBeNull();
+  });
+
+  test("accepts a genuinely new tool name", () => {
+    expect(normalizeCustomTool(["Read"], "MyCustomTool")).toBe("MyCustomTool");
   });
 });

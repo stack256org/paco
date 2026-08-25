@@ -18,6 +18,42 @@ type Row = {
 type Predicate = (row: Row) => boolean;
 
 /**
+ * Given an explicit type rather than left to infer from its own initializer
+ * (same reasoning as `lib/org/organization.test.ts`'s `FakeDb`):
+ * `transaction`'s `typeof fakeDb` reference is circular, which TypeScript
+ * resolves as an implicit `any` (TS7022) instead of erroring on it directly.
+ */
+type FakeDb = {
+  select: (columns?: Record<string, unknown>) => {
+    from: (table: unknown) => {
+      where: (predicate: Predicate) => Promise<Record<string, unknown>[]>;
+    };
+  };
+  insert: (table: unknown) => {
+    values: (values: Partial<Row> | Array<Partial<Row>>) => {
+      onConflictDoNothing: (config?: {
+        target?: unknown[];
+      }) => Promise<void> & {
+        returning: (columns?: unknown) => Promise<Row[]>;
+      };
+      onConflictDoUpdate: (config: {
+        target?: unknown[];
+        set: Partial<Row>;
+      }) => Promise<void>;
+    };
+  };
+  update: (table: unknown) => {
+    set: (patch: Partial<Row>) => {
+      where: (predicate: Predicate) => Promise<void>;
+    };
+  };
+  delete: (table: unknown) => {
+    where: (predicate: Predicate) => Promise<void>;
+  };
+  transaction: <T>(fn: (tx: FakeDb) => Promise<T>) => Promise<T>;
+};
+
+/**
  * Same trick as `session-events.test.ts` and `organization.test.ts`: a tiny
  * in-memory store plus real column objects from the schema, so a mocked
  * `eq`/`and` can filter it the way Drizzle would filter real rows, without
@@ -92,7 +128,7 @@ function makeRow(partial: Partial<Row>): Row {
   };
 }
 
-const fakeDb = {
+const fakeDb: FakeDb = {
   select: (columns?: Record<string, unknown>) => ({
     from: (_table: unknown) => ({
       where: (predicate: Predicate) => {
@@ -123,13 +159,25 @@ const fakeDb = {
          * so only those two conflict-aware paths need modelling here.
          */
         onConflictDoNothing: (config?: { target?: unknown[] }) => {
+          const insertedRows: Row[] = [];
           for (const value of rows) {
             if (findConflict(value, config?.target)) {
               continue;
             }
-            store.push(makeRow(value));
+            const newRow = makeRow(value);
+            store.push(newRow);
+            insertedRows.push(newRow);
           }
-          return Promise.resolve();
+          // Awaitable directly (`await ...onConflictDoNothing(cfg)`, as
+          // `seedDefaultRoster` does) *and* chainable with `.returning()`
+          // (as `renameRosterAgent` does) — a real `Promise` with a
+          // `returning` method hung off it satisfies both call shapes.
+          const result = Promise.resolve() as Promise<void> & {
+            returning: (columns?: unknown) => Promise<Row[]>;
+          };
+          result.returning = (_columns?: unknown) =>
+            Promise.resolve(insertedRows.map((row) => ({ ...row })));
+          return result;
         },
         onConflictDoUpdate: (config: {
           target?: unknown[];
@@ -166,7 +214,27 @@ const fakeDb = {
       return Promise.resolve();
     },
   }),
+  /**
+   * A minimal stand-in for a real transaction: runs `fn` against the same
+   * fake db (all of its methods close over the shared `store` variable, so
+   * `tx` and `fakeDb` are interchangeable), snapshotting `store` first and
+   * restoring it if `fn` throws — the property this file's `renameRosterAgent`
+   * tests actually rely on: a failure partway through leaves nothing behind.
+   */
+  transaction: async <T>(fn: (tx: typeof fakeDb) => Promise<T>): Promise<T> => {
+    const snapshot = store.map((row) => ({ ...row }));
+    try {
+      return await fn(fakeDb);
+    } catch (error) {
+      store = snapshot;
+      throw error;
+    }
+  },
 };
+
+// Captured before any test can reassign `fakeDb.delete` to force a mid-
+// transaction failure — restored afterwards so later tests see the real one.
+const originalDelete = fakeDb.delete;
 
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
@@ -174,10 +242,13 @@ const {
   DEFAULT_ROSTER,
   deleteRosterAgent,
   getRoster,
+  renameRosterAgent,
   seedDefaultRoster,
   setRosterAgentEnabled,
   upsertRosterAgent,
 } = await import("./roster");
+
+const VALID_DEFINITION = { description: "d", prompt: "p" };
 
 describe("DEFAULT_ROSTER", () => {
   test("has the four seeded roles", () => {
@@ -466,5 +537,121 @@ describe("setRosterAgentEnabled", () => {
 
     expect(store[0]?.enabled).toBe(false);
     expect(descriptionOf(store[0])).toBe("d");
+  });
+});
+
+describe("renameRosterAgent", () => {
+  test("moves a non-builtin agent to its new name, applying the new definition", async () => {
+    store = [
+      makeRow({
+        name: "old-name",
+        definition: { description: "v1", prompt: "p" },
+      }),
+    ];
+
+    const result = await renameRosterAgent("org-1", "old-name", "new-name", {
+      description: "v2",
+      prompt: "p",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(store.map((row) => row.name)).toEqual(["new-name"]);
+    expect(descriptionOf(store[0])).toBe("v2");
+  });
+
+  test("refuses to rename a builtin agent, leaving it untouched", async () => {
+    store = [
+      makeRow({
+        name: "explorer",
+        builtin: true,
+        definition: VALID_DEFINITION,
+      }),
+    ];
+
+    const result = await renameRosterAgent(
+      "org-1",
+      "explorer",
+      "explorer-2",
+      VALID_DEFINITION,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.map((row) => row.name)).toEqual(["explorer"]);
+  });
+
+  test("refuses when the target name is already taken, leaving both rows as they were", async () => {
+    store = [
+      makeRow({ name: "agent-a", definition: VALID_DEFINITION }),
+      makeRow({ name: "agent-b", definition: VALID_DEFINITION }),
+    ];
+
+    const result = await renameRosterAgent(
+      "org-1",
+      "agent-a",
+      "agent-b",
+      VALID_DEFINITION,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.map((row) => row.name).sort()).toEqual(["agent-a", "agent-b"]);
+  });
+
+  test("reports an error when the source name does not exist", async () => {
+    store = [];
+
+    const result = await renameRosterAgent(
+      "org-1",
+      "nope",
+      "new-name",
+      VALID_DEFINITION,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store).toHaveLength(0);
+  });
+
+  test("rejects an invalid new name without writing anything", async () => {
+    store = [makeRow({ name: "old-name", definition: VALID_DEFINITION })];
+
+    const result = await renameRosterAgent(
+      "org-1",
+      "old-name",
+      "Not Valid!",
+      VALID_DEFINITION,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(store.map((row) => row.name)).toEqual(["old-name"]);
+  });
+
+  test("rejects an invalid definition without writing anything", async () => {
+    store = [makeRow({ name: "old-name", definition: VALID_DEFINITION })];
+
+    const result = await renameRosterAgent("org-1", "old-name", "new-name", {
+      prompt: "missing description",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(store.map((row) => row.name)).toEqual(["old-name"]);
+  });
+
+  test("is atomic: a failure deleting the old row rolls back the insert of the new one", async () => {
+    store = [makeRow({ name: "old-name", definition: VALID_DEFINITION })];
+
+    // Forces the transaction to fail after the insert has already happened,
+    // so a real (non-atomic) implementation would leave both rows behind.
+    fakeDb.delete = () => {
+      throw new Error("simulated failure deleting the old row");
+    };
+
+    await expect(
+      renameRosterAgent("org-1", "old-name", "new-name", VALID_DEFINITION),
+    ).rejects.toThrow();
+
+    fakeDb.delete = originalDelete;
+
+    // The snapshot taken before the transaction is restored: the insert
+    // that already ran is undone along with everything else.
+    expect(store.map((row) => row.name)).toEqual(["old-name"]);
   });
 });

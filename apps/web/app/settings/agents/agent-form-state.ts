@@ -90,6 +90,34 @@ export function formStateToDefinition(
   };
 }
 
+/**
+ * Validates and normalizes one free-text tool name before it joins the
+ * allowlist.
+ *
+ * A tool name is a single identifier, never "Foo Bar" — an entry with
+ * internal whitespace is rejected outright rather than silently split or
+ * stripped, since either would add a tool the admin never typed. Dedup is
+ * case-insensitive against what's already there, keeping whichever casing
+ * is already present (`"Read"` stays `"Read"` even if the new input was
+ * `"read"`) rather than adding a near-duplicate that only differs by case.
+ *
+ * Returns `null` for nothing-to-add: blank input, internal whitespace, or an
+ * existing entry under any casing.
+ */
+export function normalizeCustomTool(
+  existingTools: string[],
+  input: string,
+): string | null {
+  const trimmed = input.trim();
+  if (!trimmed || /\s/.test(trimmed)) {
+    return null;
+  }
+  const alreadyPresent = existingTools.some(
+    (tool) => tool.toLowerCase() === trimmed.toLowerCase(),
+  );
+  return alreadyPresent ? null : trimmed;
+}
+
 /** The payload `saveRosterAgent` expects, built from one submission. */
 export interface SaveRosterAgentInput {
   originalName: string | null;

@@ -17,6 +17,42 @@ type Row = {
 type Predicate = (row: Row) => boolean;
 
 /**
+ * Given an explicit type rather than left to infer from its own initializer
+ * (same reasoning as `lib/org/organization.test.ts`'s `FakeDb`):
+ * `transaction`'s `typeof fakeDb` reference is circular, which TypeScript
+ * resolves as an implicit `any` (TS7022) instead of erroring on it directly.
+ */
+type FakeDb = {
+  select: (columns?: Record<string, unknown>) => {
+    from: (table: unknown) => {
+      where: (predicate: Predicate) => Promise<Record<string, unknown>[]>;
+    };
+  };
+  insert: (table: unknown) => {
+    values: (values: Partial<Row> | Array<Partial<Row>>) => {
+      onConflictDoNothing: (config?: {
+        target?: unknown[];
+      }) => Promise<void> & {
+        returning: (columns?: unknown) => Promise<Row[]>;
+      };
+      onConflictDoUpdate: (config: {
+        target?: unknown[];
+        set: Partial<Row>;
+      }) => Promise<void>;
+    };
+  };
+  update: (table: unknown) => {
+    set: (patch: Partial<Row>) => {
+      where: (predicate: Predicate) => Promise<void>;
+    };
+  };
+  delete: (table: unknown) => {
+    where: (predicate: Predicate) => Promise<void>;
+  };
+  transaction: <T>(fn: (tx: FakeDb) => Promise<T>) => Promise<T>;
+};
+
+/**
  * Same fake-db trick as `lib/db/roster.test.ts`: a tiny in-memory store plus
  * real column objects from the schema, so a mocked `eq`/`and` filters it the
  * way Drizzle would filter real rows. Copied rather than shared because this
@@ -82,7 +118,7 @@ function makeRow(partial: Partial<Row>): Row {
   };
 }
 
-const fakeDb = {
+const fakeDb: FakeDb = {
   select: (columns?: Record<string, unknown>) => ({
     from: (_table: unknown) => ({
       where: (predicate: Predicate) => {
@@ -107,13 +143,23 @@ const fakeDb = {
       const rows = Array.isArray(values) ? values : [values];
       return {
         onConflictDoNothing: (config?: { target?: unknown[] }) => {
+          const insertedRows: Row[] = [];
           for (const value of rows) {
             if (findConflict(value, config?.target)) {
               continue;
             }
-            store.push(makeRow(value));
+            const newRow = makeRow(value);
+            store.push(newRow);
+            insertedRows.push(newRow);
           }
-          return Promise.resolve();
+          // Awaitable directly, and chainable with `.returning()` — see
+          // `lib/db/roster.test.ts`'s identical fake for why both are needed.
+          const result = Promise.resolve() as Promise<void> & {
+            returning: (columns?: unknown) => Promise<Row[]>;
+          };
+          result.returning = (_columns?: unknown) =>
+            Promise.resolve(insertedRows.map((row) => ({ ...row })));
+          return result;
         },
         onConflictDoUpdate: (config: {
           target?: unknown[];
@@ -150,6 +196,20 @@ const fakeDb = {
       return Promise.resolve();
     },
   }),
+  /**
+   * `saveRosterAgent`'s rename path calls the real `renameRosterAgent`,
+   * which runs inside `db.transaction` — snapshot/restore on throw, same as
+   * `lib/db/roster.test.ts`'s fake.
+   */
+  transaction: async <T>(fn: (tx: typeof fakeDb) => Promise<T>): Promise<T> => {
+    const snapshot = store.map((row) => ({ ...row }));
+    try {
+      return await fn(fakeDb);
+    } catch (error) {
+      store = snapshot;
+      throw error;
+    }
+  },
 };
 
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
