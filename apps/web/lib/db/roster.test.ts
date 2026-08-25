@@ -61,6 +61,23 @@ function descriptionOf(row: Row | undefined): string | undefined {
   return definition?.description;
 }
 
+/**
+ * Resolves a real Postgres `ON CONFLICT (target...)` clause against the
+ * fake store: finds the row (if any) whose columns named by `target` all
+ * match `value`'s. Mirrors `roster_agents_org_name_idx`, the only unique
+ * index `roster.ts` ever conflicts against.
+ */
+function findConflict(
+  value: Partial<Row>,
+  target: unknown[] | undefined,
+): Row | undefined {
+  if (!target) {
+    return undefined;
+  }
+  const keys = target.map((column) => keyFor(column));
+  return store.find((row) => keys.every((key) => row[key] === value[key]));
+}
+
 function makeRow(partial: Partial<Row>): Row {
   const now = new Date();
   return {
@@ -98,10 +115,37 @@ const fakeDb = {
   insert: (_table: unknown) => ({
     values: (values: Partial<Row> | Array<Partial<Row>>) => {
       const rows = Array.isArray(values) ? values : [values];
-      for (const value of rows) {
-        store.push(makeRow(value));
-      }
-      return Promise.resolve();
+      return {
+        /**
+         * Models `roster_agents_org_name_idx`: a plain insert would throw in
+         * real Postgres on a duplicate (organizationId, name), but nothing
+         * in `roster.ts` inserts without an `onConflict*` clause any more,
+         * so only those two conflict-aware paths need modelling here.
+         */
+        onConflictDoNothing: (config?: { target?: unknown[] }) => {
+          for (const value of rows) {
+            if (findConflict(value, config?.target)) {
+              continue;
+            }
+            store.push(makeRow(value));
+          }
+          return Promise.resolve();
+        },
+        onConflictDoUpdate: (config: {
+          target?: unknown[];
+          set: Partial<Row>;
+        }) => {
+          for (const value of rows) {
+            const existing = findConflict(value, config.target);
+            if (existing) {
+              Object.assign(existing, config.set);
+            } else {
+              store.push(makeRow(value));
+            }
+          }
+          return Promise.resolve();
+        },
+      };
     },
   }),
   update: (_table: unknown) => ({
@@ -199,6 +243,24 @@ describe("seedDefaultRoster", () => {
       Object.keys(DEFAULT_ROSTER).length,
     );
   });
+
+  test("two concurrent calls on a fresh org insert exactly four rows, never throwing", async () => {
+    store = [];
+
+    // Both calls start before either finishes seeding — the race this
+    // guards against: two `getRoster` calls (or an org-creation call racing
+    // a lazy-seed call) hitting an org with zero rows at the same moment.
+    // Before this used `onConflictDoNothing`, a select-then-insert version
+    // let both calls compute the same "four missing" list from a
+    // pre-insert snapshot and both insert it, doubling the rows in this
+    // fake and throwing a unique-violation against real Postgres.
+    await Promise.all([seedDefaultRoster("org-1"), seedDefaultRoster("org-1")]);
+
+    expect(store).toHaveLength(Object.keys(DEFAULT_ROSTER).length);
+    expect(new Set(store.map((row) => row.name))).toEqual(
+      new Set(Object.keys(DEFAULT_ROSTER)),
+    );
+  });
 });
 
 describe("getRoster", () => {
@@ -267,6 +329,21 @@ describe("getRoster", () => {
     expect(Object.keys(rosterOne)).not.toContain("custom-agent");
     expect(Object.keys(rosterTwo)).toContain("custom-agent");
   });
+
+  test("two concurrent calls on an empty org both resolve to the four defaults", async () => {
+    store = [];
+
+    const [rosterA, rosterB] = await Promise.all([
+      getRoster("org-1"),
+      getRoster("org-1"),
+    ]);
+
+    const expectedNames = new Set(Object.keys(DEFAULT_ROSTER));
+    expect(new Set(Object.keys(rosterA))).toEqual(expectedNames);
+    expect(new Set(Object.keys(rosterB))).toEqual(expectedNames);
+    // No duplicate rows landed in the store either.
+    expect(store).toHaveLength(Object.keys(DEFAULT_ROSTER).length);
+  });
 });
 
 describe("upsertRosterAgent", () => {
@@ -317,6 +394,30 @@ describe("upsertRosterAgent", () => {
 
     expect(store).toHaveLength(1);
     expect(descriptionOf(store[0])).toBe("v2");
+  });
+
+  test("updating an existing builtin agent keeps it builtin", async () => {
+    store = [];
+    await seedDefaultRoster("org-1");
+
+    const result = await upsertRosterAgent("org-1", "explorer", {
+      description: "customised explorer",
+      prompt: "You are a customised explorer.",
+      model: "opus",
+    });
+
+    expect(result.ok).toBe(true);
+    const explorerRow = store.find(
+      (row) => row.organizationId === "org-1" && row.name === "explorer",
+    );
+    expect(explorerRow?.builtin).toBe(true);
+    expect(descriptionOf(explorerRow)).toBe("customised explorer");
+    // No duplicate row was created for the same (org, name).
+    expect(
+      store.filter(
+        (row) => row.name === "explorer" && row.organizationId === "org-1",
+      ),
+    ).toHaveLength(1);
   });
 });
 

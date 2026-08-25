@@ -1,12 +1,9 @@
 import "server-only";
 
-import { DEFAULT_AGENTS } from "@paco/claude-code";
+import { DEFAULT_AGENTS, type ClaudeAgentDefinition } from "@paco/claude-code";
 import { and, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import {
-  agentDefinitionSchema,
-  type AgentDefinition,
-} from "@/lib/agent/agent-definition-schema";
+import { agentDefinitionSchema } from "@/lib/agent/agent-definition-schema";
 import { db } from "@/lib/db/client";
 import { rosterAgents } from "@/lib/db/schema";
 
@@ -24,6 +21,15 @@ function isValidRosterName(name: string): boolean {
 }
 
 /**
+ * The columns that make a roster row unique: one name per organisation.
+ *
+ * Passed to every `onConflict*` call below so idempotence comes from the
+ * database's unique index (`roster_agents_org_name_idx`), not from a
+ * check-then-write race that two concurrent callers could both pass.
+ */
+const ROSTER_ORG_NAME_TARGET = [rosterAgents.organizationId, rosterAgents.name];
+
+/**
  * The four agents every organisation starts with.
  *
  * `explorer` and `executor` are copied verbatim from `@paco/claude-code`'s
@@ -31,7 +37,7 @@ function isValidRosterName(name: string): boolean {
  * the CLI integration itself. `reviewer` and `designer` exist only here:
  * they are Paco-specific roles with no equivalent in a bare `claude` run.
  */
-export const DEFAULT_ROSTER: Record<string, AgentDefinition> = {
+export const DEFAULT_ROSTER: Record<string, ClaudeAgentDefinition> = {
   ...DEFAULT_AGENTS,
   reviewer: {
     description:
@@ -62,11 +68,14 @@ export const DEFAULT_ROSTER: Record<string, AgentDefinition> = {
  *
  * Seeds lazily when the organisation has zero rows, so an existing dev
  * database — created before this table existed — gets a working roster on
- * first read instead of an empty one.
+ * first read instead of an empty one. Safe under concurrent callers: two
+ * `getRoster` calls racing on an empty org both call `seedDefaultRoster`,
+ * which resolves the collision through the database's unique index rather
+ * than throwing (see there), so both re-reads see the seeded rows.
  */
 export async function getRoster(
   organizationId: string,
-): Promise<Record<string, AgentDefinition>> {
+): Promise<Record<string, ClaudeAgentDefinition>> {
   let rows = await db
     .select()
     .from(rosterAgents)
@@ -80,7 +89,7 @@ export async function getRoster(
       .where(eq(rosterAgents.organizationId, organizationId));
   }
 
-  const roster: Record<string, AgentDefinition> = {};
+  const roster: Record<string, ClaudeAgentDefinition> = {};
   for (const row of rows) {
     if (!row.enabled) {
       continue;
@@ -103,7 +112,13 @@ export async function getRoster(
  * Create or replace one roster agent, validating the definition first.
  *
  * Validation happens before any database call — an invalid definition never
- * reaches a row, builtin or not.
+ * reaches a row, builtin or not. The write itself is a single
+ * `INSERT ... ON CONFLICT DO UPDATE`, not a select-then-branch: two
+ * concurrent upserts of the same (org, name) would otherwise both see "no
+ * existing row" and both try to insert, and the loser would crash instead of
+ * updating. `builtin` is deliberately absent from the conflict's `set` — an
+ * upsert can change what a builtin row does, but never turn it into a
+ * deletable one.
  */
 export async function upsertRosterAgent(
   organizationId: string,
@@ -122,31 +137,20 @@ export async function upsertRosterAgent(
     return { ok: false, error: parsed.error.message };
   }
 
-  const [existing] = await db
-    .select({ id: rosterAgents.id })
-    .from(rosterAgents)
-    .where(
-      and(
-        eq(rosterAgents.organizationId, organizationId),
-        eq(rosterAgents.name, name),
-      ),
-    );
-
-  if (existing) {
-    await db
-      .update(rosterAgents)
-      .set({ definition: parsed.data, updatedAt: new Date() })
-      .where(eq(rosterAgents.id, existing.id));
-  } else {
-    await db.insert(rosterAgents).values({
+  await db
+    .insert(rosterAgents)
+    .values({
       id: nanoid(),
       organizationId,
       name,
       definition: parsed.data,
       builtin: false,
       enabled: true,
+    })
+    .onConflictDoUpdate({
+      target: ROSTER_ORG_NAME_TARGET,
+      set: { definition: parsed.data, updatedAt: new Date() },
     });
-  }
 
   return { ok: true };
 }
@@ -204,36 +208,35 @@ export async function setRosterAgentEnabled(
 /**
  * Insert whichever `DEFAULT_ROSTER` agents an organisation is missing.
  *
- * Idempotent: called on every organisation creation (so it does something
- * exactly once for a fresh org) and lazily from `getRoster` (so it does
- * nothing for an org that already has rows). Only fills in gaps — it never
- * overwrites a row a user has already edited or removed, builtin or not.
+ * Idempotent by database constraint, not by a preceding read: the insert
+ * carries all four defaults every time and relies on
+ * `roster_agents_org_name_idx` plus `onConflictDoNothing` to silently drop
+ * whichever rows already exist. A select-then-filter-then-insert version of
+ * this raced two concurrent callers (both organisation creation and
+ * `getRoster`'s lazy path can call this) — both would see zero existing rows
+ * and both attempt to insert all four, and the second insert would crash on
+ * the unique index instead of no-op'ing. `ON CONFLICT DO NOTHING` in a
+ * multi-row insert applies per row, so a partially-seeded org (some rows
+ * present, some missing) still gets exactly the missing ones inserted.
+ *
+ * Never overwrites a row a user has already edited or removed, builtin or
+ * not — a conflict is dropped, not merged.
  */
 export async function seedDefaultRoster(organizationId: string): Promise<void> {
-  const existing = await db
-    .select({ name: rosterAgents.name })
-    .from(rosterAgents)
-    .where(eq(rosterAgents.organizationId, organizationId));
-  const existingNames = new Set(existing.map((row) => row.name));
-
-  const missing = Object.entries(DEFAULT_ROSTER).filter(
-    ([name]) => !existingNames.has(name),
-  );
-  if (missing.length === 0) {
-    return;
-  }
-
   const now = new Date();
-  await db.insert(rosterAgents).values(
-    missing.map(([name, definition]) => ({
-      id: nanoid(),
-      organizationId,
-      name,
-      definition,
-      builtin: true,
-      enabled: true,
-      createdAt: now,
-      updatedAt: now,
-    })),
-  );
+  await db
+    .insert(rosterAgents)
+    .values(
+      Object.entries(DEFAULT_ROSTER).map(([name, definition]) => ({
+        id: nanoid(),
+        organizationId,
+        name,
+        definition,
+        builtin: true,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+      })),
+    )
+    .onConflictDoNothing({ target: ROSTER_ORG_NAME_TARGET });
 }
