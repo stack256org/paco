@@ -9,6 +9,7 @@ import {
   type UIMessageChunk,
 } from "ai";
 import type { ClaudeRunUsage } from "@paco/claude-code";
+import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { appUrl } from "@/lib/app-url";
 import {
@@ -950,6 +951,10 @@ const runAgentStep = async (
   const stepStartedAt = new Date();
   const abortController = new AbortController();
   const stopMonitor = startStopMonitor(workflowRunId, abortController);
+  // Declared outside the try so the catch branches below can still record
+  // the turn's end even though the recorder itself is created part-way
+  // through the try block.
+  let recorder: TurnEventRecorder | undefined;
 
   try {
     // Claude Code keeps its own conversation history, so only the newest user
@@ -976,6 +981,11 @@ const runAgentStep = async (
      */
     const approvalUrl = `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
 
+    // Policy is hardcoded to "steer" until Task 10 makes it dynamic per turn.
+    recorder = new TurnEventRecorder(chatId, crypto.randomUUID());
+    await recorder.start({ messageId, prompt, policy: "steer" });
+    recorder.assertPromptLogged(prompt);
+
     const step = await runAgentTurn<WebAgentUIMessage>({
       prompt,
       options: agentOptions,
@@ -994,7 +1004,18 @@ const runAgentStep = async (
         } finally {
           writer.releaseLock();
         }
+        // Narrowing doesn't cross the closure boundary here; recorder is
+        // always assigned by the time onChunk runs.
+        recorder?.chunk(chunk);
       },
+    });
+
+    await recorder.finish({
+      finishReason: step.finishReason,
+      isError: step.isError,
+      usage: step.usage,
+      costUsd: step.costUsd,
+      ...(step.steered ? { steered: step.steered } : {}),
     });
 
     // Persist the session id so the next turn resumes instead of starting over.
@@ -1073,6 +1094,7 @@ const runAgentStep = async (
 
     if (isAbortError(error)) {
       const abortedFinishReason: FinishReason = "stop";
+      await recorder?.finish({ finishReason: "stop", isError: false });
       return {
         responseMessage: undefined,
         responseMessages: [] as ModelMessage[],
@@ -1089,6 +1111,8 @@ const runAgentStep = async (
         ),
       };
     }
+
+    await recorder?.finish({ finishReason: "error", isError: true });
 
     const errorWithStepTiming =
       error instanceof Error ? error : new Error(String(error));

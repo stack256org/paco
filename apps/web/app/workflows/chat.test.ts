@@ -18,6 +18,13 @@ mock.module("@/lib/db/github-tokens", () => ({
   getGithubToken: async () => null,
 }));
 
+// The workflow now records session events for every turn via
+// TurnEventRecorder, which appends through this module. Stub it so the
+// workflow tests stay hermetic instead of touching a real Postgres client.
+mock.module("@/lib/db/session-events", () => ({
+  appendSessionEvents: mock(() => Promise.resolve()),
+}));
+
 // ── Spy state ──────────────────────────────────────────────────────
 
 const writtenChunks: UIMessageChunk[] = [];
