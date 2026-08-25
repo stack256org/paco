@@ -37,8 +37,47 @@ mock.module("@/lib/plugins/contributions", () => ({
   pluginSkillContributions: pluginSkillContributionsSpy,
 }));
 
-const { buildChatEnvironmentDetails, resolveChatAgents, resolveChatSkills } =
-  await import("./chat-environment");
+type FakeEnabledPlugin = { id: string; manifest: unknown; tools: unknown[] };
+type FakeMcpServerSpec = {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+};
+
+let ensurePluginsStartedCalls = 0;
+const ensurePluginsStartedSpy = mock(async () => {
+  ensurePluginsStartedCalls++;
+});
+let enabledPluginsToReturn: FakeEnabledPlugin[] = [];
+const listEnabledPluginsForMcpSpy = mock(
+  async (): Promise<FakeEnabledPlugin[]> => enabledPluginsToReturn,
+);
+mock.module("@/lib/plugins/registry", () => ({
+  ensurePluginsStarted: ensurePluginsStartedSpy,
+  listEnabledPluginsForMcp: listEnabledPluginsForMcpSpy,
+}));
+
+let mcpConfigToReturn: Record<string, FakeMcpServerSpec> = {};
+let buildPluginMcpConfigCalls: Array<{
+  enabled: FakeEnabledPlugin[];
+  opts: { internalUrl: string };
+}> = [];
+const buildPluginMcpConfigSpy = mock(
+  (enabled: FakeEnabledPlugin[], opts: { internalUrl: string }) => {
+    buildPluginMcpConfigCalls.push({ enabled, opts });
+    return mcpConfigToReturn;
+  },
+);
+mock.module("@/lib/plugins/mcp-bridge", () => ({
+  buildPluginMcpConfig: buildPluginMcpConfigSpy,
+}));
+
+const {
+  buildChatEnvironmentDetails,
+  resolveChatAgents,
+  resolveChatMcpServers,
+  resolveChatSkills,
+} = await import("./chat-environment");
 
 function skill(name: string, description = `${name} description`): FakeSkill {
   return {
@@ -234,5 +273,86 @@ describe("resolveChatSkills", () => {
       ),
     );
     warnSpy.mockRestore();
+  });
+});
+
+describe("resolveChatMcpServers", () => {
+  beforeEach(() => {
+    ensurePluginsStartedCalls = 0;
+    ensurePluginsStartedSpy.mockClear();
+    ensurePluginsStartedSpy.mockImplementation(async () => {
+      ensurePluginsStartedCalls++;
+    });
+    enabledPluginsToReturn = [];
+    listEnabledPluginsForMcpSpy.mockClear();
+    mcpConfigToReturn = {};
+    buildPluginMcpConfigCalls = [];
+    buildPluginMcpConfigSpy.mockClear();
+  });
+
+  test("returns undefined, and never calls buildPluginMcpConfig, when no plugin is enabled", async () => {
+    enabledPluginsToReturn = [];
+
+    const result = await resolveChatMcpServers();
+
+    expect(result).toBeUndefined();
+    expect(buildPluginMcpConfigCalls).toHaveLength(0);
+  });
+
+  test("ensures plugins are started before reading the running registry", async () => {
+    enabledPluginsToReturn = [];
+
+    await resolveChatMcpServers();
+
+    expect(ensurePluginsStartedCalls).toBe(1);
+  });
+
+  test("carries the built mcp config for a turn's enabled plugins", async () => {
+    enabledPluginsToReturn = [
+      { id: "demo-plugin", manifest: { name: "demo-plugin" }, tools: [] },
+    ];
+    mcpConfigToReturn = {
+      "paco-plugins": { command: "node", args: ["bridge.ts"], env: {} },
+    };
+
+    const result = await resolveChatMcpServers();
+
+    expect(result).toEqual(mcpConfigToReturn);
+    expect(buildPluginMcpConfigCalls).toHaveLength(1);
+    expect(buildPluginMcpConfigCalls[0]?.enabled).toEqual(
+      enabledPluginsToReturn,
+    );
+    // Loopback, not the public origin — the bridge script runs as its own
+    // process on this same machine (see the function's own doc).
+    expect(buildPluginMcpConfigCalls[0]?.opts.internalUrl).toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/api\/internal\/plugin-tools$/,
+    );
+  });
+
+  test("returns undefined when the built config has no entries", async () => {
+    enabledPluginsToReturn = [
+      { id: "demo-plugin", manifest: { name: "demo-plugin" }, tools: [] },
+    ];
+    mcpConfigToReturn = {};
+
+    const result = await resolveChatMcpServers();
+
+    expect(result).toBeUndefined();
+  });
+
+  test("never throws — resolves undefined when ensurePluginsStarted fails", async () => {
+    ensurePluginsStartedSpy.mockImplementation(async () => {
+      throw new Error("plugin subsystem is down");
+    });
+
+    await expect(resolveChatMcpServers()).resolves.toBeUndefined();
+  });
+
+  test("never throws — resolves undefined when listEnabledPluginsForMcp fails", async () => {
+    listEnabledPluginsForMcpSpy.mockImplementation(async () => {
+      throw new Error("db is down");
+    });
+
+    await expect(resolveChatMcpServers()).resolves.toBeUndefined();
   });
 });

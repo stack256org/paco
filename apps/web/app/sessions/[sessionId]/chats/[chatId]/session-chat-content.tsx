@@ -36,6 +36,7 @@ import {
   type PrDeploymentResponse,
 } from "@/lib/github/queries/deployment";
 import type { CheckRun } from "@/lib/github/queries/pr";
+import type { PluginRendererInfo } from "@/app/lib/render-tool";
 import type {
   WebAgentSnippetDataPart,
   WebAgentUIMessage,
@@ -212,6 +213,7 @@ export function SessionChatContent({
   messageDurationMap,
   messageStartedAtMap,
   lastUserMessageSentAt,
+  pluginRenderers,
 }: {
   initialIsOnlyChatInSession: boolean;
   /** Pre-computed generation duration (ms) per assistant message ID */
@@ -220,6 +222,14 @@ export function SessionChatContent({
   messageStartedAtMap: Record<string, string>;
   /** Fallback: last user message's createdAt, for refresh-during-stream */
   lastUserMessageSentAt: string | null;
+  /**
+   * Enabled plugins' registered renderers, resolved server-side
+   * (`enabledPluginRenderers`, `lib/plugins/renderer-info.ts`) and threaded
+   * straight through to `ToolCall`'s `pluginRenderers` prop — see that
+   * prop's own doc for why a tool call whose name matches one of these
+   * renders in a sandboxed iframe instead of the generic fallback.
+   */
+  pluginRenderers: PluginRendererInfo[];
 }) {
   const router = useRouter();
   const [input, setInput] = useState("");
@@ -2728,6 +2738,7 @@ export function SessionChatContent({
                                       <ToolCall
                                         part={p as WebAgentUIToolPart}
                                         isStreaming={isMessageStreaming}
+                                        pluginRenderers={pluginRenderers}
                                         onApprove={(id) =>
                                           addToolApprovalResponse({
                                             id,

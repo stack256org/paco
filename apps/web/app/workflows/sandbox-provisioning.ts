@@ -30,6 +30,24 @@ async function runProvisioning(sessionId: string, runId: string) {
   }
 
   try {
+    // Enabled plugins should already be running by the time this session's
+    // first turn starts — an `events:subscribe` plugin needs to be
+    // registered with the fan-out, and a `tools:register` plugin needs to
+    // be up, before there is anything for either to miss. Never throws
+    // (see its own doc comment), so a plugin failing to start can never
+    // fail sandbox provisioning.
+    //
+    // Imported dynamically, not statically at module scope: a static
+    // import here closes a real cycle — `registry.ts` imports
+    // `capability-handlers.ts`, whose `messages:post` handler reaches
+    // `app/workflows/chat.ts` -> `chat-sandbox-runtime.ts` ->
+    // `lib/sandbox/provisioning-kick.ts` -> straight back to this file.
+    // Loading it only when this step actually runs breaks that cycle, the
+    // same way `app/workflows/chat.ts` already dynamically imports
+    // `chat-environment.ts` for the same underlying reason.
+    const { ensurePluginsStarted } = await import("@/lib/plugins/registry");
+    await ensurePluginsStarted();
+
     const result = await provisionSessionSandbox({ sessionId });
     await clearSessionSandboxProvisioningRunIdIfOwned(sessionId, runId);
     return {

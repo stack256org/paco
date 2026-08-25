@@ -12,6 +12,7 @@ import {
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { buildModelOptions } from "@/lib/model-options";
 import { listAvailableModels } from "@/lib/model-catalog";
+import { enabledPluginRenderers } from "@/lib/plugins/renderer-info";
 import { getServerSession } from "@/lib/session/get-server-session";
 import { parseThemePreference, THEME_COOKIE_NAME } from "@/lib/theme";
 import { getInitialIsOnlyChatInSession } from "./only-chat-in-session";
@@ -101,13 +102,16 @@ export default async function SessionChatPage({
   if (sessionRecord.userId !== session.user.id) {
     redirect("/");
   }
-  // Fetch chat, messages, models and the chat list in parallel
-  const [chat, dbMessages, initialModels, sessionChats] = await Promise.all([
-    getChatByIdWithRetry(chatId, sessionId),
-    getChatMessages(chatId),
-    getInitialModels(),
-    getChatSummariesBySessionId(sessionId, session.user.id),
-  ]);
+  // Fetch chat, messages, models, the chat list, and enabled plugins'
+  // renderer slots in parallel.
+  const [chat, dbMessages, initialModels, sessionChats, pluginRenderers] =
+    await Promise.all([
+      getChatByIdWithRetry(chatId, sessionId),
+      getChatMessages(chatId),
+      getInitialModels(),
+      getChatSummariesBySessionId(sessionId, session.user.id),
+      enabledPluginRenderers(),
+    ]);
 
   if (!chat) {
     if (isOptimisticChatId(chatId)) {
@@ -182,6 +186,7 @@ export default async function SessionChatPage({
           messageDurationMap={messageDurationMap}
           messageStartedAtMap={messageStartedAtMap}
           lastUserMessageSentAt={lastUserMessageSentAt}
+          pluginRenderers={pluginRenderers}
         />
       </SessionChatProvider>
     </DiffsProvider>

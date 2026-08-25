@@ -1,31 +1,73 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { PluginManifest } from "@paco/plugin-kit";
 import type { PluginRow } from "@/lib/db/schema";
 
 mock.module("server-only", () => ({}));
 
-type StartResult = { tools: [] };
+type FakeTool = { name: string; description: string; inputSchema: unknown };
+type StartResult = { tools: FakeTool[] };
 let startBehavior: (id: string) => Promise<StartResult>;
 let startedIds: string[];
 let stoppedIds: string[];
 
+type FakeHostState = "starting" | "running" | "crashed" | "stopped";
+
 class FakePluginHost {
   static instances: FakePluginHost[] = [];
   id: string;
+  state: FakeHostState = "starting";
+  private readonly crashCallbacks: Array<(error: string) => void> = [];
   constructor(options: { descriptor: { manifest: { name: string } } }) {
     this.id = options.descriptor.manifest.name;
     FakePluginHost.instances.push(this);
   }
+  onCrash(callback: (error: string) => void): void {
+    this.crashCallbacks.push(callback);
+  }
   async start(): Promise<StartResult> {
     startedIds.push(this.id);
-    return await startBehavior(this.id);
+    try {
+      const result = await startBehavior(this.id);
+      this.state = "running";
+      return result;
+    } catch (error) {
+      this.state = "crashed";
+      throw error;
+    }
   }
   async stop(): Promise<void> {
     stoppedIds.push(this.id);
+    this.state = "stopped";
+  }
+  /** Test helper: simulate a crash arriving after a successful start. */
+  simulateCrash(reason: string): void {
+    this.state = "crashed";
+    for (const callback of this.crashCallbacks) {
+      callback(reason);
+    }
   }
 }
 
 mock.module("@paco/plugin-host", () => ({ PluginHost: FakePluginHost }));
+
+let fanoutRegisterCalls: FakePluginHost[];
+let fanoutUnregisterCalls: FakePluginHost[];
+let fanoutStartCalls: number;
+const fakeFanout = {
+  register: (host: FakePluginHost) => {
+    fanoutRegisterCalls.push(host);
+  },
+  unregister: (host: FakePluginHost) => {
+    fanoutUnregisterCalls.push(host);
+  },
+  start: () => {
+    fanoutStartCalls++;
+  },
+};
+
+mock.module("@/lib/plugins/plugin-fanout", () => ({
+  getPluginEventFanout: () => fakeFanout,
+}));
 
 let discoverBehavior: (
   rootDir: string,
@@ -39,7 +81,10 @@ mock.module("@paco/plugin-kit", () => ({
 }));
 
 type IntegrityResult = { ok: true } | { ok: false; error: string };
-let integrityBehavior: (id: string, contentHash: string) => Promise<IntegrityResult>;
+let integrityBehavior: (
+  id: string,
+  contentHash: string,
+) => Promise<IntegrityResult>;
 
 mock.module("@/lib/plugins/install", () => ({
   pluginDir: (id: string) => `/plugins/${id}`,
@@ -62,6 +107,7 @@ mock.module("@/lib/db/plugins", () => ({
 const {
   ensurePluginsStarted,
   getPluginRegistry,
+  listEnabledPluginsForMcp,
   startPluginHost,
   stopPluginHost,
 } = await import("./registry.ts");
@@ -82,28 +128,34 @@ function row(id: string, enabled = true): PluginRow {
     grantedCapabilities: [],
     consentedNetDomains: [],
     enabled,
+    ingressSecret: null,
     installedAt: new Date(),
     updatedAt: new Date(),
   };
 }
 
+function resetGlobalRegistryState(): void {
+  const globalForTest = globalThis as typeof globalThis & {
+    __pacoPluginRegistry?: unknown;
+    __pacoPluginStartLocks?: unknown;
+    __pacoPluginTools?: unknown;
+    __pacoPluginRestartAttempts?: unknown;
+  };
+  globalForTest.__pacoPluginRegistry = undefined;
+  globalForTest.__pacoPluginStartLocks = undefined;
+  globalForTest.__pacoPluginTools = undefined;
+  globalForTest.__pacoPluginRestartAttempts = undefined;
+}
+
 beforeEach(() => {
-  (
-    globalThis as typeof globalThis & {
-      __pacoPluginRegistry?: unknown;
-      __pacoPluginStartLocks?: unknown;
-    }
-  ).__pacoPluginRegistry = undefined;
-  (
-    globalThis as typeof globalThis & {
-      __pacoPluginRegistry?: unknown;
-      __pacoPluginStartLocks?: unknown;
-    }
-  ).__pacoPluginStartLocks = undefined;
+  resetGlobalRegistryState();
 
   FakePluginHost.instances = [];
   startedIds = [];
   stoppedIds = [];
+  fanoutRegisterCalls = [];
+  fanoutUnregisterCalls = [];
+  fanoutStartCalls = 0;
   rows = [];
   listPluginsBehavior = async () => rows;
   startBehavior = async () => ({ tools: [] });
@@ -333,5 +385,184 @@ describe("stopPluginHost", () => {
 
   test("is a no-op when no host is running for that id", async () => {
     await expect(stopPluginHost("never-started")).resolves.toBeUndefined();
+  });
+
+  test("unregisters the stopped host from the session-event fan-out", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+
+    await stopPluginHost("plugin-a");
+
+    expect(fanoutUnregisterCalls).toEqual([host]);
+  });
+});
+
+describe("crash restart", () => {
+  test("logs a plugin/crashed line when a running host crashes", async () => {
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {
+      // Silence; asserted on below.
+    });
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+
+    host.simulateCrash("worker exited unexpectedly");
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "plugin/crashed",
+      expect.objectContaining({
+        id: "plugin-a",
+        error: "worker exited unexpectedly",
+      }),
+    );
+    errorSpy.mockRestore();
+  });
+
+  test("restarts a crashed plugin on the next ensure, up to 3 attempts, then stays crashed", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+    expect(host.state).toBe("running");
+
+    host.simulateCrash("worker exited");
+
+    // Every restart attempt from here on fails, so the plugin never leaves
+    // the "crashed" state and every ensure call after the third is a no-op.
+    startBehavior = async () => {
+      throw new Error("still broken");
+    };
+
+    await ensurePluginsStarted(); // restart attempt 1 of 3
+    await ensurePluginsStarted(); // restart attempt 2 of 3
+    await ensurePluginsStarted(); // restart attempt 3 of 3
+    await ensurePluginsStarted(); // must NOT attempt a 4th
+
+    // 1 initial start + 3 restart attempts = 4 calls to start().
+    expect(startedIds).toEqual([
+      "plugin-a",
+      "plugin-a",
+      "plugin-a",
+      "plugin-a",
+    ]);
+    expect(getPluginRegistry().get("plugin-a")?.state).toBe("crashed");
+  });
+
+  test("a successful restart resets the attempt counter for a later crash", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const firstHost = FakePluginHost.instances[0] as FakePluginHost;
+    firstHost.simulateCrash("boom");
+
+    // This restart succeeds and replaces the registry entry.
+    await ensurePluginsStarted();
+    expect(getPluginRegistry().get("plugin-a")?.state).toBe("running");
+
+    const secondHost = FakePluginHost.instances.at(-1) as FakePluginHost;
+    secondHost.simulateCrash("boom again");
+    startBehavior = async () => {
+      throw new Error("still broken");
+    };
+
+    // If the counter had NOT reset, this crash would already be out of
+    // attempts. It gets its own fresh 3, so three more starts happen.
+    await ensurePluginsStarted();
+    await ensurePluginsStarted();
+    await ensurePluginsStarted();
+    await ensurePluginsStarted(); // 4th of this episode: no-op
+
+    // 1 (initial) + 1 (successful restart) + 3 (failed restarts) = 5.
+    expect(startedIds).toHaveLength(5);
+    expect(getPluginRegistry().get("plugin-a")?.state).toBe("crashed");
+  });
+
+  test("does not restart a crashed plugin that has since been disabled", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+    host.simulateCrash("boom");
+
+    // Disabled between the crash and the next ensure — e.g. an operator
+    // turned it off after seeing it crash. `needsStartAttempt`'s `enabled`
+    // gate must apply to a crashed retry exactly like it does to a fresh
+    // start.
+    rows = [row("plugin-a", false)];
+    await ensurePluginsStarted();
+
+    expect(startedIds).toEqual(["plugin-a"]);
+    expect(host.state).toBe("crashed");
+  });
+});
+
+describe("session-event fan-out wiring", () => {
+  test("registers a newly started host with the fan-out and starts it", async () => {
+    rows = [row("plugin-a")];
+
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+
+    expect(fanoutRegisterCalls).toEqual([host]);
+    expect(fanoutStartCalls).toBeGreaterThan(0);
+  });
+
+  test("registers a restarted host again after a crash", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const firstHost = FakePluginHost.instances[0] as FakePluginHost;
+    firstHost.simulateCrash("boom");
+
+    await ensurePluginsStarted();
+    const secondHost = FakePluginHost.instances.at(-1) as FakePluginHost;
+
+    expect(fanoutRegisterCalls).toEqual([firstHost, secondHost]);
+  });
+});
+
+describe("listEnabledPluginsForMcp", () => {
+  test("returns manifest and registered tools for every enabled, running plugin", async () => {
+    startBehavior = async (id) => ({
+      tools:
+        id === "plugin-a"
+          ? [{ name: "search", description: "d", inputSchema: {} }]
+          : [],
+    });
+    rows = [row("plugin-a"), row("plugin-b")];
+
+    await ensurePluginsStarted();
+    const enabled = await listEnabledPluginsForMcp();
+
+    expect(enabled.map((plugin) => plugin.id).sort()).toEqual([
+      "plugin-a",
+      "plugin-b",
+    ]);
+    const pluginA = enabled.find((plugin) => plugin.id === "plugin-a");
+    expect(pluginA?.tools).toEqual([
+      { name: "search", description: "d", inputSchema: {} },
+    ]);
+    const pluginB = enabled.find((plugin) => plugin.id === "plugin-b");
+    expect(pluginB?.tools).toEqual([]);
+  });
+
+  test("is empty when no plugin has ever been started", async () => {
+    rows = [row("plugin-a")];
+
+    expect(await listEnabledPluginsForMcp()).toEqual([]);
+  });
+
+  test("excludes a disabled plugin even though its row still exists", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    rows = [row("plugin-a", false)];
+
+    expect(await listEnabledPluginsForMcp()).toEqual([]);
+  });
+
+  test("excludes a plugin whose host has crashed", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+    host.simulateCrash("boom");
+
+    expect(await listEnabledPluginsForMcp()).toEqual([]);
   });
 });

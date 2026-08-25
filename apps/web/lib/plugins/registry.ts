@@ -1,11 +1,29 @@
 import "server-only";
 
-import { PluginHost } from "@paco/plugin-host";
+import { PluginHost, type RegisteredTool } from "@paco/plugin-host";
 import { discoverPlugin } from "@paco/plugin-kit";
 import { getPlugin, listPlugins } from "@/lib/db/plugins";
 import type { PluginRow } from "@/lib/db/schema";
 import { buildCapabilityHandlers } from "@/lib/plugins/capability-handlers";
 import { pluginDir, recheckPluginIntegrity } from "@/lib/plugins/install";
+import type { EnabledPluginForMcp } from "@/lib/plugins/mcp-bridge";
+import { getPluginEventFanout } from "@/lib/plugins/plugin-fanout";
+
+/**
+ * How many times `ensurePluginsStarted` will try to bring a crashed plugin
+ * back up before it gives up and leaves it `"crashed"` for good (spec
+ * Section 2 degradation invariant, and the plan's Task 12 brief).
+ *
+ * There is deliberately no timed backoff between attempts: each attempt
+ * happens on whatever cadence something already calls
+ * `ensurePluginsStarted` (instrumentation at boot, sandbox provisioning
+ * before a turn, the plugin-tools route), which naturally spaces attempts
+ * across real work rather than this module sleeping — a plugin subsystem
+ * must never block or slow down a turn (spec Section 2), and a `setTimeout`
+ * delay here would do exactly that to whichever caller happened to trigger
+ * the retry.
+ */
+const MAX_RESTART_ATTEMPTS = 3;
 
 /**
  * The running plugin hosts, keyed by plugin id.
@@ -22,6 +40,10 @@ const globalForPluginRegistry = globalThis as typeof globalThis & {
     string,
     Promise<{ ok: true } | { ok: false; error: string }>
   >;
+  /** A started host's registered tools, for `listEnabledPluginsForMcp`. */
+  __pacoPluginTools?: Map<string, RegisteredTool[]>;
+  /** How many consecutive crash-restart attempts a plugin has used up. */
+  __pacoPluginRestartAttempts?: Map<string, number>;
 };
 
 /** The module-level singleton registry of running plugin hosts. */
@@ -42,6 +64,16 @@ function startLocks(): Map<
 > {
   globalForPluginRegistry.__pacoPluginStartLocks ??= new Map();
   return globalForPluginRegistry.__pacoPluginStartLocks;
+}
+
+function pluginToolsMap(): Map<string, RegisteredTool[]> {
+  globalForPluginRegistry.__pacoPluginTools ??= new Map();
+  return globalForPluginRegistry.__pacoPluginTools;
+}
+
+function restartAttemptsMap(): Map<string, number> {
+  globalForPluginRegistry.__pacoPluginRestartAttempts ??= new Map();
+  return globalForPluginRegistry.__pacoPluginRestartAttempts;
 }
 
 function describeError(error: unknown): string {
@@ -98,6 +130,20 @@ function logStartFailure(pluginId: string, error: string): void {
 }
 
 /**
+ * Logs a crashed plugin the shape an operator (or a log aggregator) can
+ * grep for, and lets `onCrash` observers elsewhere (there are none yet)
+ * attach later without this host needing to know about them in advance.
+ *
+ * Registered on every host `discoverAndStartHost` constructs, whether or
+ * not `start()` itself goes on to succeed — a crash can happen well after a
+ * successful start, and `PluginHost.onCrash` fires for both cases (see its
+ * own doc comment).
+ */
+function logCrash(pluginId: string, error: string): void {
+  console.error("plugin/crashed", { id: pluginId, error });
+}
+
+/**
  * Discovers `row`'s plugin on disk, constructs its `PluginHost`, and starts
  * it. Never throws: every failure — integrity, discovery, or start — comes
  * back as a value, which both `startOnePlugin` (swallows it into a log
@@ -111,10 +157,19 @@ function logStartFailure(pluginId: string, error: string): void {
  * one function both `ensurePluginsStarted` and `startPluginHost` call to
  * actually start something, the check applies to every start path there is;
  * nothing here bypasses it.
+ *
+ * On success, the returned host is also registered with the process-wide
+ * session-event fan-out (`plugin-fanout.ts`) and its `onCrash` callback is
+ * wired to `logCrash` — every caller that starts a host this way gets both
+ * for free, rather than each of `startOnePlugin`/`startPluginHost` having
+ * to remember to do it themselves.
  */
 async function discoverAndStartHost(
   row: PluginRow,
-): Promise<{ ok: true; host: PluginHost } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; host: PluginHost; tools: RegisteredTool[] }
+  | { ok: false; error: string }
+> {
   const integrity = await recheckPluginIntegrity(row.id, row.contentHash);
   if (!integrity.ok) {
     return integrity;
@@ -132,14 +187,38 @@ async function discoverAndStartHost(
     handlers: buildCapabilityHandlers(row),
     nodeExecutable: resolvePluginNodeExecutable(),
   });
+  host.onCrash((error) => logCrash(row.id, error));
 
+  let tools: RegisteredTool[];
   try {
-    await host.start();
+    ({ tools } = await host.start());
   } catch (error) {
     return { ok: false, error: describeError(error) };
   }
 
-  return { ok: true, host };
+  const fanout = getPluginEventFanout();
+  fanout.register(host);
+  fanout.start();
+
+  return { ok: true, host, tools };
+}
+
+/**
+ * Records a host that just (re-)started: puts it in the registry, remembers
+ * its registered tools for `listEnabledPluginsForMcp`, and resets its
+ * restart-attempt counter — a plugin that is actually running again has
+ * earned a fresh set of `MAX_RESTART_ATTEMPTS` the next time it crashes,
+ * rather than carrying a grudge from a crash episode it has since recovered
+ * from.
+ */
+function registerStartedHost(
+  pluginId: string,
+  host: PluginHost,
+  tools: RegisteredTool[],
+): void {
+  getPluginRegistry().set(pluginId, host);
+  pluginToolsMap().set(pluginId, tools);
+  restartAttemptsMap().delete(pluginId);
 }
 
 /**
@@ -156,19 +235,65 @@ async function startOnePlugin(row: PluginRow): Promise<void> {
     logStartFailure(row.id, result.error);
     return;
   }
-  getPluginRegistry().set(row.id, result.host);
+  registerStartedHost(row.id, result.host, result.tools);
+}
+
+/**
+ * Whether `row` needs a start attempt this pass: either it has no host at
+ * all yet, or its host has crashed and there is at least one restart
+ * attempt left (`MAX_RESTART_ATTEMPTS`, spec Section 2 degradation
+ * invariant plus the plan's Task 12 brief). A host that is `"starting"`,
+ * `"running"`, or `"stopped"` is left alone — only `"crashed"` is a retry
+ * candidate, and only up to the attempt ceiling.
+ */
+function needsStartAttempt(
+  row: PluginRow,
+  registry: Map<string, PluginHost>,
+  attempts: Map<string, number>,
+): boolean {
+  if (!row.enabled) {
+    return false;
+  }
+  const existing = registry.get(row.id);
+  if (!existing) {
+    return true;
+  }
+  if (existing.state !== "crashed") {
+    return false;
+  }
+  return (attempts.get(row.id) ?? 0) < MAX_RESTART_ATTEMPTS;
+}
+
+/**
+ * Attempts to restart one crashed plugin, counting the attempt against
+ * `MAX_RESTART_ATTEMPTS` regardless of outcome. A successful restart resets
+ * the counter (`registerStartedHost`); a failed one leaves the previous
+ * (still `"crashed"`) host in the registry untouched, so its state — and an
+ * operator's `pluginStatusAction` view of it — stay accurate either way.
+ */
+async function restartCrashedPlugin(row: PluginRow): Promise<void> {
+  const attempts = restartAttemptsMap();
+  attempts.set(row.id, (attempts.get(row.id) ?? 0) + 1);
+
+  const result = await discoverAndStartHost(row);
+  if (!result.ok) {
+    logStartFailure(row.id, result.error);
+    return;
+  }
+  registerStartedHost(row.id, result.host, result.tools);
 }
 
 /**
  * Ensures every enabled plugin has a running host in `getPluginRegistry()`,
- * starting any that are missing.
+ * starting any that are missing and restarting any that have crashed (up to
+ * `MAX_RESTART_ATTEMPTS`).
  *
- * Safe to call repeatedly and concurrently: a plugin already in the
- * registry is left alone, and a plugin whose start is already in flight is
- * awaited rather than started twice. Never throws — even a failure to list
- * plugins from the database is logged and treated as "nothing to start"
- * rather than propagated, so a caller building an agent turn's MCP config
- * never fails the turn over the plugin subsystem.
+ * Safe to call repeatedly and concurrently: a plugin already running is
+ * left alone, and a plugin whose start is already in flight is awaited
+ * rather than started twice. Never throws — even a failure to list plugins
+ * from the database is logged and treated as "nothing to start" rather than
+ * propagated, so a caller building an agent turn's MCP config never fails
+ * the turn over the plugin subsystem.
  */
 export async function ensurePluginsStarted(): Promise<void> {
   let rows: PluginRow[];
@@ -181,16 +306,20 @@ export async function ensurePluginsStarted(): Promise<void> {
 
   const registry = getPluginRegistry();
   const locks = startLocks();
+  const attempts = restartAttemptsMap();
 
   await Promise.all(
     rows
-      .filter((row) => row.enabled && !registry.has(row.id))
+      .filter((row) => needsStartAttempt(row, registry, attempts))
       .map((row) => {
         const existing = locks.get(row.id);
         if (existing) {
           return existing;
         }
-        const started = startOnePlugin(row).then(() => ({ ok: true as const }));
+        const isRestart = registry.has(row.id);
+        const started = (
+          isRestart ? restartCrashedPlugin(row) : startOnePlugin(row)
+        ).then(() => ({ ok: true as const }));
         const tracked = started.finally(() => {
           locks.delete(row.id);
         });
@@ -244,7 +373,7 @@ export async function startPluginHost(
       return { ok: false, error: result.error };
     }
 
-    registry.set(pluginId, result.host);
+    registerStartedHost(pluginId, result.host, result.tools);
     return { ok: true };
   })();
 
@@ -262,8 +391,59 @@ export async function stopPluginHost(pluginId: string): Promise<void> {
   if (!host) {
     return;
   }
+  getPluginEventFanout().unregister(host);
   // `PluginHost.stop()` never rejects (see its own doc comment) — a plugin
   // that is already gone, or that crashed, stops cleanly either way.
   await host.stop();
   registry.delete(pluginId);
+  pluginToolsMap().delete(pluginId);
+  restartAttemptsMap().delete(pluginId);
+}
+
+/**
+ * Every enabled, currently-running plugin's manifest and registered tools,
+ * shaped exactly for `buildPluginMcpConfig` (`lib/plugins/mcp-bridge.ts`).
+ *
+ * This is the "running registry" half of Task 12's `AgentCallOptions.mcpServers`
+ * fix: `resolveChatMcpServers` (`lib/agent/chat-environment.ts`) calls
+ * `ensurePluginsStarted()` first, then this, so a plugin that is enabled but
+ * whose host has crashed (or is still `"starting"`) is correctly left out —
+ * bridging tools for a host that cannot actually run them would just turn
+ * every call into a timeout instead of an absent tool.
+ *
+ * Never throws: a failure to list plugins is logged and treated as "no
+ * plugins to bridge", the same posture as `ensurePluginsStarted` itself.
+ */
+export async function listEnabledPluginsForMcp(): Promise<
+  EnabledPluginForMcp[]
+> {
+  let rows: PluginRow[];
+  try {
+    rows = await listPlugins();
+  } catch (error) {
+    console.error("plugin registry: failed to list plugins for mcp", {
+      error,
+    });
+    return [];
+  }
+
+  const registry = getPluginRegistry();
+  const tools = pluginToolsMap();
+
+  const enabled: EnabledPluginForMcp[] = [];
+  for (const row of rows) {
+    if (!row.enabled) {
+      continue;
+    }
+    const host = registry.get(row.id);
+    if (host?.state !== "running") {
+      continue;
+    }
+    enabled.push({
+      id: row.id,
+      manifest: row.manifest,
+      tools: tools.get(row.id) ?? [],
+    });
+  }
+  return enabled;
 }

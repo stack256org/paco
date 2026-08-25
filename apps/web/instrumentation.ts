@@ -9,6 +9,14 @@
  *   schedules (`lib/db/schema.ts`'s `schedules` table), and run the daily
  *   reflection job (`lib/memory/reflect.ts`) out of band
  *
+ * A third thing is started here too: every enabled plugin's worker host
+ * (`ensurePluginsStarted`, `lib/plugins/registry.ts`) — so a plugin with
+ * `events:subscribe` is already registered with the session-event fan-out,
+ * and one with `tools:register` is already running, by the time the first
+ * request or turn needs it, rather than paying that startup cost inline on
+ * whichever turn happens to ask first. `ensurePluginsStarted` never throws
+ * (see its own doc comment), so a plugin failing to start here can never
+ * take server boot down with it.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") {
@@ -36,4 +44,7 @@ export async function register() {
 
   const { startReflectionJob } = await import("@/lib/jobs/reflection-job");
   await startReflectionJob();
+
+  const { ensurePluginsStarted } = await import("@/lib/plugins/registry");
+  await ensurePluginsStarted();
 }
