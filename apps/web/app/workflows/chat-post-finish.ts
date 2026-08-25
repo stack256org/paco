@@ -661,16 +661,25 @@ export async function runAutoCreatePrStep(params: {
 }
 
 /**
- * Kick off post-turn memory distillation without waiting on it.
+ * Ceiling on one distillation call.
  *
- * Fire-and-forget: the turn has already finished, and distillation is a
- * Haiku-tier structured-output call that must never delay or fail the turn
- * it learns from (see the plan's memory invariants). The step resolves as
- * soon as `distillTurn` has been *started*, not when it finishes.
+ * This step runs after the stream is already closed and the turn's result
+ * has been delivered, so awaiting it doesn't cost the user anything — but an
+ * awaited step with no ceiling could still wedge the workflow's own
+ * durability bookkeeping on a hung CLI process. 90s is generous for a
+ * Haiku-tier, tools-off, single-turn call.
+ */
+const DISTILL_TIMEOUT_MS = 90_000;
+
+/**
+ * Run post-turn memory distillation as a durable, awaited step.
  *
- * `distillTurn` itself never throws, but the call is still wrapped in a
- * `catch` — a step that fires a promise and walks away must not depend on
- * the callee's contract holding forever.
+ * Runs after the stream has been cleared, so awaiting it never delays
+ * anything the user is waiting on. `distillTurn` itself never throws (see
+ * the plan's memory invariants — a failed distillation must never fail the
+ * turn), but this still guards with a timeout and a `catch`: a step that
+ * awaits a callee must not depend on that callee's contract holding forever,
+ * and a hung CLI process would otherwise wedge this step indefinitely.
  */
 export async function distillTurnMemoryStep(params: {
   chatId: string;
@@ -679,12 +688,28 @@ export async function distillTurnMemoryStep(params: {
   turnId: string;
 }): Promise<void> {
   "use step";
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     const { distillTurn } = await import("@/lib/memory/distill");
-    void distillTurn(params).catch((error) => {
-      console.error("[workflow] Memory distillation failed:", error);
+
+    const timedOut = new Promise<"timed-out">((resolve) => {
+      timeoutId = setTimeout(() => resolve("timed-out"), DISTILL_TIMEOUT_MS);
     });
+
+    const outcome = await Promise.race([
+      distillTurn(params).then(() => "completed" as const),
+      timedOut,
+    ]);
+
+    if (outcome === "timed-out") {
+      console.error("[workflow] Memory distillation timed out:", {
+        chatId: params.chatId,
+        turnId: params.turnId,
+      });
+    }
   } catch (error) {
-    console.error("[workflow] Failed to start memory distillation:", error);
+    console.error("[workflow] Memory distillation failed:", error);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

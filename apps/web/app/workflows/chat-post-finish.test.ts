@@ -541,26 +541,37 @@ describe("distillTurnMemoryStep", () => {
     });
   });
 
-  test("resolves without waiting for distillTurn to finish", async () => {
+  test("awaits distillTurn before resolving", async () => {
     let resolveDistill: () => void = () => undefined;
     distillTurnResult = new Promise<void>((resolve) => {
       resolveDistill = resolve;
     });
 
-    // If the step incorrectly awaited distillTurn before returning, this
-    // would hang until the test's timeout rather than resolve here.
-    await distillTurnMemoryStep({
+    let stepResolved = false;
+    const stepPromise = distillTurnMemoryStep({
       chatId: "chat-1",
       sessionRepoDir: "/tmp/repo",
       userId: "user-1",
       turnId: "turn-1",
+    }).then(() => {
+      stepResolved = true;
     });
 
-    expect(distillTurnSpy).toHaveBeenCalledTimes(1);
+    // Flush pending microtasks: distillTurn is still pending, so the step
+    // must not have resolved yet — it awaits distillTurn, it doesn't fire
+    // and walk away.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(stepResolved).toBe(false);
+
     resolveDistill();
+    await stepPromise;
+
+    expect(stepResolved).toBe(true);
+    expect(distillTurnSpy).toHaveBeenCalledTimes(1);
   });
 
-  test("does not throw when distillTurn rejects", async () => {
+  test("does not throw when distillTurn rejects, and still awaits it", async () => {
     distillTurnResult = new Error("Distillation backend unavailable");
 
     await expect(
@@ -572,7 +583,37 @@ describe("distillTurnMemoryStep", () => {
       }),
     ).resolves.toBeUndefined();
 
-    // Let the fire-and-forget rejection's `.catch` run before the test ends.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(distillTurnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("resolves via the timeout guard when distillTurn hangs", async () => {
+    // Never resolves — stands in for a hung CLI process.
+    distillTurnResult = new Promise<void>(() => undefined);
+
+    const originalSetTimeout = globalThis.setTimeout;
+    const fakeSetTimeout = mock(
+      (callback: () => void): ReturnType<typeof setTimeout> => {
+        // Fire immediately rather than waiting the real 90s, so the test
+        // exercises the timeout branch without a 90s-long test.
+        callback();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      },
+    );
+    globalThis.setTimeout = fakeSetTimeout as unknown as typeof setTimeout;
+
+    try {
+      await expect(
+        distillTurnMemoryStep({
+          chatId: "chat-1",
+          sessionRepoDir: "/tmp/repo",
+          userId: "user-1",
+          turnId: "turn-1",
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    expect(fakeSetTimeout).toHaveBeenCalledTimes(1);
   });
 });
