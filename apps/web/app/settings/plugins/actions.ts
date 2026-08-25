@@ -1,8 +1,7 @@
 "use server";
 
 import { rm } from "node:fs/promises";
-import { type Capability, discoverPlugin } from "@paco/plugin-kit";
-import { PluginHost } from "@paco/plugin-host";
+import type { Capability } from "@paco/plugin-kit";
 import { requireAdmin } from "@/lib/admin/require-admin";
 import {
   getPlugin,
@@ -11,13 +10,12 @@ import {
   setPluginEnabled,
   setPluginGrants,
 } from "@/lib/db/plugins";
-import { buildCapabilityHandlers } from "@/lib/plugins/capability-handlers";
 import {
   installPlugin,
   pluginDir,
   type InstallSource,
 } from "@/lib/plugins/install";
-import { getPluginRegistry } from "@/lib/plugins/registry";
+import { startPluginHost, stopPluginHost } from "@/lib/plugins/registry";
 
 /**
  * The gate between "a plugin exists on disk" and "a plugin can act" (spec
@@ -76,93 +74,29 @@ function describeError(error: unknown): string {
 }
 
 /**
- * Which Node binary a freshly-granted plugin's worker is spawned with.
+ * Mirrors the private id pattern in `pluginDir()` (`lib/plugins/install.ts`)
+ * and `pluginManifestSchema`'s `name` field (`packages/plugin-kit/manifest.ts`).
  *
- * `packages/plugin-host/SECURITY.md`'s "Required runtime" section is
- * unambiguous: a hardened worker refuses to start below Node 24, because
- * that is the version where the runtime's own socket gate backs up the
- * in-process module allowlist. `PluginHost` defaults `nodeExecutable` to
- * `process.execPath` — fine when the Next.js server itself runs on Node
- * >= 24, but not a deployment this file can assume. `PACO_PLUGIN_NODE_EXECUTABLE`
- * is the escape hatch for a host process that doesn't meet that floor
- * itself; `PluginHost.start()` still re-checks whatever this resolves to
- * and throws an actionable error (naming the required version and the fix)
- * if it doesn't qualify, so this is a convenience, not a bypass.
+ * Every action below that takes a `pluginId` gets it straight from the
+ * client — unlike `install.ts`'s other callers, which only ever see an id
+ * that already came out of a validated manifest or a plugins-table row.
+ * Checking it here, first, turns a malformed or path-traversal-shaped id
+ * (`"../../../etc"`) into an ordinary field error instead of relying on
+ * `pluginDir()` to throw further down — and, for `removePluginAction`,
+ * means the check runs before any filesystem call is even attempted.
+ * `pluginDir()`'s own validation (plus its symlink-containment check) stays
+ * in place regardless, as the backstop for any call site that reaches it a
+ * different way.
  */
-function resolvePluginNodeExecutable(): string {
-  return process.env.PACO_PLUGIN_NODE_EXECUTABLE ?? process.execPath;
-}
+const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
 
-/**
- * Starts one plugin's host and registers it, if it isn't already running.
- *
- * TODO(registry): `lib/plugins/registry.ts` (Task 7, MCP bridge) currently
- * exposes only `ensurePluginsStarted()` — which starts every enabled plugin
- * at once and swallows a start failure into a log line — and
- * `getPluginRegistry()`, the raw shared `Map`. Neither lets a caller start
- * ONE just-granted plugin and see whether it worked, which `grantAndEnableAction`
- * below needs: an operator granting capabilities and clicking "enable" must
- * see a failed host start (including the Node-floor error from
- * `PluginHost.start()`), not a silent skip. This function fills that gap by
- * talking to `PluginHost` directly, but writes into the SAME shared
- * `getPluginRegistry()` map `registry.ts` and `api/internal/plugin-tools/route.ts`
- * already read from, rather than keeping a second map. Once `registry.ts`
- * grows a `startPlugin(id)` that returns (rather than swallows) its error,
- * replace this with a direct import of that instead of duplicating the
- * discover-and-construct logic here.
- */
-async function startPluginHost(
+function validatePluginId(
   pluginId: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const registry = getPluginRegistry();
-  if (registry.has(pluginId)) {
-    return { ok: true };
+): { ok: true } | { ok: false; error: string } {
+  if (!PLUGIN_ID_PATTERN.test(pluginId)) {
+    return { ok: false, error: `Invalid plugin id ${JSON.stringify(pluginId)}` };
   }
-
-  const row = await getPlugin(pluginId);
-  if (!row) {
-    return { ok: false, error: `No plugin installed with id "${pluginId}"` };
-  }
-
-  const discovered = await discoverPlugin(pluginDir(pluginId));
-  if (!discovered.ok) {
-    return { ok: false, error: discovered.error };
-  }
-
-  const host = new PluginHost({
-    descriptor: discovered.plugin,
-    grantedCapabilities: row.grantedCapabilities,
-    netDomains: row.consentedNetDomains,
-    handlers: buildCapabilityHandlers(row),
-    nodeExecutable: resolvePluginNodeExecutable(),
-  });
-
-  try {
-    await host.start();
-  } catch (error) {
-    // Surfaced verbatim: this is where the Node-floor error from
-    // `PluginHost.start()` ("...requires Node >= 24. Point the
-    // `nodeExecutable` option at...") reaches the operator. Swallowing it
-    // here would turn a fixable deployment problem into a plugin that just
-    // silently never starts.
-    return { ok: false, error: describeError(error) };
-  }
-
-  registry.set(pluginId, host);
   return { ok: true };
-}
-
-/** Stops one plugin's host, if it has one running, and drops it from the registry. */
-async function stopPluginHost(pluginId: string): Promise<void> {
-  const registry = getPluginRegistry();
-  const host = registry.get(pluginId);
-  if (!host) {
-    return;
-  }
-  // `PluginHost.stop()` never rejects (see its own doc comment) — a plugin
-  // that is already gone, or that crashed, stops cleanly either way.
-  await host.stop();
-  registry.delete(pluginId);
 }
 
 /**
@@ -214,6 +148,11 @@ export async function grantAndEnableAction(input: {
 }): Promise<{ ok: boolean; error?: string }> {
   await requireAdmin();
 
+  const idCheck = validatePluginId(input.pluginId);
+  if (!idCheck.ok) {
+    return idCheck;
+  }
+
   try {
     await setPluginGrants(input.pluginId, input.grants);
   } catch (error) {
@@ -236,8 +175,13 @@ export async function grantAndEnableAction(input: {
 /** Stops a plugin's host (if running) and marks it disabled. */
 export async function disablePluginAction(input: {
   pluginId: string;
-}): Promise<{ ok: boolean }> {
+}): Promise<{ ok: boolean; error?: string }> {
   await requireAdmin();
+
+  const idCheck = validatePluginId(input.pluginId);
+  if (!idCheck.ok) {
+    return idCheck;
+  }
 
   await stopPluginHost(input.pluginId);
   await setPluginEnabled(input.pluginId, false);
@@ -253,11 +197,31 @@ export async function disablePluginAction(input: {
  * has the (about to be deleted) plugin directory open for reads, and
  * `PluginHost.stop()` is the only thing here that waits for the process to
  * actually exit rather than just asking it to.
+ *
+ * Requires an existing row (`getPlugin`) before any filesystem work runs:
+ * a destructive `rm(..., { recursive: true, force: true })` must never fire
+ * for an id nothing has installed, even a syntactically valid one, and
+ * checking here — rather than trusting `pluginDir()`'s own validation alone
+ * — means a 404 comes back as an ordinary error value instead of depending
+ * on that lower-level throw to save it.
  */
 export async function removePluginAction(input: {
   pluginId: string;
-}): Promise<{ ok: boolean }> {
+}): Promise<{ ok: boolean; error?: string }> {
   await requireAdmin();
+
+  const idCheck = validatePluginId(input.pluginId);
+  if (!idCheck.ok) {
+    return idCheck;
+  }
+
+  const row = await getPlugin(input.pluginId);
+  if (!row) {
+    return {
+      ok: false,
+      error: `No plugin installed with id "${input.pluginId}"`,
+    };
+  }
 
   await stopPluginHost(input.pluginId);
   await rm(pluginDir(input.pluginId), { recursive: true, force: true });

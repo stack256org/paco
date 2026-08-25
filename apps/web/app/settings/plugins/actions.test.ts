@@ -81,6 +81,12 @@ async function removePluginImpl(id: string): Promise<void> {
 mock.module("@/lib/db/plugins", () => ({
   PluginGrantEscalationError: FakePluginGrantEscalationError,
   getPlugin: (id: string) => getPluginImpl(id),
+  // Unused by anything this file exercises, but `lib/plugins/registry.ts`
+  // (now the real, unmocked module backing `startPluginHost`/
+  // `stopPluginHost`) imports it too, and a named ESM import is validated
+  // against the mocked module's exports at load time regardless of whether
+  // the importing code path is actually reached.
+  listPlugins: () => Promise.resolve([...rows.values()]),
   setPluginEnabled: (id: string, enabled: boolean) =>
     setPluginEnabledImpl(id, enabled),
   setPluginGrants: (id: string, grants: Capability[]) =>
@@ -104,6 +110,12 @@ mock.module("@/lib/plugins/install", () => ({
     return installBehavior(source);
   },
   pluginDir: (id: string) => pluginDirImpl(id),
+  // Unused by anything this file exercises directly, but `lib/plugins/registry.ts`
+  // (the real, unmocked module backing `startPluginHost`/`stopPluginHost` — see
+  // the registry section below) calls it before every start; a passing default
+  // keeps this file's own start/stop tests exercising what they were written
+  // to exercise instead of failing on unrelated integrity-check plumbing.
+  recheckPluginIntegrity: () => Promise.resolve({ ok: true }),
 }));
 
 // --- @paco/plugin-kit --------------------------------------------------
@@ -163,12 +175,23 @@ mock.module("@/lib/plugins/capability-handlers", () => ({
 }));
 
 // --- @/lib/plugins/registry ------------------------------------------------
+//
+// Deliberately NOT mocked: `startPluginHost`/`stopPluginHost` now live in
+// `lib/plugins/registry.ts` (Task 7 consolidated them out of this file), so
+// this test exercises the real registry module against the same mocked
+// `@paco/plugin-host`/`@paco/plugin-kit`/`@/lib/plugins/install`/
+// `@/lib/db/plugins` it already set up above — the same approach
+// `lib/plugins/registry.test.ts` uses for the registry's own tests.
 
-let registry: Map<string, FakePluginHost>;
+const registryModule = await import("@/lib/plugins/registry");
 
-mock.module("@/lib/plugins/registry", () => ({
-  getPluginRegistry: () => registry,
-}));
+/** The real, shared registry `Map` — cast for this file's `FakePluginHost`. */
+function registry(): Map<string, FakePluginHost> {
+  return registryModule.getPluginRegistry() as unknown as Map<
+    string,
+    FakePluginHost
+  >;
+}
 
 const {
   disablePluginAction,
@@ -196,7 +219,10 @@ function makeRow(id: string, capabilities: Capability[] = []): FakeRow {
 beforeEach(() => {
   adminOk = true;
   rows = new Map();
-  registry = new Map();
+  registry().clear();
+  (
+    globalThis as typeof globalThis & { __pacoPluginStartLocks?: unknown }
+  ).__pacoPluginStartLocks = undefined;
   stopCalls = [];
   installCalls.length = 0;
   pluginDirImpl = (id) => `/plugins/${id}`;
@@ -314,7 +340,7 @@ describe("grantAndEnableAction", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/not a subset/);
     expect(rows.get("widgets")?.enabled).toBe(false);
-    expect(registry.size).toBe(0);
+    expect(registry().size).toBe(0);
   });
 
   test("grants, enables, and starts the host", async () => {
@@ -328,7 +354,7 @@ describe("grantAndEnableAction", () => {
     expect(result).toEqual({ ok: true });
     expect(rows.get("widgets")?.enabled).toBe(true);
     expect(rows.get("widgets")?.grantedCapabilities).toEqual(["storage:kv"]);
-    expect(registry.has("widgets")).toBe(true);
+    expect(registry().has("widgets")).toBe(true);
   });
 
   test("surfaces a host start failure, including the Node-floor message, verbatim", async () => {
@@ -347,7 +373,7 @@ describe("grantAndEnableAction", () => {
     expect(result).toEqual({ ok: false, error: nodeFloorMessage });
     // Enabling already happened; only the host failed to start.
     expect(rows.get("widgets")?.enabled).toBe(true);
-    expect(registry.has("widgets")).toBe(false);
+    expect(registry().has("widgets")).toBe(false);
   });
 
   test("does not start a second host when one is already registered", async () => {
@@ -355,7 +381,7 @@ describe("grantAndEnableAction", () => {
     const already = makeFakePluginHost({
       descriptor: { manifest: { name: "widgets" } },
     });
-    registry.set("widgets", already);
+    registry().set("widgets", already);
 
     const result = await grantAndEnableAction({
       pluginId: "widgets",
@@ -363,7 +389,7 @@ describe("grantAndEnableAction", () => {
     });
 
     expect(result).toEqual({ ok: true });
-    expect(registry.get("widgets")).toBe(already);
+    expect(registry().get("widgets")).toBe(already);
   });
 });
 
@@ -373,13 +399,13 @@ describe("disablePluginAction", () => {
     const host = makeFakePluginHost({
       descriptor: { manifest: { name: "widgets" } },
     });
-    registry.set("widgets", host);
+    registry().set("widgets", host);
 
     const result = await disablePluginAction({ pluginId: "widgets" });
 
     expect(result).toEqual({ ok: true });
     expect(stopCalls).toEqual(["widgets"]);
-    expect(registry.has("widgets")).toBe(false);
+    expect(registry().has("widgets")).toBe(false);
     expect(rows.get("widgets")?.enabled).toBe(false);
   });
 
@@ -411,13 +437,13 @@ describe("removePluginAction", () => {
     const host = makeFakePluginHost({
       descriptor: { manifest: { name: "widgets" } },
     });
-    registry.set("widgets", host);
+    registry().set("widgets", host);
 
     const result = await removePluginAction({ pluginId: "widgets" });
 
     expect(result).toEqual({ ok: true });
     expect(stopCalls).toEqual(["widgets"]);
-    expect(registry.has("widgets")).toBe(false);
+    expect(registry().has("widgets")).toBe(false);
     expect(rows.has("widgets")).toBe(false);
     await expect(stat(tempDir)).rejects.toThrow();
   });

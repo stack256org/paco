@@ -30,6 +30,28 @@
  * derived from it at runtime. `mcp-bridge.test.ts` fails if the two drift.
  */
 
+/**
+ * The only environment variables this process is allowed to read.
+ *
+ * Claude Code spawns this script as a child of its own process
+ * (`packages/claude-code/run.ts` starts the CLI with
+ * `{...process.env, ...options.env}`), and there is no documented guarantee
+ * that an MCP stdio server it in turn spawns from `--mcp-config` gets
+ * anything narrower — the safe assumption is that this process inherits
+ * Paco's FULL environment, `APP_SECRET`/`POSTGRES_URL`/`SMTP_*` included,
+ * which directly contradicts the plan's "a plugin worker's environment
+ * contains NO ambient secrets" invariant (spec Section 2). This script talks
+ * to exactly one thing — Paco's own internal route, over the three values
+ * below — so nothing else it might have inherited is ever needed, and the
+ * scrub immediately below deletes everything else off `process.env` before
+ * any other line of this file runs.
+ */
+const ALLOWED_ENV_KEYS = [
+  "PACO_INTERNAL_URL",
+  "PACO_INTERNAL_TOKEN",
+  "PACO_PLUGIN_TOOLS",
+];
+
 type JsonRpcId = string | number | null;
 
 type ToolEntry = {
@@ -44,6 +66,23 @@ type ToolOutcome = { ok: true; output: unknown } | { ok: false; error: string };
 const INTERNAL_URL = process.env.PACO_INTERNAL_URL ?? "";
 const INTERNAL_TOKEN = process.env.PACO_INTERNAL_TOKEN ?? "";
 const TOOLS_JSON = process.env.PACO_PLUGIN_TOOLS ?? "[]";
+
+// Scrub now that the three values above are captured: every other key —
+// whatever this process actually inherited — is deleted off `process.env`
+// before any network call (`callTool`, well below) or anything else runs.
+// A single stderr line records what survived, for an operator debugging a
+// misconfigured bridge and for this behavior's own test — never stdout,
+// which is reserved for JSON-RPC protocol messages.
+for (const key of Object.keys(process.env)) {
+  if (!ALLOWED_ENV_KEYS.includes(key)) {
+    delete process.env[key];
+  }
+}
+process.stderr.write(
+  "plugin-mcp-server: env scrubbed, keys retained: " +
+    Object.keys(process.env).sort().join(",") +
+    "\n",
+);
 
 const PROTOCOL_VERSION = "2024-11-05";
 /** Joins a plugin id and its tool name into the name exposed over MCP. */
