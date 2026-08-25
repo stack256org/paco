@@ -33,7 +33,19 @@ export function hostWorkspaceFor(state: SandboxState): string {
  * whatever directory it starts in is the one whose branch its edits land on.
  */
 export function hostChatWorktree(state: SandboxState, chatId: string): string {
-  return path.join(hostWorkspaceFor(state), chatWorktreePath(chatId));
+  // `turbopackIgnore` because both operands are runtime values Next's
+  // build-time file tracer cannot resolve statically — the workspace root comes
+  // from `workspaceRoot()` (itself home- or `PACO_WORKSPACE_ROOT`-derived) and
+  // the chat id is per-request. Without the hint the tracer decides this whole
+  // module's trace is untrustworthy and falls back to tracing the entire
+  // project, which is how `.next/standalone` ended up missing real runtime
+  // dependencies (`drizzle-orm`, `postgres`) and every database route 500'd.
+  // See the same note on `workspaceRoot()` in packages/sandbox/docker/connect.ts
+  // and the long comment in apps/web/next.config.ts.
+  return path.join(
+    /* turbopackIgnore: true */ hostWorkspaceFor(state),
+    chatWorktreePath(chatId),
+  );
 }
 
 /**

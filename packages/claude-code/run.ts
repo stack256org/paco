@@ -57,40 +57,53 @@ export function runClaudeCode(
 ): ClaudeCodeRun {
   const args = buildArgs(options);
 
-  const child = spawn(options.executable ?? "claude", args, {
-    cwd: options.cwd,
-    /*
-     * An allowlist, NOT `{...process.env}`.
-     *
-     * The agent has a `Bash` tool and spawns children of its own (MCP stdio
-     * servers, the `PreToolUse` hook, every command it runs), all of which
-     * inherit this. Spreading the server's environment handed all of them
-     * `APP_SECRET`, `POSTGRES_URL`, `SMTP_PASSWORD` and `PACO_APPROVAL_TOKEN`.
-     * `agentProcessEnv` builds the environment from scratch instead — the
-     * same construction `PluginHost` already uses for plugin workers
-     * (`packages/plugin-host/SECURITY.md`, "No ambient secrets").
-     *
-     * `options.env` is spread over it deliberately and stays unfiltered:
-     * that is the sanctioned route for a caller that has decided this
-     * particular turn should carry a particular secret — `GH_TOKEN` and the
-     * approval-hook variables (`apps/web/lib/agent/backend-factory.ts`) — and
-     * the point of the allowlist is that such a decision is made rather than
-     * inherited.
-     */
-    env: {
-      ...agentProcessEnv(process.env),
-      ...options.env,
+  // `turbopackIgnore` because the executable is a runtime value Next's
+  // build-time file tracer cannot resolve statically: it is either the packaged
+  // `claude` on PATH or an override a caller supplies (the tests point it at a
+  // stub). Without the hint the tracer decides this whole module's trace is
+  // untrustworthy and falls back to tracing the entire project, which is how
+  // `.next/standalone` ended up missing real runtime dependencies
+  // (`drizzle-orm`, `postgres`) and every database route 500'd. See the same
+  // note on `workspaceRoot()` in packages/sandbox/docker/connect.ts and the long
+  // comment in apps/web/next.config.ts.
+  const child = spawn(
+    /* turbopackIgnore: true */ options.executable ?? "claude",
+    args,
+    {
+      cwd: options.cwd,
       /*
-       * Carried explicitly rather than through the allowlist: Next augments
-       * `NodeJS.ProcessEnv` with a REQUIRED `NODE_ENV`
-       * (`next/types/global.d.ts`), so an environment built from scratch
-       * does not typecheck without it. It is also the right value to pass —
-       * every Node tool the agent runs reads it — and it discloses nothing.
+       * An allowlist, NOT `{...process.env}`.
+       *
+       * The agent has a `Bash` tool and spawns children of its own (MCP stdio
+       * servers, the `PreToolUse` hook, every command it runs), all of which
+       * inherit this. Spreading the server's environment handed all of them
+       * `APP_SECRET`, `POSTGRES_URL`, `SMTP_PASSWORD` and `PACO_APPROVAL_TOKEN`.
+       * `agentProcessEnv` builds the environment from scratch instead — the
+       * same construction `PluginHost` already uses for plugin workers
+       * (`packages/plugin-host/SECURITY.md`, "No ambient secrets").
+       *
+       * `options.env` is spread over it deliberately and stays unfiltered:
+       * that is the sanctioned route for a caller that has decided this
+       * particular turn should carry a particular secret — `GH_TOKEN` and the
+       * approval-hook variables (`apps/web/lib/agent/backend-factory.ts`) — and
+       * the point of the allowlist is that such a decision is made rather than
+       * inherited.
        */
-      NODE_ENV: process.env.NODE_ENV,
+      env: {
+        ...agentProcessEnv(process.env),
+        ...options.env,
+        /*
+         * Carried explicitly rather than through the allowlist: Next augments
+         * `NodeJS.ProcessEnv` with a REQUIRED `NODE_ENV`
+         * (`next/types/global.d.ts`), so an environment built from scratch
+         * does not typecheck without it. It is also the right value to pass —
+         * every Node tool the agent runs reads it — and it discloses nothing.
+         */
+        NODE_ENV: process.env.NODE_ENV,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
     },
-    stdio: ["pipe", "pipe", "pipe"],
-  }) as ChildProcessWithoutNullStreams;
+  ) as ChildProcessWithoutNullStreams;
 
   // The `--mcp-config` payload is a private file on disk (`options.ts`), and
   // this is the process that owns its lifetime. `close` covers a normal exit
