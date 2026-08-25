@@ -187,6 +187,25 @@ export async function distillTurn(params: {
       unknown
     >;
 
+    /*
+     * Deliberately Claude-only, and NOT routed through the `AgentBackend`
+     * seam — unlike a chat turn, which resolves its backend per chat.
+     *
+     * This is a single toolless structured-extraction call: no tool set, no
+     * agentic loop, nothing to approve, and a fixed cheap model. There is no
+     * behaviour here for a second backend to implement differently, so the
+     * seam would buy indirection rather than portability. `memory/reflect.ts`
+     * makes the same call for the same reason.
+     *
+     * The honest cost, since this one DOES have a chat id in hand and could
+     * therefore have inherited the chat's backend: a chat running on OpenFX
+     * still has its memory distilled by Claude Code, so distillation is not
+     * free for an operator who chose OpenFX to avoid Claude entirely. That is
+     * a billing surprise rather than a correctness or safety one, which is
+     * why it is documented here instead of rewired — but it is the reason to
+     * revisit this if a backend is ever selected to avoid a *provider* rather
+     * than to change agent behaviour.
+     */
     const raw = await generateStructuredOutput<unknown>(
       transcript,
       jsonSchema,
