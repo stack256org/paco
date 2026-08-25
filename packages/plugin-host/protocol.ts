@@ -10,10 +10,22 @@ import { z } from "zod";
  * in host.ts) rather than as something to coerce into shape.
  */
 
+/**
+ * Bounds on the ready handshake. A plugin registering ten thousand tools
+ * with megabyte descriptions is not a feature; every one of these ends up in
+ * a model-facing tool list the operator pays for.
+ */
+export const MAX_TOOL_NAME_LENGTH = 64;
+export const MAX_TOOL_DESCRIPTION_LENGTH = 1000;
+export const MAX_TOOLS_PER_PLUGIN = 64;
+
+/** Tool names are identifiers, not free text: they reach an MCP tool list. */
+const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_-]*$/;
+
 /** A model-facing tool a plugin registers during the ready handshake. */
 export const registeredToolSchema = z.object({
-  name: z.string().min(1),
-  description: z.string(),
+  name: z.string().min(1).max(MAX_TOOL_NAME_LENGTH).regex(TOOL_NAME_PATTERN),
+  description: z.string().max(MAX_TOOL_DESCRIPTION_LENGTH),
   inputSchema: z.unknown(),
 });
 
@@ -61,6 +73,7 @@ export const hostToWorkerSchema = z.discriminatedUnion("kind", [
     value: z.unknown().optional(),
     error: z.string().optional(),
   }),
+  z.object({ kind: z.literal("cancel-tool"), callId: z.string() }),
   z.object({ kind: z.literal("shutdown") }),
 ]);
 
@@ -69,7 +82,7 @@ export type HostToWorkerMessage = z.infer<typeof hostToWorkerSchema>;
 export const workerToHostSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("ready"),
-    tools: z.array(registeredToolSchema),
+    tools: z.array(registeredToolSchema).max(MAX_TOOLS_PER_PLUGIN),
   }),
   z.object({
     kind: z.literal("capability-request"),

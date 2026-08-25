@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
@@ -9,6 +10,8 @@ import {
   type HostLogEntry,
   PluginHost,
 } from "./host.ts";
+import { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
+import { registeredToolSchema, workerToHostSchema } from "./protocol.ts";
 
 let rootDir: string;
 const running: PluginHost[] = [];
@@ -64,21 +67,43 @@ async function writePlugin(
   return discovered.plugin;
 }
 
-function makeHost(opts: {
+interface HostFixtureOptions {
   descriptor: PluginDescriptor;
   grantedCapabilities: Capability[];
+  netDomains?: string[];
   handlers?: CapabilityHandlers;
   logs?: HostLogEntry[];
-}): PluginHost {
-  const logs = opts.logs;
+  readyTimeoutMs?: number;
+  shutdownTimeoutMs?: number;
+}
+
+/**
+ * Builds a host in NON-hardened mode.
+ *
+ * These tests run under `bun test`, so `process.execPath` is bun, which has
+ * no permission model and would reject `--permission`. The hardened path is
+ * covered separately, against a real Node binary, in "worker containment"
+ * below. Everything else — the RPC protocol, grant enforcement, crash and
+ * timeout handling — is runtime-independent and is exercised here.
+ */
+function makeHost(options: HostFixtureOptions): PluginHost {
+  const logs = options.logs;
   const host = new PluginHost({
-    descriptor: opts.descriptor,
-    grantedCapabilities: opts.grantedCapabilities,
-    handlers: opts.handlers ?? {},
+    descriptor: options.descriptor,
+    grantedCapabilities: options.grantedCapabilities,
+    netDomains: options.netDomains ?? [],
+    handlers: options.handlers ?? {},
+    hardened: false,
     logger: logs ? (entry) => logs.push(entry) : undefined,
+    readyTimeoutMs: options.readyTimeoutMs,
+    shutdownTimeoutMs: options.shutdownTimeoutMs,
   });
   running.push(host);
   return host;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 beforeEach(async () => {
@@ -160,6 +185,26 @@ describe("PluginHost start", () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.ok === false && outcome.error).toContain("kaboom");
     expect(host.state).toBe("running");
+  });
+
+  test("rejects a descriptor whose plugin id is not a valid id", async () => {
+    const descriptor = await writePlugin("ok-plugin", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+    });
+    const tampered: PluginDescriptor = {
+      ...descriptor,
+      manifest: { ...descriptor.manifest, name: "Not A Valid Id" },
+    };
+
+    expect(
+      () =>
+        new PluginHost({
+          descriptor: tampered,
+          grantedCapabilities: [],
+          netDomains: [],
+          handlers: {},
+        }),
+    ).toThrow(/invalid plugin id/);
   });
 });
 
@@ -322,6 +367,243 @@ describe("PluginHost capability enforcement", () => {
       ),
     ).toBe(true);
   });
+
+  test("drops a granted capability the manifest does not declare", async () => {
+    const descriptor = await writePlugin("narrow-plugin", ["tools:register"], {
+      "tools/probe.js": `export default {
+        name: "probe",
+        description: "Calls a capability the manifest never asked for.",
+        inputSchema: {},
+        async execute(input, api) {
+          try {
+            await api.kv.get("k");
+            return { error: null };
+          } catch (error) {
+            return { error: String(error.message) };
+          }
+        },
+      };
+      `,
+    });
+
+    let handlerCalls = 0;
+    const logs: HostLogEntry[] = [];
+    // A stale consent row still lists storage:kv; the installed manifest no
+    // longer declares it. The intersection wins.
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "storage:kv"],
+      handlers: {
+        "storage:kv": () => {
+          handlerCalls++;
+          return Promise.resolve("leaked");
+        },
+      },
+      logs,
+    });
+    await host.start();
+
+    const outcome = await host.invokeTool("probe", {});
+
+    expect(outcome).toEqual({
+      ok: true,
+      output: { error: "capability not granted: storage:kv" },
+    });
+    expect(handlerCalls).toBe(0);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.level === "warn" &&
+          entry.message.includes(
+            "dropping granted capabilities absent from the manifest: storage:kv",
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  test("drops registered tools when tools:register is not granted", async () => {
+    const descriptor = await writePlugin("toolsy-plugin", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+    });
+    const logs: HostLogEntry[] = [];
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: [],
+      logs,
+    });
+
+    const { tools } = await host.start();
+
+    expect(tools).toEqual([]);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.level === "warn" &&
+          entry.message.includes("capability not granted: tools:register"),
+      ),
+    ).toBe(true);
+  });
+
+  test("refuses capability requests once stop() has begun", async () => {
+    const descriptor = await writePlugin(
+      "ticker-plugin",
+      ["tools:register", "storage:kv"],
+      {
+        "hooks/tick.js": `export default function tick(api) {
+          setInterval(() => {
+            api.kv
+              .get("tick")
+              .catch((error) => api.log("error", "tick failed: " + error.message));
+          }, 25);
+          // Ignore the graceful shutdown so the worker is still alive, and
+          // still ticking, for the whole shutdown window.
+          process.exit = () => {};
+        };
+        `,
+        "tools/echo.js": ECHO_TOOL,
+      },
+    );
+    const logs: HostLogEntry[] = [];
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "storage:kv"],
+      handlers: { "storage:kv": () => Promise.resolve("v") },
+      logs,
+      shutdownTimeoutMs: 400,
+    });
+    await host.start();
+    await delay(80);
+
+    await host.stop();
+
+    expect(
+      logs.some((entry) =>
+        entry.message.includes("tick failed: plugin is shutting down"),
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects capability requests beyond the in-flight cap", async () => {
+    const descriptor = await writePlugin(
+      "flood-plugin",
+      ["tools:register", "storage:kv"],
+      {
+        "tools/flood.js": `export default {
+          name: "flood",
+          description: "Issues many concurrent capability requests.",
+          inputSchema: {},
+          async execute(input, api) {
+            const results = await Promise.allSettled(
+              Array.from({ length: 36 }, (unused, i) => api.kv.get("k" + i)),
+            );
+            return {
+              rejected: results
+                .filter((r) => r.status === "rejected")
+                .map((r) => String(r.reason.message)),
+            };
+          },
+        };
+        `,
+      },
+    );
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "storage:kv"],
+      handlers: {
+        // Slow enough that all 36 are outstanding at once.
+        "storage:kv": () => delay(300).then(() => "v"),
+      },
+    });
+    await host.start();
+
+    const outcome = await host.invokeTool("flood", {}, 5000);
+
+    expect(outcome.ok).toBe(true);
+    const output =
+      outcome.ok === true
+        ? (outcome.output as { rejected: string[] })
+        : { rejected: [] };
+    // 36 requests against a cap of 32 leaves 4 rejections — below the
+    // malformed budget of 5, so the plugin survives to report them.
+    expect(output.rejected).toHaveLength(4);
+    expect(new Set(output.rejected)).toEqual(
+      new Set(["capability request queue full"]),
+    );
+    expect(host.state).toBe("running");
+  });
+
+  test("kills a worker that floods past the in-flight cap repeatedly", async () => {
+    const descriptor = await writePlugin(
+      "megaflood-plugin",
+      ["tools:register", "storage:kv"],
+      {
+        "tools/flood.js": `export default {
+          name: "flood",
+          description: "Issues far too many concurrent capability requests.",
+          inputSchema: {},
+          async execute(input, api) {
+            await Promise.allSettled(
+              Array.from({ length: 64 }, (unused, i) => api.kv.get("k" + i)),
+            );
+            return { done: true };
+          },
+        };
+        `,
+      },
+    );
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "storage:kv"],
+      handlers: { "storage:kv": () => delay(300).then(() => "v") },
+    });
+    const crashes: string[] = [];
+    host.onCrash((error) => crashes.push(error));
+    await host.start();
+
+    const outcome = await host.invokeTool("flood", {}, 5000);
+
+    expect(outcome.ok).toBe(false);
+    expect(host.state).toBe("crashed");
+    expect(crashes[0]).toContain("malformed");
+  });
+
+  test("rate-limits worker log messages", async () => {
+    const descriptor = await writePlugin("chatty-plugin", ["tools:register"], {
+      "tools/spam.js": `export default {
+        name: "spam",
+        description: "Logs far too much.",
+        inputSchema: {},
+        execute(input, api) {
+          for (let i = 0; i < 300; i++) {
+            api.log("info", "spam " + i);
+          }
+          return { logged: 300 };
+        },
+      };
+      `,
+    });
+    const logs: HostLogEntry[] = [];
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      logs,
+    });
+    await host.start();
+
+    await host.invokeTool("spam", {});
+    await delay(100);
+
+    const spam = logs.filter((entry) => entry.message.includes("spam "));
+    expect(spam.length).toBeGreaterThan(0);
+    expect(spam.length).toBeLessThanOrEqual(50);
+    expect(
+      logs.some(
+        (entry) =>
+          entry.level === "warn" &&
+          entry.message.includes("log rate limit exceeded"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("PluginHost net:fetch allowlist", () => {
@@ -340,11 +622,11 @@ describe("PluginHost net:fetch allowlist", () => {
   `;
 
   /**
-   * One fixture for the whole allowlist: the manifest grants net:fetch for
-   * exactly `api.example.com`, and each test drives a different target url
-   * through the same worker.
+   * The manifest asks for one domain; the host is handed a different,
+   * CONSENTED list. Only the consented one may be used — see the
+   * "ignores the manifest's netDomains" test.
    */
-  async function fetchHost(netDomains: string[]): Promise<{
+  async function fetchHost(consented: string[]): Promise<{
     host: PluginHost;
     reached: unknown[];
     logs: HostLogEntry[];
@@ -353,13 +635,14 @@ describe("PluginHost net:fetch allowlist", () => {
       "fetch-plugin",
       ["tools:register", "net:fetch"],
       { "tools/call.js": FETCH_TOOL },
-      netDomains,
+      ["manifest-only.example"],
     );
     const reached: unknown[] = [];
     const logs: HostLogEntry[] = [];
     const host = makeHost({
       descriptor,
       grantedCapabilities: ["tools:register", "net:fetch"],
+      netDomains: consented,
       handlers: {
         "net:fetch": (_pluginId, payload) => {
           reached.push(payload);
@@ -404,6 +687,20 @@ describe("PluginHost net:fetch allowlist", () => {
 
     expect(result.allowed).toBe(true);
     expect(reached).toHaveLength(1);
+  });
+
+  test("uses the consented netDomains and ignores the manifest's", async () => {
+    const { host, reached } = await fetchHost(["api.example.com"]);
+
+    // The fixture's own manifest declares "manifest-only.example". If the
+    // host trusted the manifest, a plugin update could widen its own reach.
+    const fromManifest = await attempt(host, "https://manifest-only.example/");
+
+    expect(fromManifest).toEqual({
+      allowed: false,
+      message: "net:fetch denied: host manifest-only.example not in netDomains",
+    });
+    expect(reached).toEqual([]);
   });
 
   test("rejects a subdomain of an allowed host", async () => {
@@ -452,6 +749,18 @@ describe("PluginHost net:fetch allowlist", () => {
     expect(logs.some((entry) => entry.level === "warn")).toBe(true);
   });
 
+  test("rejects an ip literal even when it would otherwise match", async () => {
+    const { host, reached } = await fetchHost(["127.0.0.1"]);
+
+    const result = await attempt(host, "http://127.0.0.1:8080/admin");
+
+    expect(result).toEqual({
+      allowed: false,
+      message: "net:fetch denied: ip literal 127.0.0.1 not allowed",
+    });
+    expect(reached).toEqual([]);
+  });
+
   test("rejects an unparsable url", async () => {
     const { host, reached } = await fetchHost(["api.example.com"]);
 
@@ -483,12 +792,12 @@ describe("PluginHost net:fetch allowlist", () => {
         };
         `,
       },
-      ["api.example.com"],
     );
     let reached = 0;
     const host = makeHost({
       descriptor,
       grantedCapabilities: ["tools:register", "net:fetch"],
+      netDomains: ["api.example.com"],
       handlers: {
         "net:fetch": () => {
           reached++;
@@ -520,15 +829,159 @@ describe("PluginHost net:fetch allowlist", () => {
   });
 });
 
+describe("isFetchAllowed", () => {
+  const domains = ["api.example.com", "example.org"];
+
+  test("accepts an exact match on either scheme", () => {
+    expect(isFetchAllowed("https://api.example.com/x", domains)).toBe(true);
+    expect(isFetchAllowed("http://example.org", domains)).toBe(true);
+  });
+
+  test("normalizes case and one trailing dot on both sides", () => {
+    expect(isFetchAllowed("https://API.Example.com./x", domains)).toBe(true);
+    expect(
+      isFetchAllowed("https://api.example.com", ["API.EXAMPLE.COM."]),
+    ).toBe(true);
+    // Two trailing dots is not a name that normalizes to anything real.
+    expect(isFetchAllowed("https://api.example.com../x", domains)).toBe(false);
+  });
+
+  test("refuses subdomains and parent domains alike", () => {
+    expect(isFetchAllowed("https://evil.api.example.com/", domains)).toBe(
+      false,
+    );
+    expect(isFetchAllowed("https://example.com/", domains)).toBe(false);
+    expect(isFetchAllowed("https://api.example.com.evil.test/", domains)).toBe(
+      false,
+    );
+  });
+
+  test("refuses ip literals in both families", () => {
+    expect(isFetchAllowed("http://127.0.0.1/", ["127.0.0.1"])).toBe(false);
+    expect(isFetchAllowed("http://169.254.169.254/", ["169.254.169.254"])).toBe(
+      false,
+    );
+    // WHATWG normalizes these shorthand forms to dotted quads.
+    expect(isFetchAllowed("http://127.1/", ["127.0.0.1"])).toBe(false);
+    expect(isFetchAllowed("http://0x7f000001/", ["127.0.0.1"])).toBe(false);
+    expect(isFetchAllowed("http://[::1]/", ["::1"])).toBe(false);
+  });
+
+  test("refuses non-http schemes and unparsable urls", () => {
+    expect(isFetchAllowed("file:///etc/passwd", domains)).toBe(false);
+    expect(isFetchAllowed("ftp://example.org/", domains)).toBe(false);
+    expect(isFetchAllowed("data:text/plain,hi", domains)).toBe(false);
+    expect(isFetchAllowed("nonsense", domains)).toBe(false);
+  });
+
+  test("refuses everything when the consented list is empty", () => {
+    expect(isFetchAllowed("https://api.example.com/", [])).toBe(false);
+  });
+
+  test("reports why it refused", () => {
+    expect(checkFetchAllowed("https://nope.test/", domains)).toEqual({
+      allowed: false,
+      reason: "net:fetch denied: host nope.test not in netDomains",
+    });
+    expect(checkFetchAllowed("https://api.example.com/", domains)).toEqual({
+      allowed: true,
+      hostname: "api.example.com",
+    });
+  });
+});
+
+describe("registeredToolSchema bounds", () => {
+  test("accepts a well-formed tool", () => {
+    expect(
+      registeredToolSchema.safeParse({
+        name: "do_thing-2",
+        description: "Does the thing.",
+        inputSchema: {},
+      }).success,
+    ).toBe(true);
+  });
+
+  test("refuses names that are not lowercase identifiers", () => {
+    for (const name of ["BadName", "9lives", "has space", "-leading", ""]) {
+      expect(
+        registeredToolSchema.safeParse({
+          name,
+          description: "x",
+          inputSchema: {},
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test("refuses an over-long name or description", () => {
+    expect(
+      registeredToolSchema.safeParse({
+        name: "a".repeat(65),
+        description: "x",
+        inputSchema: {},
+      }).success,
+    ).toBe(false);
+    expect(
+      registeredToolSchema.safeParse({
+        name: "ok",
+        description: "x".repeat(1001),
+        inputSchema: {},
+      }).success,
+    ).toBe(false);
+  });
+
+  test("refuses a ready message with more than 64 tools", () => {
+    const tool = { name: "ok", description: "x", inputSchema: {} };
+    expect(
+      workerToHostSchema.safeParse({
+        kind: "ready",
+        tools: Array.from({ length: 64 }, () => tool),
+      }).success,
+    ).toBe(true);
+    expect(
+      workerToHostSchema.safeParse({
+        kind: "ready",
+        tools: Array.from({ length: 65 }, () => tool),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("a worker registering an invalid tool name never becomes ready", async () => {
+    const descriptor = await writePlugin("badname-plugin", ["tools:register"], {
+      "tools/bad.js": `export default {
+        name: "BadName",
+        description: "Uppercase names do not belong in an MCP tool list.",
+        inputSchema: {},
+        execute() {
+          return {};
+        },
+      };
+      `,
+    });
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      readyTimeoutMs: 600,
+    });
+
+    await expect(host.start()).rejects.toThrow();
+    expect(host.state).toBe("crashed");
+  });
+});
+
 describe("PluginHost worker environment", () => {
-  test("gives the worker exactly PATH and PACO_PLUGIN_ID", async () => {
+  test("gives the worker exactly PATH, PACO_PLUGIN_ID and PACO_PLUGIN_STATE_DIR", async () => {
     const descriptor = await writePlugin("env-plugin", ["tools:register"], {
       "tools/env.js": `export default {
         name: "env",
         description: "Reports its own environment.",
         inputSchema: {},
         execute() {
-          return { keys: Object.keys(process.env), pluginId: process.env.PACO_PLUGIN_ID };
+          return {
+            keys: Object.keys(process.env),
+            pluginId: process.env.PACO_PLUGIN_ID,
+            stateDir: process.env.PACO_PLUGIN_STATE_DIR,
+          };
         },
       };
       `,
@@ -544,10 +997,50 @@ describe("PluginHost worker environment", () => {
     expect(outcome.ok).toBe(true);
     const output =
       outcome.ok === true
-        ? (outcome.output as { keys: string[]; pluginId: string })
-        : { keys: [], pluginId: "" };
-    expect([...output.keys].sort()).toEqual(["PACO_PLUGIN_ID", "PATH"]);
+        ? (outcome.output as {
+            keys: string[];
+            pluginId: string;
+            stateDir: string;
+          })
+        : { keys: [], pluginId: "", stateDir: "" };
+    expect([...output.keys].sort()).toEqual([
+      "PACO_PLUGIN_ID",
+      "PACO_PLUGIN_STATE_DIR",
+      "PATH",
+    ]);
     expect(output.pluginId).toBe("env-plugin");
+    expect(output.stateDir).toBe(host.pluginStateDir);
+  });
+
+  test("sends plugin console output to stderr rather than the protocol stream", async () => {
+    const descriptor = await writePlugin("noisy-console", ["tools:register"], {
+      "tools/talk.js": `export default {
+        name: "talk",
+        description: "Writes to console before returning.",
+        inputSchema: {},
+        execute() {
+          console.log("this would corrupt the protocol stream");
+          console.error("and so would this");
+          return { fine: true };
+        },
+      };
+      `,
+    });
+    const logs: HostLogEntry[] = [];
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      logs,
+    });
+    await host.start();
+
+    const outcome = await host.invokeTool("talk", {});
+
+    expect(outcome).toEqual({ ok: true, output: { fine: true } });
+    expect(host.state).toBe("running");
+    expect(logs.some((entry) => entry.message.includes("not JSON"))).toBe(
+      false,
+    );
   });
 });
 
@@ -598,6 +1091,28 @@ describe("PluginHost failure handling", () => {
     expect(tools.map((tool) => tool.name)).toEqual(["echo"]);
   });
 
+  test("kills a worker that writes a line past the size cap", async () => {
+    const descriptor = await writePlugin("bloated-plugin", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+      "hooks/bloat.js": `export default function bloat() {
+        // 70KB with no newline in sight: readline would buffer this forever.
+        process.stdout.write("x".repeat(70000));
+      };
+      `,
+    });
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+    });
+    const crashes: string[] = [];
+    host.onCrash((error) => crashes.push(error));
+
+    await expect(host.start()).rejects.toThrow(/newline/);
+
+    expect(host.state).toBe("crashed");
+    expect(crashes[0]).toContain("without a newline");
+  });
+
   test("detects a worker that exits mid-run and never throws into the embedder", async () => {
     const descriptor = await writePlugin(
       "suicidal-plugin",
@@ -633,16 +1148,33 @@ describe("PluginHost failure handling", () => {
     // A second invocation on a crashed host still resolves rather than throwing.
     const after = await host.invokeTool("die", {});
     expect(after.ok).toBe(false);
+
+    // And stopping the corpse does not launder the crash into a clean stop.
+    await host.stop();
+    expect(host.state).toBe("crashed");
   });
 
-  test("times out a hung tool invocation and stays running", async () => {
+  test("times out a hung tool invocation, cancels it, and stays running", async () => {
     const descriptor = await writePlugin("slow-plugin", ["tools:register"], {
       "tools/hang.js": `export default {
         name: "hang",
-        description: "Never resolves.",
+        description: "Never resolves unless cancelled.",
+        inputSchema: {},
+        execute(input, api, signal) {
+          return new Promise(() => {
+            signal.addEventListener("abort", () => {
+              globalThis.__aborted = true;
+            });
+          });
+        },
+      };
+      `,
+      "tools/aborted.js": `export default {
+        name: "aborted",
+        description: "Reports whether the hung call was cancelled.",
         inputSchema: {},
         execute() {
-          return new Promise(() => {});
+          return { aborted: globalThis.__aborted === true };
         },
       };
       `,
@@ -658,6 +1190,11 @@ describe("PluginHost failure handling", () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.ok === false && outcome.error).toContain("timed out");
     expect(host.state).toBe("running");
+
+    // The worker was told to give up, so the tool's AbortSignal fired.
+    await delay(50);
+    const cancelled = await host.invokeTool("aborted", {});
+    expect(cancelled).toEqual({ ok: true, output: { aborted: true } });
   });
 
   test("fails start when the worker never becomes ready", async () => {
@@ -667,16 +1204,40 @@ describe("PluginHost failure handling", () => {
       };
       `,
     });
-    const host = new PluginHost({
+    const host = makeHost({
       descriptor,
       grantedCapabilities: ["tools:register"],
-      handlers: {},
       readyTimeoutMs: 300,
     });
-    running.push(host);
 
     await expect(host.start()).rejects.toThrow(/ready/i);
     expect(host.state).toBe("crashed");
+  });
+
+  test("fails start when the host is stopped mid-handshake", async () => {
+    const descriptor = await writePlugin(
+      "slowstart-plugin",
+      ["tools:register"],
+      {
+        "hooks/stall.js": `export default function stall() {
+        return new Promise(() => {});
+      };
+      `,
+      },
+    );
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      readyTimeoutMs: 10_000,
+    });
+
+    const starting = host.start();
+    await delay(150);
+    const stopping = host.stop();
+
+    await expect(starting).rejects.toThrow(/stopped during startup/);
+    await stopping;
+    expect(host.state).toBe("stopped");
   });
 });
 
@@ -714,13 +1275,11 @@ describe("PluginHost stop", () => {
       `,
       },
     );
-    const host = new PluginHost({
+    const host = makeHost({
       descriptor,
       grantedCapabilities: ["tools:register"],
-      handlers: {},
       shutdownTimeoutMs: 300,
     });
-    running.push(host);
     await host.start();
 
     const startedAt = Date.now();
@@ -730,6 +1289,54 @@ describe("PluginHost stop", () => {
     expect(host.state).toBe("stopped");
     expect(elapsed).toBeGreaterThanOrEqual(250);
     expect(elapsed).toBeLessThan(3000);
+  });
+
+  test("kills the worker's whole process group, not just the worker", async () => {
+    // A worker can only spawn a grandchild in NON-hardened mode: under the
+    // permission model `node:child_process` is refused outright. This test
+    // therefore covers the fallback case — an unhardened worker, or a future
+    // one granted child processes — where a tree kill is what stops orphans.
+    const descriptor = await writePlugin("spawner-plugin", ["tools:register"], {
+      "tools/spawn.js": `import { spawn } from "node:child_process";
+      export default {
+        name: "spawn-child",
+        description: "Spawns a long-lived grandchild process.",
+        inputSchema: {},
+        execute() {
+          const child = spawn("/bin/sh", ["-c", "exec sleep 30"], {
+            stdio: "ignore",
+          });
+          child.unref();
+          return { pid: child.pid };
+        },
+      };
+      `,
+      "hooks/ignore-shutdown.js": `export default function ignoreShutdown() {
+        setInterval(() => {}, 1000);
+        process.exit = () => {};
+      };
+      `,
+    });
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      shutdownTimeoutMs: 300,
+    });
+    await host.start();
+
+    const outcome = await host.invokeTool("spawn-child", {});
+    expect(outcome.ok).toBe(true);
+    const grandchildPid = (
+      outcome.ok === true ? (outcome.output as { pid: number }) : { pid: 0 }
+    ).pid;
+    expect(grandchildPid).toBeGreaterThan(0);
+    // Signal 0 probes for existence without delivering anything.
+    expect(() => process.kill(grandchildPid, 0)).not.toThrow();
+
+    await host.stop();
+    await delay(200);
+
+    expect(() => process.kill(grandchildPid, 0)).toThrow();
   });
 
   test("is idempotent and safe on a host that never started", async () => {
@@ -749,28 +1356,28 @@ describe("PluginHost stop", () => {
 });
 
 describe("PluginHost deliverEvent", () => {
+  const LISTENER_HOOK = `export default function listen(api) {
+    globalThis.__seen = [];
+    api.events.subscribe((event) => {
+      globalThis.__seen.push(event);
+    });
+  };
+  `;
+  const SEEN_TOOL = `export default {
+    name: "seen",
+    description: "Returns the events observed so far.",
+    inputSchema: {},
+    execute() {
+      return { seen: globalThis.__seen ?? [] };
+    },
+  };
+  `;
+
   test("fans an event out to a subscriber when events:subscribe is granted", async () => {
     const descriptor = await writePlugin(
       "listener-plugin",
       ["tools:register", "events:subscribe"],
-      {
-        "hooks/listen.js": `export default function listen(api) {
-          globalThis.__seen = [];
-          api.events.subscribe((event) => {
-            globalThis.__seen.push(event);
-          });
-        };
-        `,
-        "tools/seen.js": `export default {
-          name: "seen",
-          description: "Returns the events observed so far.",
-          inputSchema: {},
-          execute() {
-            return { seen: globalThis.__seen ?? [] };
-          },
-        };
-        `,
-      },
+      { "hooks/listen.js": LISTENER_HOOK, "tools/seen.js": SEEN_TOOL },
     );
     const host = makeHost({
       descriptor,
@@ -795,35 +1402,274 @@ describe("PluginHost deliverEvent", () => {
   });
 
   test("drops events when events:subscribe is not granted", async () => {
-    const descriptor = await writePlugin("deaf-plugin", ["tools:register"], {
-      "hooks/listen.js": `export default function listen(api) {
-        globalThis.__seen = [];
-        api.events.subscribe((event) => {
-          globalThis.__seen.push(event);
-        });
-      };
-      `,
-      "tools/seen.js": `export default {
-        name: "seen",
-        description: "Returns the events observed so far.",
-        inputSchema: {},
-        execute() {
-          return { seen: globalThis.__seen ?? [] };
-        },
-      };
-      `,
-    });
-    const logs: HostLogEntry[] = [];
+    const descriptor = await writePlugin(
+      "deaf-plugin",
+      ["tools:register", "events:subscribe"],
+      { "hooks/listen.js": LISTENER_HOOK, "tools/seen.js": SEEN_TOOL },
+    );
     const host = makeHost({
       descriptor,
       grantedCapabilities: ["tools:register"],
-      logs,
     });
     await host.start();
 
     host.deliverEvent(1, "chat-1", { type: "message" });
+    await delay(100);
 
     const outcome = await host.invokeTool("seen", {});
     expect(outcome).toEqual({ ok: true, output: { seen: [] } });
+  });
+});
+
+/**
+ * Locates a Node binary that supports the permission model.
+ *
+ * These tests run under `bun test`, and bun has no permission model, so the
+ * hardened path needs a real Node >= 22.15 (the version that added the
+ * synchronous `module.registerHooks` the network preload depends on).
+ */
+function findHardenedNode(): string | undefined {
+  const candidates = [
+    process.env.PACO_NODE_EXECUTABLE,
+    process.execPath.includes("node") ? process.execPath : undefined,
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  try {
+    const fromPath = execFileSync("/usr/bin/env", ["which", "node"], {
+      encoding: "utf-8",
+    }).trim();
+    if (fromPath) {
+      candidates.push(fromPath);
+    }
+  } catch {
+    // No `node` on PATH; the explicit candidates may still work.
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const version = execFileSync(
+        candidate,
+        ["--permission", "-e", "process.stdout.write(process.versions.node)"],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+      ).trim();
+      const [major = 0, minor = 0] = version.split(".").map(Number);
+      if (major > 22 || (major === 22 && minor >= 15)) {
+        return candidate;
+      }
+    } catch {
+      // Not a usable Node: no --permission, or not a Node at all.
+    }
+  }
+  return undefined;
+}
+
+const hardenedNode = findHardenedNode();
+if (!hardenedNode) {
+  console.warn(
+    "\n!!! SKIPPING the plugin worker containment suite: no Node >= 22.15 with --permission was found.\n" +
+      "!!! The permission model, filesystem allowlist and network denial are therefore UNVERIFIED in this run.\n" +
+      "!!! Set PACO_NODE_EXECUTABLE to a suitable Node binary to run them.\n",
+  );
+}
+const describeHardened = hardenedNode ? describe : describe.skip;
+
+describeHardened("worker containment (hardened, real Node)", () => {
+  const PROBE_TOOLS = {
+    "tools/read-outside.js": `import { readFile } from "node:fs/promises";
+    export default {
+      name: "read-outside",
+      description: "Tries to read a file outside the plugin directory.",
+      inputSchema: {},
+      async execute() {
+        try {
+          const text = await readFile("/etc/hosts", "utf-8");
+          return { read: true, length: text.length };
+        } catch (error) {
+          return { read: false, code: error.code ?? String(error.message) };
+        }
+      },
+    };
+    `,
+    "tools/read-own.js": `import { readFile } from "node:fs/promises";
+    import * as path from "node:path";
+    export default {
+      name: "read-own",
+      description: "Reads the plugin's own manifest.",
+      inputSchema: {},
+      async execute() {
+        const text = await readFile(path.join(process.cwd(), "plugin.json"), "utf-8");
+        return { name: JSON.parse(text).name };
+      },
+    };
+    `,
+    "tools/write-state.js": `import { readFile, writeFile } from "node:fs/promises";
+    import * as path from "node:path";
+    export default {
+      name: "write-state",
+      description: "Writes and reads back a file in the state directory.",
+      inputSchema: {},
+      async execute(input, api) {
+        const file = path.join(api.stateDir, "scratch.txt");
+        await writeFile(file, "persisted");
+        return { readBack: await readFile(file, "utf-8"), stateDir: api.stateDir };
+      },
+    };
+    `,
+    "tools/write-outside.js": `import { writeFile } from "node:fs/promises";
+    export default {
+      name: "write-outside",
+      description: "Tries to write outside the state directory.",
+      inputSchema: {},
+      async execute() {
+        try {
+          await writeFile("/tmp/paco-plugin-escape.txt", "escaped");
+          return { wrote: true };
+        } catch (error) {
+          return { wrote: false, code: error.code ?? String(error.message) };
+        }
+      },
+    };
+    `,
+    "tools/import-module.js": `export default {
+      name: "import-module",
+      description: "Tries to import a denied builtin.",
+      inputSchema: {},
+      async execute(input) {
+        try {
+          await import(input.specifier);
+          return { imported: true };
+        } catch (error) {
+          return { imported: false, message: String(error.message) };
+        }
+      },
+    };
+    `,
+    "tools/globals.js": `export default {
+      name: "globals",
+      description: "Reports which network globals survive.",
+      inputSchema: {},
+      execute() {
+        return {
+          fetch: typeof globalThis.fetch,
+          WebSocket: typeof globalThis.WebSocket,
+          XMLHttpRequest: typeof globalThis.XMLHttpRequest,
+          EventSource: typeof globalThis.EventSource,
+        };
+      },
+    };
+    `,
+  };
+
+  async function hardenedHost(): Promise<PluginHost> {
+    const descriptor = await writePlugin(
+      "contained-plugin",
+      ["tools:register"],
+      PROBE_TOOLS,
+    );
+    const host = new PluginHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      netDomains: [],
+      handlers: {},
+      hardened: true,
+      nodeExecutable: hardenedNode,
+    });
+    running.push(host);
+    await host.start();
+    return host;
+  }
+
+  function output(outcome: { ok: boolean }): Record<string, unknown> {
+    if (!("output" in outcome)) {
+      throw new Error("tool call failed");
+    }
+    return (outcome as { output: Record<string, unknown> }).output;
+  }
+
+  test("starts under the permission model and registers its tools", async () => {
+    const host = await hardenedHost();
+    expect(host.state).toBe("running");
+  });
+
+  test("cannot read a file outside the plugin directory", async () => {
+    const host = await hardenedHost();
+
+    const result = output(await host.invokeTool("read-outside", {}));
+
+    expect(result.read).toBe(false);
+    expect(result.code).toBe("ERR_ACCESS_DENIED");
+    // Emphatically: no file contents came back as data.
+    expect(result.length).toBeUndefined();
+  });
+
+  test("can read its own files", async () => {
+    const host = await hardenedHost();
+
+    const result = output(await host.invokeTool("read-own", {}));
+
+    expect(result.name).toBe("contained-plugin");
+  });
+
+  test("can write inside its state directory", async () => {
+    const host = await hardenedHost();
+
+    const result = output(await host.invokeTool("write-state", {}));
+
+    expect(result.readBack).toBe("persisted");
+    expect(result.stateDir).toBe(host.pluginStateDir);
+    const onDisk = await readFile(
+      path.join(host.pluginStateDir, "scratch.txt"),
+      "utf-8",
+    );
+    expect(onDisk).toBe("persisted");
+  });
+
+  test("cannot write outside its state directory", async () => {
+    const host = await hardenedHost();
+
+    const result = output(await host.invokeTool("write-outside", {}));
+
+    expect(result.wrote).toBe(false);
+    expect(result.code).toBe("ERR_ACCESS_DENIED");
+  });
+
+  test("cannot import child_process, worker_threads, or the network builtins", async () => {
+    const host = await hardenedHost();
+
+    for (const specifier of [
+      "node:child_process",
+      "node:worker_threads",
+      "node:net",
+      "node:http",
+      "node:https",
+      "node:dns",
+      "node:tls",
+      "node:vm",
+      "node:module",
+      "child_process",
+      "net",
+    ]) {
+      const result = output(
+        await host.invokeTool("import-module", { specifier }),
+      );
+      expect(result.imported).toBe(false);
+      expect(String(result.message)).toContain("plugin module denied");
+    }
+  });
+
+  test("has no network globals at all", async () => {
+    const host = await hardenedHost();
+
+    const result = output(await host.invokeTool("globals", {}));
+
+    expect(result).toEqual({
+      fetch: "undefined",
+      WebSocket: "undefined",
+      XMLHttpRequest: "undefined",
+      EventSource: "undefined",
+    });
   });
 });

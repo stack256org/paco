@@ -7,7 +7,9 @@ export type {
   PluginHostState,
   ToolOutcome,
 } from "./host.ts";
-export { PluginHost, workerEntryPath } from "./host.ts";
+export { PluginHost, workerEntryPath, workerPreloadPath } from "./host.ts";
+export type { FetchAllowDecision } from "./net-allowlist.ts";
+export { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
 export type {
   PluginApi,
   PluginEventsApi,
@@ -27,6 +29,9 @@ export type {
 export {
   encodeMessage,
   hostToWorkerSchema,
+  MAX_TOOL_DESCRIPTION_LENGTH,
+  MAX_TOOL_NAME_LENGTH,
+  MAX_TOOLS_PER_PLUGIN,
   pluginSlotsSchema,
   registeredToolSchema,
   workerToHostSchema,

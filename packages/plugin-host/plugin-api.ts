@@ -39,6 +39,13 @@ export interface PluginEventsApi {
 
 export interface PluginApi {
   readonly pluginId: string;
+  /**
+   * A directory the plugin may write to — the only writable path it has.
+   * Created by the host under the OS temp dir and passed in as
+   * `PACO_PLUGIN_STATE_DIR`. Scratch space, not durable storage: use the
+   * `storage:kv` capability for anything that must survive a restart.
+   */
+  readonly stateDir: string;
   /** `net:fetch` — the host enforces the manifest's domain allowlist. */
   fetch(request: PluginFetchRequest): Promise<PluginFetchResponse>;
   /** `storage:kv` — per-plugin key/value storage. */
@@ -53,12 +60,22 @@ export interface PluginApi {
   log(level: "info" | "warn" | "error", message: string): void;
 }
 
-/** The shape a `tools/*` module must default-export. */
+/**
+ * The shape a `tools/*` module must default-export.
+ *
+ * `signal` aborts when the host gives up on the call (its `invokeTool`
+ * timeout). A tool that ignores it still has its result discarded, but a
+ * long-running one should stop working when asked.
+ */
 export interface PluginToolModule {
   name: string;
   description: string;
   inputSchema: unknown;
-  execute(input: unknown, api: PluginApi): unknown | Promise<unknown>;
+  execute(
+    input: unknown,
+    api: PluginApi,
+    signal: AbortSignal,
+  ): unknown | Promise<unknown>;
 }
 
 /** The shape a `hooks/*` module must default-export. */

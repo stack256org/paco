@@ -1,11 +1,15 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { mkdir, realpath } from "node:fs/promises";
+import { createRequire } from "node:module";
+import * as os from "node:os";
 import * as path from "node:path";
-import { createInterface, type Interface } from "node:readline";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
-import { z } from "zod";
+import { checkFetchAllowed } from "./net-allowlist.ts";
 import {
   encodeMessage,
   type HostToWorkerMessage,
+  type PluginSlots,
   type RegisteredTool,
   workerToHostSchema,
 } from "./protocol.ts";
@@ -20,15 +24,22 @@ const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 3000;
 /** Ceiling on retained worker stderr, so a chatty plugin cannot grow it. */
 const MAX_STDERR_BYTES = 16_000;
-
-/** Schemes a plugin may fetch. Anything else is a way out of the allowlist. */
-const ALLOWED_FETCH_PROTOCOLS = new Set(["http:", "https:"]);
-
 /**
- * The only part of a `net:fetch` payload the host needs to police. Everything
- * else (method, headers, body) is the handler's concern.
+ * Ceiling on one protocol line. Without it a worker can pin the host's memory
+ * by writing forever and never sending a newline — the reader would buffer
+ * the whole stream waiting for one that never comes.
  */
-const fetchPayloadSchema = z.object({ url: z.string() });
+const MAX_LINE_BYTES = 64_000;
+/** Capability requests a plugin may have outstanding at once. */
+const MAX_INFLIGHT_CAPABILITY_REQUESTS = 32;
+/** Worker `log` messages accepted per second before the rest are dropped. */
+const MAX_LOGS_PER_SECOND = 50;
+
+/** Plugin ids, per the plan. Mirrors the plugin-kit manifest rule. */
+const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
+
+/** Packages the worker must be able to read for its own imports to resolve. */
+const WORKER_RUNTIME_PACKAGES = ["zod", "@paco/plugin-kit"] as const;
 
 /**
  * Absolute path to the worker entry script.
@@ -39,6 +50,12 @@ const fetchPayloadSchema = z.object({ url: z.string() });
 export const workerEntryPath: string = path.join(
   import.meta.dirname,
   "worker-entry.ts",
+);
+
+/** Absolute path to the `--import` preload that closes the network. */
+export const workerPreloadPath: string = path.join(
+  import.meta.dirname,
+  "worker-preload.ts",
 );
 
 export type HostLogLevel = "info" | "warn" | "error";
@@ -69,11 +86,32 @@ export type PluginHostState = "starting" | "running" | "crashed" | "stopped";
 
 export interface PluginHostOptions {
   descriptor: PluginDescriptor;
-  /** Exactly what the operator consented to. Nothing else is enforced. */
+  /**
+   * Exactly what the operator consented to, from the database — not from the
+   * manifest. A manifest is the plugin's *request*; this is the answer, and
+   * it is what gets enforced. Anything here that the manifest does not also
+   * declare is dropped at construction.
+   */
   grantedCapabilities: Capability[];
+  /**
+   * The consented `net:fetch` domains, also from the database. The host never
+   * reads `descriptor.manifest.netDomains`: a plugin update that widened its
+   * own manifest would otherwise widen its own network access.
+   */
+  netDomains: string[];
   handlers: CapabilityHandlers;
   /** Production pins Paco's bundled node; defaults to `process.execPath`. */
   nodeExecutable?: string;
+  /**
+   * Process-level containment: Node's permission model plus the network
+   * preload. Defaults to `true` and should stay true everywhere real plugin
+   * code runs.
+   *
+   * Set it to `false` only to run the worker under a runtime that has no
+   * permission model (bun, in this package's own tests). A non-hardened
+   * worker is an ordinary process with the full filesystem and network.
+   */
+  hardened?: boolean;
   logger?: HostLogger;
   readyTimeoutMs?: number;
   shutdownTimeoutMs?: number;
@@ -87,17 +125,38 @@ interface PendingToolCall {
 /**
  * Runs one plugin in its own process and enforces its capability grant.
  *
- * Three invariants shape everything below:
+ * ## What contains the plugin
  *
- * 1. The worker's environment is built from scratch. `process.env` holds the
- *    app secret, the database URL and every provider token; a plugin must
- *    never see them, so the env is `{ PATH, PACO_PLUGIN_ID }` and nothing
- *    more — not a filtered copy, a fresh object.
- * 2. Grant checks happen here, before any handler runs. The worker is
- *    untrusted code and can ask for anything; asking is not receiving.
- * 3. `net:fetch` is narrowed further, still in the host: the target must be
- *    http(s) and its hostname must match `manifest.netDomains` exactly. See
- *    `checkNetFetchAllowlist`.
+ * This is **process-level containment, not a container**. There is no
+ * namespace, no cgroup, no seccomp filter and no memory limit. What there is:
+ *
+ * - **No ambient secrets.** The worker's environment is built from scratch —
+ *   `PATH`, `PACO_PLUGIN_ID`, `PACO_PLUGIN_STATE_DIR` — so `APP_SECRET`,
+ *   `POSTGRES_URL` and every provider token are simply absent. Not filtered:
+ *   never present.
+ * - **No filesystem beyond its own directory.** Node's permission model
+ *   (`--permission`) allows reads only under the plugin's own root, this
+ *   package, and the two packages the worker imports; writes only under a
+ *   per-plugin scratch dir. `/etc/hosts`, the repo, and the operator's home
+ *   directory all fail with `ERR_ACCESS_DENIED`.
+ * - **No subprocesses, workers or native addons.** `--allow-child-process`,
+ *   `--allow-worker` and `--allow-addons` are deliberately not passed.
+ * - **No network.** The permission model does not cover sockets, so
+ *   `worker-preload.ts` deletes the network globals and refuses to resolve
+ *   `node:net`, `node:http`, `node:dns` and the rest for plugin code. The
+ *   only way out is the `net:fetch` capability, allowlisted here.
+ * - **No unbounded anything.** Line length, stderr, in-flight capability
+ *   requests, log rate, tool count and tool-call duration are all capped.
+ *
+ * See `SECURITY.md` in this package for the full statement, including what
+ * is explicitly *not* prevented. The install-consent copy must not promise
+ * more than that file claims.
+ *
+ * ## What the host decides
+ *
+ * Grant checks happen here, before any handler runs. The worker is untrusted
+ * code and can ask for anything; asking is not receiving. `net:fetch` is
+ * narrowed further against the operator's consented domain list.
  *
  * Background failures — a crash, a protocol violation, a hung tool — resolve
  * into values (`state`, `onCrash`, `ToolOutcome`) and are never thrown into
@@ -106,14 +165,18 @@ interface PendingToolCall {
 export class PluginHost {
   private readonly descriptor: PluginDescriptor;
   private readonly granted: Set<Capability>;
+  private readonly netDomains: readonly string[];
   private readonly handlers: CapabilityHandlers;
   private readonly nodeExecutable: string;
+  private readonly hardened: boolean;
   private readonly logger: HostLogger;
   private readonly readyTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
+  private stateDir: string;
+  private rootDir: string;
+  private slots: PluginSlots;
 
   private child: ChildProcessWithoutNullStreams | undefined;
-  private stdoutLines: Interface | undefined;
   private currentState: PluginHostState = "starting";
   private malformedCount = 0;
   private stderrTail = "";
@@ -121,6 +184,12 @@ export class PluginHost {
   private crashReported = false;
   private started = false;
   private callCounter = 0;
+  private readerClosed = false;
+  private lineBuffer = "";
+  private inFlightCapabilityRequests = 0;
+  private logTokens = MAX_LOGS_PER_SECOND;
+  private logWindowStart = 0;
+  private logRateWarned = false;
 
   private readonly crashCallbacks = new Set<(error: string) => void>();
   private readonly pendingCalls = new Map<string, PendingToolCall>();
@@ -129,13 +198,44 @@ export class PluginHost {
 
   constructor(options: PluginHostOptions) {
     this.descriptor = options.descriptor;
-    this.granted = new Set(options.grantedCapabilities);
+    const pluginId = options.descriptor.manifest.name;
+    if (!PLUGIN_ID_PATTERN.test(pluginId)) {
+      throw new Error(
+        `invalid plugin id ${JSON.stringify(pluginId)}: must match ${PLUGIN_ID_PATTERN}`,
+      );
+    }
+
     this.handlers = options.handlers;
+    this.netDomains = [...options.netDomains];
     this.nodeExecutable = options.nodeExecutable ?? process.execPath;
+    this.hardened = options.hardened ?? true;
     this.logger = options.logger ?? defaultLogger;
     this.readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
     this.shutdownTimeoutMs =
       options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    this.stateDir = path.join(os.tmpdir(), "paco-plugins", pluginId);
+    this.rootDir = options.descriptor.rootDir;
+    this.slots = options.descriptor.slots;
+
+    // A grant can only ever be the intersection of what the plugin asked for
+    // and what the operator agreed to. A plugin that quietly drops a
+    // capability from its manifest in an update must lose it, even if a stale
+    // consent row still lists it.
+    const requested = new Set(options.descriptor.manifest.capabilities);
+    const dropped = options.grantedCapabilities.filter(
+      (capability) => !requested.has(capability),
+    );
+    if (dropped.length > 0) {
+      this.logger({
+        level: "warn",
+        message: `plugin ${pluginId}: dropping granted capabilities absent from the manifest: ${dropped.join(", ")}`,
+      });
+    }
+    this.granted = new Set(
+      options.grantedCapabilities.filter((capability) =>
+        requested.has(capability),
+      ),
+    );
   }
 
   get state(): PluginHostState {
@@ -144,6 +244,11 @@ export class PluginHost {
 
   get pluginId(): string {
     return this.descriptor.manifest.name;
+  }
+
+  /** The plugin's only writable directory, also exposed to it as env. */
+  get pluginStateDir(): string {
+    return this.stateDir;
   }
 
   onCrash(callback: (error: string) => void): void {
@@ -163,13 +268,29 @@ export class PluginHost {
     this.started = true;
     this.currentState = "starting";
 
-    const child = spawn(this.nodeExecutable, [workerEntryPath], {
+    await mkdir(this.stateDir, { recursive: true });
+    await this.resolveRealPaths();
+
+    const child = spawn(this.nodeExecutable, this.buildWorkerArgs(), {
+      // The plugin's own directory, so relative paths inside it resolve and
+      // nothing above it is even nameable as `.`.
+      cwd: this.rootDir,
       // Built from scratch. Never spread process.env: a plugin worker must
       // not inherit APP_SECRET, POSTGRES_URL, or any provider token.
+      //
+      // The double assertion is type-only: an embedder (Next.js) can
+      // globally augment `NodeJS.ProcessEnv` to add a required `NODE_ENV`
+      // field, which this object intentionally does not carry, so a plain
+      // assertion doesn't typecheck once this package is consumed from such
+      // an embedder. It changes nothing about the value actually spawned.
       env: {
         PATH: process.env.PATH ?? "",
         PACO_PLUGIN_ID: this.pluginId,
-      },
+        PACO_PLUGIN_STATE_DIR: this.stateDir,
+      } as unknown as NodeJS.ProcessEnv,
+      // Its own process group, so a plugin that manages to spawn anything
+      // has the whole tree killed with it rather than leaking orphans.
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
     this.child = child;
@@ -187,11 +308,7 @@ export class PluginHost {
       this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_BYTES);
     });
 
-    this.stdoutLines = createInterface({
-      input: child.stdout,
-      crlfDelay: Infinity,
-    });
-    this.stdoutLines.on("line", (line: string) => this.onLine(line));
+    this.attachStdoutReader(child);
 
     child.on("error", (error: Error) => {
       this.handleTermination(
@@ -210,15 +327,10 @@ export class PluginHost {
       kind: "init",
       pluginId: this.pluginId,
       grantedCapabilities: [...this.granted],
-      slots: this.descriptor.slots,
+      slots: this.slots,
     });
 
     const readyTimer = setTimeout(() => {
-      this.ready?.reject(
-        new Error(
-          `plugin ${this.pluginId} was not ready within ${this.readyTimeoutMs}ms`,
-        ),
-      );
       this.forceCrash(
         `plugin ${this.pluginId} was not ready within ${this.readyTimeoutMs}ms`,
       );
@@ -269,6 +381,9 @@ export class PluginHost {
     return new Promise<ToolOutcome>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingCalls.delete(callId);
+        // Tell the worker to stop: its AbortSignal fires, so a cooperative
+        // tool releases whatever it was holding instead of running forever.
+        this.send({ kind: "cancel-tool", callId });
         resolve({
           ok: false,
           error: `tool ${tool} timed out after ${timeoutMs}ms`,
@@ -281,43 +396,137 @@ export class PluginHost {
   }
 
   /**
-   * Asks the worker to shut down, then kills it if it does not. Never
-   * rejects: stopping a plugin that is already gone is success.
+   * Asks the worker to shut down, then kills its whole process group if it
+   * does not. Never rejects: stopping a plugin that is already gone is
+   * success. A plugin that crashed stays `"crashed"` — stopping the corpse
+   * does not retroactively make the failure clean.
    */
   async stop(): Promise<void> {
-    if (
-      !this.child ||
-      this.child.exitCode !== null ||
-      this.child.signalCode !== null
-    ) {
-      this.currentState = "stopped";
-      this.settleAllPending(`plugin ${this.pluginId} stopped`);
+    const child = this.child;
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      this.settleStoppedState();
       return;
     }
 
     this.stopping = true;
-    const child = this.child;
+    if (this.currentState === "starting") {
+      // Nothing is going to answer the handshake now.
+      this.ready?.reject(
+        new Error(`plugin ${this.pluginId} was stopped during startup`),
+      );
+    }
     this.send({ kind: "shutdown" });
 
     const forceKill = setTimeout(() => {
       this.logger({
         level: "warn",
-        message: `plugin ${this.pluginId} ignored shutdown; sending SIGKILL`,
+        message: `plugin ${this.pluginId} ignored shutdown; killing its process group`,
       });
-      child.kill("SIGKILL");
+      this.killProcessTree("SIGKILL");
     }, this.shutdownTimeoutMs);
 
     try {
       await this.exited?.promise;
     } finally {
       clearTimeout(forceKill);
-      this.currentState = "stopped";
-      this.settleAllPending(`plugin ${this.pluginId} stopped`);
-      this.stdoutLines?.close();
+      this.settleStoppedState();
+      this.readerClosed = true;
     }
   }
 
   // --- internals ---------------------------------------------------------
+
+  /**
+   * Rewrites every path the worker will touch to its real path, before the
+   * allowlist is built from them.
+   *
+   * This is load-bearing, not tidiness. Node's permission model matches the
+   * path as given, and its ESM loader resolves a module's real path while
+   * loading it — so importing `/var/.../tool.js` on macOS makes the loader
+   * traverse the `/var` symlink and be denied, no matter how the plugin's own
+   * directory is spelled in the allowlist. Handing the worker real paths from
+   * the start means there is no symlink left to traverse.
+   */
+  private async resolveRealPaths(): Promise<void> {
+    this.stateDir = await realpathOrSelf(this.stateDir);
+    this.rootDir = await realpathOrSelf(this.rootDir);
+    const slots = this.descriptor.slots;
+    const resolveAll = (paths: string[]) =>
+      Promise.all(paths.map((slotPath) => realpathOrSelf(slotPath)));
+    const [tools, channels, skills, agents, renderers, hooks] =
+      await Promise.all([
+        resolveAll(slots.tools),
+        resolveAll(slots.channels),
+        resolveAll(slots.skills),
+        resolveAll(slots.agents),
+        resolveAll(slots.renderers),
+        resolveAll(slots.hooks),
+      ]);
+    this.slots = { tools, channels, skills, agents, renderers, hooks };
+  }
+
+  /**
+   * The worker's command line. In hardened mode this is where containment
+   * actually happens: an allow-list of readable paths, one writable path,
+   * and the absence of `--allow-child-process` / `--allow-worker` /
+   * `--allow-addons`.
+   */
+  private buildWorkerArgs(): string[] {
+    if (!this.hardened) {
+      return [workerEntryPath];
+    }
+
+    const readable = [
+      this.rootDir,
+      realpathSyncOrSelf(import.meta.dirname),
+      this.stateDir,
+      ...WORKER_RUNTIME_PACKAGES.map((specifier) =>
+        realpathSyncOrSelf(resolvePackageDir(specifier)),
+      ),
+    ];
+
+    return [
+      "--permission",
+      ...readable.map((dir) => `--allow-fs-read=${path.join(dir, "*")}`),
+      `--allow-fs-write=${path.join(this.stateDir, "*")}`,
+      "--import",
+      realpathSyncOrSelf(workerPreloadPath),
+      realpathSyncOrSelf(workerEntryPath),
+    ];
+  }
+
+  /**
+   * Reads stdout in chunks rather than through `readline`, so the buffer for
+   * an unterminated line can be measured and capped. `readline` would happily
+   * accumulate a gigabyte waiting for a newline that never arrives.
+   */
+  private attachStdoutReader(child: ChildProcessWithoutNullStreams): void {
+    child.stdout.setEncoding("utf-8");
+    child.stdout.on("data", (chunk: string) => {
+      if (this.readerClosed) {
+        return;
+      }
+      this.lineBuffer += chunk;
+
+      let newlineIndex = this.lineBuffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = this.lineBuffer.slice(0, newlineIndex);
+        this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
+        this.onLine(line);
+        if (this.readerClosed) {
+          return;
+        }
+        newlineIndex = this.lineBuffer.indexOf("\n");
+      }
+
+      if (Buffer.byteLength(this.lineBuffer, "utf-8") > MAX_LINE_BYTES) {
+        this.lineBuffer = "";
+        this.forceCrash(
+          `plugin ${this.pluginId} wrote more than ${MAX_LINE_BYTES} bytes without a newline`,
+        );
+      }
+    });
+  }
 
   private send(message: HostToWorkerMessage): void {
     const stdin = this.child?.stdin;
@@ -355,7 +564,7 @@ export class PluginHost {
 
     switch (message.data.kind) {
       case "ready":
-        this.ready?.resolve(message.data.tools);
+        this.ready?.resolve(this.acceptRegisteredTools(message.data.tools));
         break;
       case "tool-result": {
         const pending = this.pendingCalls.get(message.data.callId);
@@ -379,10 +588,12 @@ export class PluginHost {
         );
         break;
       case "log":
-        this.logger({
-          level: message.data.level,
-          message: `plugin ${this.pluginId}: ${message.data.message}`,
-        });
+        if (this.allowLog()) {
+          this.logger({
+            level: message.data.level,
+            message: `plugin ${this.pluginId}: ${message.data.message}`,
+          });
+        }
         break;
       default:
         break;
@@ -390,15 +601,78 @@ export class PluginHost {
   }
 
   /**
+   * Tools are a capability, not a freebie. A plugin that registers them
+   * without `tools:register` has them dropped — otherwise the consent screen
+   * would be describing a permission the host does not actually require.
+   */
+  private acceptRegisteredTools(tools: RegisteredTool[]): RegisteredTool[] {
+    if (tools.length === 0 || this.granted.has("tools:register")) {
+      return tools;
+    }
+    this.logger({
+      level: "warn",
+      message: `plugin ${this.pluginId}: dropping ${tools.length} registered tool(s): capability not granted: tools:register`,
+    });
+    return [];
+  }
+
+  /**
+   * Token bucket over worker `log` messages. A plugin logging in a tight loop
+   * would otherwise be a free write amplifier into the operator's log sink.
+   */
+  private allowLog(): boolean {
+    const now = Date.now();
+    if (now - this.logWindowStart >= 1000) {
+      this.logWindowStart = now;
+      this.logTokens = MAX_LOGS_PER_SECOND;
+      this.logRateWarned = false;
+    }
+    if (this.logTokens > 0) {
+      this.logTokens--;
+      return true;
+    }
+    if (!this.logRateWarned) {
+      this.logRateWarned = true;
+      this.logger({
+        level: "warn",
+        message: `plugin ${this.pluginId}: log rate limit exceeded (${MAX_LOGS_PER_SECOND}/s); dropping messages`,
+      });
+    }
+    return false;
+  }
+
+  /**
    * The security gate. Order matters: the grant is checked before the
    * handler is even looked up, so an ungranted capability cannot reach an
    * implementation no matter what the worker sends.
+   *
+   * Capability requests are answered during `"starting"` on purpose. Slot
+   * loading legitimately needs them — a hook reads its stored state or
+   * subscribes before the plugin is ready — and the handshake cannot complete
+   * until slot loading does, so deferring them would deadlock `start()`. The
+   * grant check is identical at every state, so nothing is weakened by it.
+   * Once `stop()` has begun, requests are refused: teardown must not be able
+   * to reach a handler.
    */
   private async handleCapabilityRequest(
     requestId: string,
     capability: Capability,
     payload: unknown,
   ): Promise<void> {
+    if (
+      this.stopping ||
+      this.currentState === "stopped" ||
+      this.currentState === "crashed"
+    ) {
+      this.send({
+        kind: "capability-result",
+        requestId,
+        ok: false,
+        error: "plugin is shutting down",
+      });
+      return;
+    }
+
     if (!this.granted.has(capability)) {
       this.logger({
         level: "warn",
@@ -414,7 +688,7 @@ export class PluginHost {
     }
 
     if (capability === "net:fetch") {
-      const denial = this.checkNetFetchAllowlist(payload);
+      const denial = this.checkNetFetch(payload);
       if (denial) {
         this.logger({
           level: "warn",
@@ -441,6 +715,22 @@ export class PluginHost {
       return;
     }
 
+    if (this.inFlightCapabilityRequests >= MAX_INFLIGHT_CAPABILITY_REQUESTS) {
+      // Flooding the host with concurrent requests is a protocol violation,
+      // not a workload: it counts against the same budget as garbage.
+      this.countMalformed(
+        `worker exceeded ${MAX_INFLIGHT_CAPABILITY_REQUESTS} in-flight capability requests`,
+      );
+      this.send({
+        kind: "capability-result",
+        requestId,
+        ok: false,
+        error: "capability request queue full",
+      });
+      return;
+    }
+
+    this.inFlightCapabilityRequests++;
     try {
       const value = await handler(this.pluginId, payload);
       this.send({ kind: "capability-result", requestId, ok: true, value });
@@ -451,55 +741,41 @@ export class PluginHost {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      this.inFlightCapabilityRequests--;
     }
   }
 
   /**
-   * Enforces the manifest's `netDomains` allowlist for `net:fetch`, in the
+   * Enforces the operator's consented `netDomains` for `net:fetch`, in the
    * host, before the request can reach a handler. Returns the denial reason,
    * or `undefined` when the request is allowed.
    *
-   * The rules, in order:
+   * The list comes from `PluginHostOptions.netDomains` — the consent record —
+   * never from `descriptor.manifest.netDomains`. See `checkFetchAllowed` for
+   * the rules.
    *
-   * 1. The payload must carry a string `url`, and it must parse as an
-   *    absolute URL. An unparsable target cannot be checked, so it is denied.
-   * 2. The scheme must be `http:` or `https:`. `file:`, `data:` and friends
-   *    have no hostname to match and would read the host filesystem.
-   * 3. The hostname must be an EXACT, case-insensitive member of
-   *    `manifest.netDomains`. There is no subdomain matching in either
-   *    direction: a grant for `api.linear.app` covers neither
-   *    `evil.api.linear.app` nor `linear.app`.
-   * 4. An absent or empty `netDomains` denies everything. A manifest that
-   *    requests `net:fetch` cannot validly omit it, so reaching this branch
-   *    means the grant is unusable rather than unlimited.
-   *
-   * The web app's `net:fetch` handler checks the same list again. That is
-   * deliberate: this is the first gate, not the only one.
+   * **The handler must check again.** This gate sees a URL string; it cannot
+   * see where the name resolves or where a redirect leads. The `net:fetch`
+   * handler is required to fetch with `redirect: "manual"`, re-run
+   * `isFetchAllowed` on every hop, and refuse when the resolved address is
+   * private, loopback, or link-local (169.254.169.254 is the cloud metadata
+   * endpoint). Without that, a consented domain is an SSRF gadget.
    */
-  private checkNetFetchAllowlist(payload: unknown): string | undefined {
-    const parsed = fetchPayloadSchema.safeParse(payload);
-    if (!parsed.success) {
+  private checkNetFetch(payload: unknown): string | undefined {
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      typeof (payload as { url?: unknown }).url !== "string"
+    ) {
       return "net:fetch denied: payload has no url";
     }
 
-    let target: URL;
-    try {
-      target = new URL(parsed.data.url);
-    } catch {
-      return `net:fetch denied: unparsable url ${parsed.data.url}`;
-    }
-
-    if (!ALLOWED_FETCH_PROTOCOLS.has(target.protocol)) {
-      return `net:fetch denied: scheme ${target.protocol} not allowed`;
-    }
-
-    const allowed = this.descriptor.manifest.netDomains ?? [];
-    const hostname = target.hostname.toLowerCase();
-    if (!allowed.some((domain) => domain.toLowerCase() === hostname)) {
-      return `net:fetch denied: host ${hostname} not in netDomains`;
-    }
-
-    return undefined;
+    const decision = checkFetchAllowed(
+      (payload as { url: string }).url,
+      this.netDomains,
+    );
+    return decision.allowed ? undefined : decision.reason;
   }
 
   /**
@@ -523,8 +799,31 @@ export class PluginHost {
     }
   }
 
+  /**
+   * Kills the worker's whole process group. `detached: true` at spawn made
+   * the worker a group leader, so the negative pid reaches anything it
+   * managed to start; the direct kill is the fallback for platforms or
+   * timings where that fails.
+   */
+  private killProcessTree(signal: NodeJS.Signals): void {
+    const child = this.child;
+    if (!child?.pid) {
+      return;
+    }
+    try {
+      process.kill(-child.pid, signal);
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {
+        // Already reaped. Nothing left to kill.
+      }
+    }
+  }
+
   private forceCrash(reason: string): void {
-    this.child?.kill("SIGKILL");
+    this.readerClosed = true;
+    this.killProcessTree("SIGKILL");
     this.handleTermination(reason);
   }
 
@@ -533,8 +832,7 @@ export class PluginHost {
     this.exited?.resolve(null);
 
     if (this.stopping || this.currentState === "stopped") {
-      this.currentState = "stopped";
-      this.settleAllPending(`plugin ${this.pluginId} stopped`);
+      this.settleStoppedState();
       return;
     }
     if (this.crashReported) {
@@ -562,6 +860,19 @@ export class PluginHost {
     }
   }
 
+  /**
+   * Moves to `"stopped"` unless the plugin already crashed. A crash is a
+   * fact about the run and survives the cleanup that follows it.
+   */
+  private settleStoppedState(): void {
+    if (this.currentState !== "crashed") {
+      this.currentState = "stopped";
+    }
+    this.settleAllPending(
+      `plugin ${this.pluginId} is not running (state: ${this.currentState})`,
+    );
+  }
+
   private settleAllPending(error: string): void {
     for (const [callId, pending] of this.pendingCalls) {
       clearTimeout(pending.timer);
@@ -569,6 +880,53 @@ export class PluginHost {
       pending.resolve({ ok: false, error });
     }
   }
+}
+
+async function realpathOrSelf(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    return target;
+  }
+}
+
+/** Real path of `target`, or `target` itself when it cannot be resolved. */
+function realpathSyncOrSelf(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    return target;
+  }
+}
+
+/**
+ * Absolute directory of an installed package, following pnpm's symlinks to
+ * the real path — which is what Node's permission model compares against.
+ */
+function resolvePackageDir(specifier: string): string {
+  const requireFromHost = createRequire(import.meta.url);
+  let dir: string;
+  try {
+    dir = path.dirname(requireFromHost.resolve(specifier));
+  } catch (error) {
+    throw new Error(
+      `cannot resolve ${specifier}, which the plugin worker must be able to read: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error },
+    );
+  }
+
+  // Ascend to the directory that owns the package.json. `require.resolve`
+  // has already followed pnpm's symlink to the real path, which is what the
+  // permission model matches against.
+  while (dir !== path.dirname(dir)) {
+    if (existsSync(path.join(dir, "package.json"))) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+  throw new Error(`cannot locate the package directory for ${specifier}`);
 }
 
 function defaultLogger(entry: HostLogEntry): void {

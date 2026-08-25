@@ -57,6 +57,8 @@ const pendingCapabilityCalls = new Map<
 
 const eventSubscribers = new Set<(event: PluginSessionEvent) => void>();
 const tools = new Map<string, PluginToolModule>();
+/** Abort controllers for tool calls still running, keyed by callId. */
+const inFlightToolCalls = new Map<string, AbortController>();
 
 let pluginId = "";
 let requestCounter = 0;
@@ -76,6 +78,9 @@ function requestCapability(
 const api: PluginApi = {
   get pluginId() {
     return pluginId;
+  },
+  get stateDir() {
+    return process.env.PACO_PLUGIN_STATE_DIR ?? "";
   },
   fetch: (request: PluginFetchRequest) =>
     requestCapability("net:fetch", request) as Promise<PluginFetchResponse>,
@@ -224,8 +229,10 @@ async function handleInvokeTool(message: {
     return;
   }
 
+  const controller = new AbortController();
+  inFlightToolCalls.set(message.callId, controller);
   try {
-    const output = await tool.execute(message.input, api);
+    const output = await tool.execute(message.input, api, controller.signal);
     send({ kind: "tool-result", callId: message.callId, ok: true, output });
   } catch (error) {
     send({
@@ -234,7 +241,23 @@ async function handleInvokeTool(message: {
       ok: false,
       error: describe(error),
     });
+  } finally {
+    inFlightToolCalls.delete(message.callId);
   }
+}
+
+/**
+ * The host has given up on a call. Abort the signal handed to `execute` so a
+ * cooperative tool can stop; the result, if one still arrives, is ignored by
+ * the host because it has already settled that callId.
+ */
+function handleCancelTool(message: { callId: string }): void {
+  const controller = inFlightToolCalls.get(message.callId);
+  if (!controller) {
+    return;
+  }
+  inFlightToolCalls.delete(message.callId);
+  controller.abort(new Error("cancelled by host: the call timed out"));
 }
 
 function handleCapabilityResult(message: {
@@ -313,6 +336,9 @@ async function handleLine(line: string): Promise<void> {
       handleEvent(event);
       break;
     }
+    case "cancel-tool":
+      handleCancelTool(message.data);
+      break;
     case "shutdown":
       process.exit(0);
       break;

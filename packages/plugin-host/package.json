@@ -7,7 +7,9 @@
   "exports": {
     ".": "./index.ts",
     "./protocol.js": "./protocol.ts",
-    "./host.js": "./host.ts"
+    "./host.js": "./host.ts",
+    "./net-allowlist.js": "./net-allowlist.ts",
+    "./plugin-api.js": "./plugin-api.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
