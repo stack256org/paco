@@ -9,7 +9,8 @@
     "typecheck": "turbo typecheck",
     "check": "ultracite check",
     "fix": "ultracite fix",
-    "ci": "pnpm check && pnpm typecheck && pnpm test:isolated && pnpm --dir apps/web db:check",
+    "ci": "pnpm check && pnpm typecheck && pnpm ci:build && pnpm test:isolated && pnpm --dir apps/web db:check",
+    "ci:build": "pnpm --dir apps/web exec next build",
     "test:isolated": "node scripts/test-isolated.ts",
     "test:verbose": "bun test --reporter=junit --reporter-outfile /dev/stdout"
   },
