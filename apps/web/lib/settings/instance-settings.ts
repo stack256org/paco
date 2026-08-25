@@ -30,24 +30,47 @@ export type StoredSmtpSettings = Omit<SmtpSettingsInput, "password"> & {
   password: string | null;
 };
 
+/**
+ * BYO OpenFX provider config (Section 7 Task 5): a chat whose `backend` is
+ * `"openfx"` runs its turns against this endpoint/binary instead of the
+ * Claude Code CLI. `endpoint` has no effect on the OpenFX process itself
+ * today — PROTOCOL.md §1 found no env var or flag that overrides where the
+ * binary sends provider traffic, only `AI_GATEWAY_API_KEY`/
+ * `VERCEL_OIDC_TOKEN` credential vars — so it is stored and shown for
+ * forward-compatibility, not forwarded anywhere yet.
+ */
+export type OpenFxSettingsInput = {
+  endpoint: string | null;
+  /** `null` means "leave whatever is stored alone" — see `saveOpenFxSettings`. */
+  apiKey: string | null;
+  binaryPath: string | null;
+};
+
+export type StoredOpenFxSettings = Omit<OpenFxSettingsInput, "apiKey"> & {
+  apiKey: string | null;
+};
+
 export type InstanceSettingsView = {
   appDomain: string | null;
   tlsEnabled: boolean;
   previewBaseDomain: string | null;
   smtp: StoredSmtpSettings;
+  openfx: StoredOpenFxSettings;
   /** Null until the guided onboarding flow has been finished once. */
   onboardingCompletedAt: Date | null;
 };
 
 /**
- * Unseal a stored password, treating an unreadable one as absent.
+ * Unseal a stored secret, treating an unreadable one as absent.
  *
  * `APP_SECRET` changing makes every sealed value unreadable. Throwing here
- * would take down mail delivery *and* the settings page that is the only place
- * to fix it, so an unreadable password reads as "not set" and the operator is
- * asked for it again.
+ * would take down mail delivery (or a chat's OpenFX turns) *and* the settings
+ * page that is the only place to fix it, so an unreadable secret reads as
+ * "not set" and the operator is asked for it again. `label` only decides the
+ * wording of the warning; the mechanism is shared by every sealed field on
+ * this table.
  */
-function unsealPassword(sealed: string | null): string | null {
+function unsealSecret(sealed: string | null, label: string): string | null {
   if (!sealed) {
     return null;
   }
@@ -56,7 +79,7 @@ function unsealPassword(sealed: string | null): string | null {
     return open(sealed);
   } catch {
     console.warn(
-      "[settings] The stored SMTP password could not be read. APP_SECRET has most likely changed; re-enter it in Settings.",
+      `[settings] The stored ${label} could not be read. APP_SECRET has most likely changed; re-enter it in Settings.`,
     );
     return null;
   }
@@ -78,8 +101,13 @@ export async function readInstanceSettings(): Promise<InstanceSettingsView> {
       port: row?.smtpPort ?? null,
       secure: row?.smtpSecure ?? null,
       user: row?.smtpUser ?? null,
-      password: unsealPassword(row?.smtpPasswordSealed ?? null),
+      password: unsealSecret(row?.smtpPasswordSealed ?? null, "SMTP password"),
       from: row?.smtpFrom ?? null,
+    },
+    openfx: {
+      endpoint: row?.openfxEndpoint ?? null,
+      apiKey: unsealSecret(row?.openfxApiKeySealed ?? null, "OpenFX API key"),
+      binaryPath: row?.openfxBinaryPath ?? null,
     },
     onboardingCompletedAt: row?.onboardingCompletedAt ?? null,
   };
@@ -123,6 +151,32 @@ export async function saveSmtpSettings(
     ...(input.password === null
       ? {}
       : { smtpPasswordSealed: seal(input.password) }),
+  };
+
+  await db
+    .insert(instanceSettings)
+    .values({ id: SETTINGS_ROW_ID, ...values })
+    .onConflictDoUpdate({ target: instanceSettings.id, set: values });
+}
+
+/**
+ * Store OpenFX provider settings.
+ *
+ * A `null` `apiKey` means the form was submitted without retyping it — the
+ * stored value is never sent to the browser (see `getInstanceSettings`), so
+ * an edit to the endpoint or binary path would otherwise wipe the key every
+ * time, exactly as `saveSmtpSettings` treats its password.
+ */
+export async function saveOpenFxSettings(
+  input: OpenFxSettingsInput,
+): Promise<void> {
+  const values = {
+    openfxEndpoint: input.endpoint,
+    openfxBinaryPath: input.binaryPath,
+    updatedAt: new Date(),
+    ...(input.apiKey === null
+      ? {}
+      : { openfxApiKeySealed: seal(input.apiKey) }),
   };
 
   await db

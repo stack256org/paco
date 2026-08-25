@@ -1,5 +1,6 @@
 "use server";
 
+import { tmpdir } from "node:os";
 import type { z } from "zod";
 import { sendEmail } from "@/lib/email/mailer";
 import { resolveSmtpConfig } from "@/lib/email/smtp-config";
@@ -7,11 +8,13 @@ import {
   markOnboardingComplete,
   readInstanceSettings,
   saveAppDomain,
+  saveOpenFxSettings,
   saveSmtpSettings,
 } from "@/lib/settings/instance-settings";
 import {
   domainSchema,
   emailAddressSchema,
+  openFxSchema,
   smtpSchema,
 } from "./instance-settings-schemas";
 import { requireAdmin } from "./require-admin";
@@ -19,9 +22,10 @@ import { requireAdmin } from "./require-admin";
 /**
  * The settings an administrator can change about this installation.
  *
- * The SMTP password travels one way only. `getInstanceSettings` reports
- * whether one is stored, never what it is — a settings page is exactly the
- * screen an over-broad response would leak a credential from.
+ * The SMTP password (and the OpenFX API key) travel one way only.
+ * `getInstanceSettings` reports whether one is stored, never what it is — a
+ * settings page is exactly the screen an over-broad response would leak a
+ * credential from.
  */
 export async function getInstanceSettings() {
   await requireAdmin();
@@ -38,6 +42,11 @@ export async function getInstanceSettings() {
       user: settings.smtp.user,
       from: settings.smtp.from,
       hasPassword: settings.smtp.password !== null,
+    },
+    openfx: {
+      endpoint: settings.openfx.endpoint,
+      binaryPath: settings.openfx.binaryPath,
+      hasApiKey: settings.openfx.apiKey !== null,
     },
   };
 }
@@ -74,6 +83,93 @@ export async function updateSmtpSettings(
 
   await saveSmtpSettings(parsed.data);
   return { success: true };
+}
+
+export async function updateOpenFxSettings(
+  input: z.infer<typeof openFxSchema>,
+): Promise<{ success: boolean; error?: string }> {
+  await requireAdmin();
+
+  const parsed = openFxSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      success: false,
+      error: parsed.error.issues[0]?.message ?? "Those settings are not valid.",
+    };
+  }
+
+  await saveOpenFxSettings(parsed.data);
+  return { success: true };
+}
+
+/** How long `testOpenFxConnection` waits before giving up on a hung process. */
+const OPENFX_HANDSHAKE_TIMEOUT_MS = 15_000;
+
+/**
+ * Prove the stored OpenFX settings actually reach a running `openfx acp`
+ * process, before a chat depends on them.
+ *
+ * A cheap handshake: spawn the binary, send `initialize`, and tear the
+ * process down the moment it answers — the same first two frames
+ * `OpenFxBackend.startTurn` exchanges on every real turn (PROTOCOL.md §4),
+ * without creating a session or running a prompt. `cwd` is `tmpdir()` rather
+ * than a chat's worktree: PROTOCOL.md §1 notes the workspace root only
+ * matters once a session exists, and this test never creates one.
+ */
+export async function testOpenFxConnection(): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  await requireAdmin();
+
+  const settings = await readInstanceSettings();
+  if (!(settings.openfx.binaryPath || settings.openfx.apiKey)) {
+    return {
+      success: false,
+      error:
+        "Set a binary path or API key first — there is nothing to test yet.",
+    };
+  }
+
+  const { AcpClient } = await import("@paco/openfx-backend");
+  const client = new AcpClient({
+    cwd: tmpdir(),
+    ...(settings.openfx.binaryPath
+      ? { executable: settings.openfx.binaryPath }
+      : {}),
+    ...(settings.openfx.apiKey
+      ? { env: { AI_GATEWAY_API_KEY: settings.openfx.apiKey } }
+      : {}),
+  });
+
+  try {
+    await Promise.race([
+      client.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+      }),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error("The OpenFX binary did not respond in time.")),
+          OPENFX_HANDSHAKE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "The OpenFX binary did not respond.",
+    };
+  } finally {
+    await client.close();
+  }
 }
 
 /**

@@ -49,8 +49,7 @@ import {
 import { FileSuggestionsDropdown } from "@/components/file-suggestions-dropdown";
 import { ImageAttachmentsPreview } from "@/components/image-attachments-preview";
 import { TextAttachmentsPreview } from "@/components/text-attachments-preview";
-import { EffortSelectorCompact } from "@/components/effort-selector-compact";
-import { ModelSelectorCompact } from "@/components/model-selector-compact";
+import type { ChatBackendSelection } from "@/components/backend-selector-compact";
 import { useInlineQuestion } from "@/components/inline-question-input";
 import { SlashCommandDropdown } from "@/components/slash-command-dropdown";
 import { SnippetChip } from "@/components/snippet-chip";
@@ -123,6 +122,7 @@ import { ArchivedWorkspaceNotice } from "./archived-workspace-notice";
 import { ContextUsageIndicator } from "./context-usage-indicator";
 import { MessageActions } from "./message-actions";
 import { GitDataPartCard } from "./git-data-part-card";
+import { ModelEffortBackendControls } from "./model-effort-backend-controls";
 import { useStreamRecovery } from "./hooks/use-stream-recovery";
 import { useAutoCommitStatus } from "./hooks/use-auto-commit-status";
 import { useDevServer } from "./hooks/use-dev-server";
@@ -377,11 +377,13 @@ export function SessionChatContent({
   const {
     session,
     chatInfo,
+    chatCapabilities,
     setSandboxInfo,
     archiveSession,
     unarchiveSession,
     updateChatModel,
     updateChatEffort,
+    updateChatBackend,
     updateSessionTitle,
     hasRuntimeSandboxState,
     hasPausedWorkspace,
@@ -1067,6 +1069,21 @@ export function SessionChatContent({
       }
     },
     [chatInfo.effort, updateChatEffort],
+  );
+
+  const handleBackendChange = useCallback(
+    async (backend: ChatBackendSelection) => {
+      if (backend === chatInfo.backend) return;
+      try {
+        setIsUpdatingModel(true);
+        await updateChatBackend(backend);
+      } catch (err) {
+        console.error("Failed to update agent backend:", err);
+      } finally {
+        setIsUpdatingModel(false);
+      }
+    },
+    [chatInfo.backend, updateChatBackend],
   );
 
   const selectedModelOption = useMemo(
@@ -3382,11 +3399,13 @@ export function SessionChatContent({
                             )}
                             {chatInfo.modelId && (
                               /*
-                               * Model and effort read as one setting, so they
-                               * sit on one line. This wrapper exists only to
-                               * dim the pair while a turn is in flight, and
-                               * without a flex here its two children stacked
-                               * vertically in a row with space to spare.
+                               * Model, effort, and backend read as one
+                               * setting, so they sit on one line — see
+                               * `ModelEffortBackendControls`'s own doc. This
+                               * wrapper exists only to dim the row while a
+                               * turn is in flight, and without a flex here
+                               * its children stacked vertically in a row
+                               * with space to spare.
                                *
                                * The rule before it separates two kinds of
                                * control that had been sharing one undivided
@@ -3397,57 +3416,48 @@ export function SessionChatContent({
                                * grouped it with submitting rather than with
                                * typing.
                                */
-                              <div
-                                className={cn(
-                                  "flex min-w-0 items-center gap-0.5 border-base-content/10 border-l pl-1.5",
-                                  (isChatInFlight ||
-                                    isUpdatingModel ||
-                                    modelOptionsLoading) &&
-                                    "pointer-events-none opacity-60",
-                                )}
-                              >
-                                <ModelSelectorCompact
-                                  value={chatInfo.modelId}
-                                  modelOptions={modelOptions}
-                                  disabled={
-                                    isChatInFlight ||
-                                    isUpdatingModel ||
-                                    modelOptionsLoading
-                                  }
-                                  onCloseAutoFocus={() => {
-                                    window.requestAnimationFrame(() => {
-                                      const textarea = inputRef.current;
-                                      if (!textarea) {
-                                        return;
-                                      }
+                              <ModelEffortBackendControls
+                                backend={
+                                  (chatInfo.backend ??
+                                    "claude-code") as ChatBackendSelection
+                                }
+                                capabilities={chatCapabilities}
+                                disabled={
+                                  isChatInFlight ||
+                                  isUpdatingModel ||
+                                  modelOptionsLoading
+                                }
+                                effort={chatInfo.effort ?? null}
+                                modelId={chatInfo.modelId}
+                                modelOptions={modelOptions}
+                                onBackendChange={(backend) => {
+                                  void handleBackendChange(backend);
+                                }}
+                                onEffortChange={(effort) => {
+                                  void handleEffortChange(effort);
+                                }}
+                                onModelChange={(modelId) => {
+                                  void handleModelChange(modelId);
+                                }}
+                                onModelCloseAutoFocus={() => {
+                                  window.requestAnimationFrame(() => {
+                                    const textarea = inputRef.current;
+                                    if (!textarea) {
+                                      return;
+                                    }
 
-                                      textarea.focus();
-                                      const nextCursorPosition = Math.min(
-                                        cursorPosition,
-                                        textarea.value.length,
-                                      );
-                                      textarea.setSelectionRange(
-                                        nextCursorPosition,
-                                        nextCursorPosition,
-                                      );
-                                    });
-                                  }}
-                                  onChange={(modelId) => {
-                                    void handleModelChange(modelId);
-                                  }}
-                                />
-                                <EffortSelectorCompact
-                                  value={chatInfo.effort ?? null}
-                                  disabled={
-                                    isChatInFlight ||
-                                    isUpdatingModel ||
-                                    modelOptionsLoading
-                                  }
-                                  onChange={(effort) => {
-                                    void handleEffortChange(effort);
-                                  }}
-                                />
-                              </div>
+                                    textarea.focus();
+                                    const nextCursorPosition = Math.min(
+                                      cursorPosition,
+                                      textarea.value.length,
+                                    );
+                                    textarea.setSelectionRange(
+                                      nextCursorPosition,
+                                      nextCursorPosition,
+                                    );
+                                  });
+                                }}
+                              />
                             )}
                             <ContextUsageIndicator
                               isCompacting={isCompacting}

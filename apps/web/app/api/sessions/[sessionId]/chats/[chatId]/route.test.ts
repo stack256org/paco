@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
+// The route now pulls in `backend-capabilities.ts` (to attach `capabilities`
+// to a PATCH response), which is server-only; the marker throws outside a
+// server component and has nothing to do with what is being tested here.
+mock.module("server-only", () => ({}));
+
 type AuthResult =
   | {
       ok: true;
@@ -36,6 +41,7 @@ type ChatRecord = {
   sessionId: string;
   title: string;
   modelId: string;
+  backend?: string;
 };
 
 let authResult: AuthResult = { ok: true, userId: "user-1" };
@@ -80,7 +86,7 @@ let chatsInSession: Array<{ id: string }> = [
 
 const updateChatCalls: Array<{
   chatId: string;
-  patch: { title?: string; modelId?: string };
+  patch: { title?: string; modelId?: string; backend?: string };
 }> = [];
 /** Every command the route ran in the workspace, in order. */
 const sandboxCommands: string[] = [];
@@ -119,7 +125,7 @@ mock.module("@/app/api/sessions/_lib/session-context", () => ({
 mock.module("@/lib/db/sessions", () => ({
   updateChat: async (
     chatId: string,
-    patch: { title?: string; modelId?: string },
+    patch: { title?: string; modelId?: string; backend?: string },
   ) => {
     updateChatCalls.push({ chatId, patch });
     return updatedChat;
@@ -351,6 +357,47 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
       },
     ]);
     expect(body.chat.id).toBe("chat-1");
+  });
+
+  test("PATCH accepts a known backend and returns its capabilities", async () => {
+    updatedChat = {
+      id: "chat-1",
+      sessionId: "session-1",
+      title: "Updated",
+      modelId: "model-updated",
+      backend: "openfx",
+    };
+    const { PATCH } = await routeModulePromise;
+
+    const response = await PATCH(
+      createPatchRequest({ backend: "openfx" }),
+      createContext(),
+    );
+    const body = (await response.json()) as {
+      chat: ChatRecord & {
+        backend?: string;
+        capabilities?: { id: string; effort: boolean };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(updateChatCalls).toEqual([
+      { chatId: "chat-1", patch: { backend: "openfx" } },
+    ]);
+    expect(body.chat.capabilities?.id).toBe("openfx");
+    expect(body.chat.capabilities?.effort).toBe(false);
+  });
+
+  test("PATCH rejects an unrecognised backend value", async () => {
+    const { PATCH } = await routeModulePromise;
+
+    const response = await PATCH(
+      createPatchRequest({ backend: "some-future-backend" }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(400);
+    expect(updateChatCalls).toHaveLength(0);
   });
 
   test("PATCH returns 404 when updateChat returns null", async () => {

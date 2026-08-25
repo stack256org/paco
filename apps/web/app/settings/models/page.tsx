@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { ModelPreferencesSection } from "../preferences-section";
+import { OpenFxAdminSection } from "./openfx-admin-section";
 
 export const metadata: Metadata = {
   title: "Models",
@@ -19,6 +20,14 @@ export default function ModelsPage() {
       </div>
 
       <ModelPreferencesSection />
+
+      {/*
+        Admin-only, like the second section of /settings/memory: every chat
+        can be switched to run on OpenFX (see the composer's backend
+        selector), but only an admin configures the shared provider
+        credentials it runs against.
+      */}
+      <OpenFxAdminSection />
     </div>
   );
 }

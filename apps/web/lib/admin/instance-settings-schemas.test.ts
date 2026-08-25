@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   domainSchema,
   emailAddressSchema,
+  openFxSchema,
   smtpSchema,
 } from "./instance-settings-schemas";
 
@@ -186,5 +187,75 @@ describe("smtpSchema password normalisation", () => {
 
     expect(result.success).toBe(true);
     expect(result.success && result.data.password).toBe(" hunter2 ");
+  });
+});
+
+describe("openFxSchema", () => {
+  const base = { binaryPath: null, apiKey: null };
+
+  test("trims a whitespace-padded endpoint URL and accepts it", () => {
+    const result = openFxSchema.safeParse({
+      ...base,
+      endpoint: "  https://gateway.example.com  ",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.endpoint).toBe(
+      "https://gateway.example.com",
+    );
+  });
+
+  test("normalises a blank endpoint to null", () => {
+    const result = openFxSchema.safeParse({ ...base, endpoint: "   " });
+
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.endpoint).toBeNull();
+  });
+
+  test("accepts a null endpoint", () => {
+    const result = openFxSchema.safeParse({ ...base, endpoint: null });
+
+    expect(result.success).toBe(true);
+  });
+
+  test("rejects an invalid endpoint URL", () => {
+    const result = openFxSchema.safeParse({
+      ...base,
+      endpoint: "not-a-url",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  test("a blank apiKey means 'leave the stored one alone'", () => {
+    const result = openFxSchema.safeParse({
+      ...base,
+      endpoint: null,
+      apiKey: "   ",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.apiKey).toBeNull();
+  });
+
+  test("passes a real apiKey through unchanged", () => {
+    const result = openFxSchema.safeParse({
+      ...base,
+      endpoint: null,
+      apiKey: "sk-openfx-secret",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.apiKey).toBe("sk-openfx-secret");
+  });
+
+  test("rejects a blank binaryPath (use null to mean unset)", () => {
+    const result = openFxSchema.safeParse({
+      endpoint: null,
+      apiKey: null,
+      binaryPath: "",
+    });
+
+    expect(result.success).toBe(false);
   });
 });

@@ -8,6 +8,8 @@ import {
   removeChatWorktree,
 } from "@/lib/sandbox/chat-worktree-removal";
 import type { WebAgentUIMessage } from "@/app/types";
+import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
+import type { ChatBackendId } from "@/lib/agent/backend-factory";
 import {
   deleteChat,
   getChatMessages,
@@ -21,6 +23,12 @@ type RouteContext = {
   params: Promise<{ sessionId: string; chatId: string }>;
 };
 
+/** `chats.backend`'s enum — see `schema.ts` and `backend-factory.ts`. */
+const KNOWN_CHAT_BACKENDS: ReadonlySet<string> = new Set<ChatBackendId>([
+  "claude-code",
+  "openfx",
+]);
+
 interface UpdateChatRequest {
   title?: string;
   modelId?: string;
@@ -29,6 +37,8 @@ interface UpdateChatRequest {
    * model uses its own default — so it is distinguished from an absent field.
    */
   effort?: string | null;
+  /** Which `AgentBackend` this chat's turns run on — `chats.backend`. */
+  backend?: string;
 }
 
 export interface ChatRefreshResponse {
@@ -99,8 +109,13 @@ export async function PATCH(req: Request, context: RouteContext) {
   const nextTitle = body.title?.trim();
   const nextModelId = body.modelId?.trim();
   const hasEffort = "effort" in body;
+  const nextBackend = body.backend?.trim();
 
-  if (!(nextTitle || nextModelId || hasEffort)) {
+  if (nextBackend && !KNOWN_CHAT_BACKENDS.has(nextBackend)) {
+    return Response.json({ error: BAD_REQUEST }, { status: 400 });
+  }
+
+  if (!(nextTitle || nextModelId || hasEffort || nextBackend)) {
     return Response.json({ error: BAD_REQUEST }, { status: 400 });
   }
 
@@ -108,6 +123,7 @@ export async function PATCH(req: Request, context: RouteContext) {
     title?: string;
     modelId?: string;
     effort?: Effort | null;
+    backend?: ChatBackendId;
   } = {};
   if (nextTitle) {
     updatePayload.title = nextTitle;
@@ -121,6 +137,9 @@ export async function PATCH(req: Request, context: RouteContext) {
     // model default rather than fail to save.
     updatePayload.effort = parseEffort(body.effort);
   }
+  if (nextBackend) {
+    updatePayload.backend = nextBackend as ChatBackendId;
+  }
 
   const updatedChat = await updateChat(chatId, updatePayload);
   if (!updatedChat) {
@@ -131,6 +150,11 @@ export async function PATCH(req: Request, context: RouteContext) {
     chat: {
       ...updatedChat,
       modelId: updatedChat.modelId,
+      // Recomputed from the row that was just written, not the client's
+      // patch: `resolveBackend`'s own fallback rule (unknown -> claude-code)
+      // is exactly what a stale/rejected `backend` value should read as
+      // here too.
+      capabilities: capabilitiesForBackend(updatedChat.backend),
     },
   });
 }

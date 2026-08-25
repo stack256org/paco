@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import type { WebAgentUIMessage } from "@/app/types";
 import { DiffsProvider } from "@/components/diffs-provider";
+import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import {
   getChatById,
   getChatMessages,
@@ -161,11 +162,18 @@ export default async function SessionChatPage({
     chat.id,
   );
 
+  // Computed here, not derived client-side from `chat.backend`: this is the
+  // chat bootstrap payload capability-driven UI reads (Section 7 Task 5) —
+  // `EffortSelectorCompact` hides itself when `chatCapabilities.effort` is
+  // `false`, without ever hardcoding a backend id.
+  const initialCapabilities = capabilitiesForBackend(chat.backend);
+
   return (
     <DiffsProvider themePreference={themePreference}>
       <SessionChatProvider
         session={sessionRecord}
         chat={chat}
+        initialCapabilities={initialCapabilities}
         initialMessages={initialMessages}
         initialModelOptions={initialModelOptions}
       >

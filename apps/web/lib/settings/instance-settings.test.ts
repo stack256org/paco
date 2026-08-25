@@ -117,4 +117,58 @@ describe("instance settings", () => {
     expect(settings.smtp.user).toBe("changed");
     expect(settings.smtp.password).toBe("hunter2");
   });
+
+  test("the OpenFX API key is sealed at rest and readable back", async () => {
+    stored = null;
+    const { readInstanceSettings, saveOpenFxSettings } = await modulePromise;
+
+    await saveOpenFxSettings({
+      endpoint: "https://gateway.example.com",
+      apiKey: "sk-openfx-secret",
+      binaryPath: "/usr/local/bin/openfx",
+    });
+
+    // Same narrowing issue as the SMTP test above: `stored` is reassigned
+    // inside the fake db's `onConflictDoUpdate`, across an `await`.
+    const storedRow = stored as Row | null;
+    expect(storedRow?.openfxApiKeySealed).toBeTruthy();
+    expect(String(storedRow?.openfxApiKeySealed)).not.toContain(
+      "sk-openfx-secret",
+    );
+
+    const settings = await readInstanceSettings();
+    expect(settings.openfx.endpoint).toBe("https://gateway.example.com");
+    expect(settings.openfx.apiKey).toBe("sk-openfx-secret");
+    expect(settings.openfx.binaryPath).toBe("/usr/local/bin/openfx");
+  });
+
+  test("a null OpenFX API key leaves the stored one alone", async () => {
+    stored = null;
+    const { readInstanceSettings, saveOpenFxSettings } = await modulePromise;
+
+    await saveOpenFxSettings({
+      endpoint: "https://gateway.example.com",
+      apiKey: "sk-openfx-secret",
+      binaryPath: "/usr/local/bin/openfx",
+    });
+    await saveOpenFxSettings({
+      endpoint: "https://new-gateway.example.com",
+      apiKey: null,
+      binaryPath: "/usr/local/bin/openfx",
+    });
+
+    const settings = await readInstanceSettings();
+    expect(settings.openfx.endpoint).toBe("https://new-gateway.example.com");
+    expect(settings.openfx.apiKey).toBe("sk-openfx-secret");
+  });
+
+  test("a fresh install reads OpenFX settings as unconfigured", async () => {
+    stored = null;
+    const { readInstanceSettings } = await modulePromise;
+
+    const settings = await readInstanceSettings();
+    expect(settings.openfx.endpoint).toBeNull();
+    expect(settings.openfx.apiKey).toBeNull();
+    expect(settings.openfx.binaryPath).toBeNull();
+  });
 });
