@@ -164,6 +164,189 @@ mkdir -p "$PKGROOT/usr/lib/paco/apps/web/node_modules"
 cp -a "$DEPLOY_DIR/node_modules/." "$PKGROOT/usr/lib/paco/apps/web/node_modules/"
 
 # -----------------------------------------------------------------------------
+# Finish the job `pnpm deploy` leaves half done: ship the `@paco/*` packages.
+#
+# `pnpm deploy` resolves third-party dependencies into the deploy tree for
+# real, which is why it is used above — but the `workspace:*` ones it only
+# *links*: every `@paco/*` entry comes out as a relative symlink back into
+# this build machine's own checkout
+# (`node_modules/@paco/plugin-host -> ../../../packages/plugin-host`), and
+# `cp -a` faithfully preserves symlinks. On the target there is no checkout,
+# so the entire `@paco` scope dangles and the package ships a hole where
+# seven of its own libraries should be.
+#
+# Almost everything under `@paco/` is bundled into `.next/server` by
+# Turbopack at build time, which is why this stayed invisible. The plugin
+# subsystem is not: `PluginHost` spawns a separate Node process on
+# `<ancestor>/node_modules/@paco/plugin-host/worker-entry.ts`, read off disk
+# at runtime, and that file imports `zod` and `@paco/plugin-kit` — so the
+# package directory has to be real, and has to sit inside a `node_modules`
+# that resolves those two. See the long comment on `resolvePluginHostDir` in
+# packages/plugin-host/host.ts, which names this script as the fix.
+#
+# The real files go to `apps/web/paco-packages/` and `node_modules/@paco/*`
+# becomes a relative link to them, rather than the packages simply being
+# dereferenced where they stand. That indirection is not tidiness — it is the
+# difference between a working plugin subsystem and a broken one:
+#
+#   * The worker entry is TypeScript, and Node runs it by stripping types.
+#     Node refuses to do that for any file whose path contains a
+#     `node_modules` segment — `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`,
+#     with no flag to override it. `buildWorkerArgs` passes
+#     `realpathSyncOrSelf(workerEntryPath)`, so what Node sees is the *real*
+#     path: in a checkout that is `packages/plugin-host/worker-entry.ts`
+#     (pnpm's `node_modules/@paco/*` are symlinks), which is why `next start`
+#     has always worked. Copying the package to its `node_modules` location
+#     for real is the one arrangement that dangles nothing and still fails at
+#     the first plugin start.
+#   * `apps/web/paco-packages/<pkg>/` keeps `apps/web/node_modules/` as the
+#     nearest `node_modules` above it, so `zod` and `@paco/plugin-kit` are
+#     still reachable from the real path — the same two paths
+#     `WORKER_RUNTIME_PACKAGES` looks up.
+#
+# Copied entry by entry rather than with one `cp -aL` of the package
+# directory, because `-L` follows *every* symlink it meets. Each workspace
+# package carries a pnpm `node_modules/` of links into this repo's store, so
+# dereferencing wholesale would inline a private copy of `typescript` (~13 MB)
+# per package, and pnpm's `@paco/<pkg> -> ../../<pkg>` sibling links between
+# them can send `cp -L` round in circles. Skipping it costs nothing here,
+# because the deploy tree's own `node_modules` is what resolves those
+# dependencies. `.turbo` is a task cache, dropped for the same reason as the
+# `.cache` directories below.
+#
+# `find … -mindepth 1 -maxdepth 1` rather than a `*` glob because it also
+# picks up dotfiles; the trailing slash is what makes `find` walk into the
+# symlink rather than report it.
+echo "build-deb: staging the @paco workspace packages pnpm deploy only linked"
+PKG_NODE_MODULES="$PKGROOT/usr/lib/paco/apps/web/node_modules"
+PKG_PACO_PACKAGES="$PKGROOT/usr/lib/paco/apps/web/paco-packages"
+rm -rf "$PKG_PACO_PACKAGES"
+mkdir -p "$PKG_PACO_PACKAGES"
+for linked_pkg in "$DEPLOY_DIR"/node_modules/@paco/*; do
+  [ -e "$linked_pkg" ] || continue
+  paco_pkg=$(basename "$linked_pkg")
+  mkdir -p "$PKG_PACO_PACKAGES/$paco_pkg"
+  find "$linked_pkg/" -mindepth 1 -maxdepth 1 \
+    ! -name node_modules ! -name .turbo \
+    -exec cp -aL {} "$PKG_PACO_PACKAGES/$paco_pkg/" \;
+  # `../../paco-packages/<pkg>` from `<app>/node_modules/@paco/<pkg>`: two
+  # levels up is `<app>`. Relative, so it survives wherever dpkg unpacks it —
+  # and the same shape pnpm writes in the checkout.
+  rm -rf "$PKG_NODE_MODULES/@paco/$paco_pkg"
+  ln -s "../../paco-packages/$paco_pkg" "$PKG_NODE_MODULES/@paco/$paco_pkg"
+done
+
+# Each staged package gets back the `node_modules` of its own declared
+# dependencies that pnpm builds in a checkout — links only, no copies.
+#
+# Walking up to `apps/web/node_modules` would reach exactly the same packages
+# without this, so it is not about what is *reachable*. It is about the path
+# the resolver reaches them by, which the hardened worker's permission model
+# cares about: `--permission` allows `packageDir` and the real directories of
+# `WORKER_RUNTIME_PACKAGES`, and Node's resolver *probes* each ancestor's
+# `node_modules` in turn — so with nothing at `paco-packages/<pkg>/`, the
+# second probe is `paco-packages/node_modules/...`, which is allowed nowhere,
+# and the worker dies on "Access to this API has been restricted" before it
+# reads a line. In a checkout the first probe hits
+# `packages/<pkg>/node_modules/<dep>` and the question never arises. This
+# restores that.
+#
+# Built from `dependencies` alone: `devDependencies` (`@paco/tsconfig`,
+# `@types/*`) and `peerDependencies` (`typescript`) are not in a `--prod`
+# deploy and must not be linked to. That also keeps the link graph acyclic —
+# it is the workspace's own dependency graph, one link per real edge — rather
+# than aliasing whole directories at each other.
+
+# Where a dependency link has to point so it lands on its target in *one*
+# hop, the way pnpm writes these links itself.
+#
+# `apps/web/node_modules/<dep>` is usually a symlink into `.pnpm`, so
+# pointing at it would put a second symlink on the path — and that
+# intermediate hop is fatal under `--permission`: the resolver `realpath`s
+# the chain, the allow-list names only the package directories themselves,
+# and the worker dies on "Access to this API has been restricted". Verified
+# both ways against a staged tree. So when the entry is a link, its own
+# target is reused, rebased onto the link's new directory.
+#
+# $1 is the dependency's path under `apps/web/node_modules`, $2 the `../`
+# prefix that reaches `apps/web` from the new link's own directory.
+paco_dep_target() {
+  paco_dep_entry="$PKG_NODE_MODULES/$1"
+  if [ -L "$paco_dep_entry" ]; then
+    # A link's target is relative to the directory holding it, so it rebases
+    # onto the scope directory ($1 minus its last segment), not the root.
+    paco_dep_scope="$2/node_modules"
+    case "$1" in
+      */*) paco_dep_scope="$paco_dep_scope/${1%/*}" ;;
+    esac
+    printf '%s/%s\n' "$paco_dep_scope" "$(readlink "$paco_dep_entry")"
+  else
+    printf '%s/node_modules/%s\n' "$2" "$1"
+  fi
+}
+
+for linked_pkg in "$DEPLOY_DIR"/node_modules/@paco/*; do
+  [ -e "$linked_pkg" ] || continue
+  paco_pkg=$(basename "$linked_pkg")
+
+  for dep in $(node -e 'console.log(Object.keys(require(process.argv[1]).dependencies ?? {}).join("\n"))' "$linked_pkg/package.json"); do
+    dep_link="$PKG_PACO_PACKAGES/$paco_pkg/node_modules/$dep"
+    mkdir -p "$(dirname "$dep_link")"
+
+    # One `../` per segment of `<pkg>/node_modules/<dep>`, so the target is
+    # written relative to the link's own directory: three for a bare name,
+    # four for a scoped one.
+    case "$dep" in
+      */*) up="../../../.." ;;
+      *) up="../../.." ;;
+    esac
+
+    case "$dep" in
+      @paco/*)
+        sibling=${dep#@paco/}
+        if [ ! -d "$PKG_PACO_PACKAGES/$sibling" ]; then
+          echo "build-deb: refusing to package — $paco_pkg depends on $dep, which pnpm deploy did not link." >&2
+          exit 1
+        fi
+        # Three levels up from `<pkg>/node_modules/@paco/` is
+        # `paco-packages/`, where the siblings are — the identical relative
+        # target pnpm writes for this link in a checkout.
+        ln -sfn "../../../$sibling" "$dep_link"
+        ;;
+      *)
+        if [ -e "$PKG_NODE_MODULES/$dep" ]; then
+          ln -sfn "$(paco_dep_target "$dep" "$up")" "$dep_link"
+        elif [ -e "$PKG_NODE_MODULES/.pnpm/node_modules/$dep" ]; then
+          # Not hoisted to the app's own node_modules — a dependency of a
+          # workspace package that `web` does not itself depend on. pnpm's
+          # hidden hoisted directory holds it, at the one version the deploy
+          # resolved.
+          ln -sfn "$(paco_dep_target ".pnpm/node_modules/$dep" "$up")" "$dep_link"
+        else
+          # A `--prod` deploy of `web` resolves what *web* depends on; a
+          # dependency only a linked workspace package declares (today:
+          # `dockerode`, under `@paco/sandbox`) is not in the tree at all.
+          # Not fatal, because nothing loads those packages off disk —
+          # Turbopack bundles them, `dockerode` included, into
+          # `.next/server`. It is fatal for anything the plugin worker needs,
+          # and that is asserted by name further down rather than guessed at
+          # here.
+          echo "build-deb: note: $paco_pkg declares $dep, which pnpm deploy did not resolve into the tree; left unlinked (it is reachable only through the Turbopack bundle)" >&2
+        fi
+        ;;
+    esac
+  done
+done
+
+# pnpm's hidden hoisted directory links the deployed workspace project itself
+# (`web`) back to the checkout too. Nothing resolves the app by package name —
+# it is served from /usr/lib/paco/apps/web, staged from `.next/standalone`
+# above — so this one is dropped rather than duplicated, which would otherwise
+# mean a second copy of the whole app (`.next` included) inside its own
+# node_modules.
+rm -f "$PKG_NODE_MODULES/.pnpm/node_modules/web"
+
+# -----------------------------------------------------------------------------
 # Bundled Node — architecture-specific, downloaded and verified, never taken
 # from apt (see packaging/debian/control: Node is not a Depends).
 echo "build-deb: fetching Node v$NODE_VERSION ($NODE_ARCH)"
@@ -352,6 +535,137 @@ do
     exit 1
   fi
 done
+
+# The files the plugin worker is read off disk from, checked on both counts
+# that have actually been wrong here — and neither of which any other step
+# notices, because nothing in a build reaches them:
+#
+#   1. The path must resolve to a real file. `pnpm deploy` leaves
+#      `node_modules/@paco/*` as links into the build machine's checkout,
+#      which resolve here and dangle on every install.
+#   2. Its *real* path must contain no `node_modules` segment. Node refuses
+#      to strip types from a TypeScript file under `node_modules`, and
+#      `buildWorkerArgs` hands it the realpath — so a package copied straight
+#      into its `node_modules` location dangles nothing and still fails at the
+#      first plugin start with ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING.
+#   3. `zod` and `@paco/plugin-kit` — `WORKER_RUNTIME_PACKAGES` — must be
+#      reachable from the *first* `node_modules` above the package directory,
+#      in one symlink hop. A hardened worker runs under `--permission` with
+#      only that directory and those two packages readable, and Node's
+#      resolver probes each ancestor in turn and `realpath`s what it finds:
+#      a package found one level higher, or through an intermediate link, is
+#      a permission error at the first plugin start rather than a resolution
+#      that merely takes longer.
+#
+# Read through `node_modules/@paco/...`, not through `paco-packages/...`,
+# because that is the path `resolvePluginHostDir` actually finds at runtime.
+echo "build-deb: verifying the plugin worker's own files"
+node -e '
+const { existsSync, lstatSync, readlinkSync, realpathSync, statSync } = require("node:fs");
+const { dirname, join, resolve, sep } = require("node:path");
+
+const appDir = process.argv[1];
+const fail = (...lines) => {
+  for (const line of lines) {
+    console.error(line);
+  }
+  process.exit(1);
+};
+
+const realFileOutsideNodeModules = (file) => {
+  let real;
+  try {
+    real = realpathSync(file);
+  } catch (error) {
+    fail(
+      `build-deb: refusing to package — ${file} does not resolve to a real file.`,
+      String(error),
+    );
+  }
+  if (!statSync(real).isFile()) {
+    fail(`build-deb: refusing to package — ${file} is not a file.`);
+  }
+  if (real.split(sep).includes("node_modules")) {
+    fail(
+      `build-deb: refusing to package — ${file} really lives at ${real}.`,
+      "Node cannot strip types from a TypeScript file under node_modules, so every",
+      "plugin would fail to start. Keep the real files outside node_modules and link to them.",
+    );
+  }
+};
+
+const hostDir = join(appDir, "node_modules", "@paco", "plugin-host");
+for (const file of [
+  join(hostDir, "worker-entry.ts"),
+  join(hostDir, "worker-preload.ts"),
+  join(appDir, "node_modules", "@paco", "plugin-kit", "index.ts"),
+]) {
+  realFileOutsideNodeModules(file);
+}
+
+const realHostDir = realpathSync(hostDir);
+for (const specifier of ["zod", "@paco/plugin-kit"]) {
+  const probe = join(realHostDir, "node_modules", ...specifier.split("/"));
+  if (!existsSync(join(probe, "package.json"))) {
+    fail(
+      `build-deb: refusing to package — ${specifier} is not at ${probe}.`,
+      "The plugin worker imports it under --permission, which only makes the package",
+      "directory and that package readable; resolving it from any higher node_modules",
+      "aborts the worker with \"Access to this API has been restricted\".",
+    );
+  }
+  // ...and it has to get there in one hop. An entry pointing at another
+  // symlink puts an intermediate directory on the path the resolver
+  // `realpath`s, and that directory is in no allow-list either — the same
+  // "Access to this API has been restricted", from a link that looks
+  // perfectly correct.
+  if (lstatSync(probe).isSymbolicLink()) {
+    const direct = resolve(dirname(probe), readlinkSync(probe));
+    if (direct !== realpathSync(probe)) {
+      fail(
+        `build-deb: refusing to package — ${probe} reaches ${specifier} through another symlink.`,
+        `It points at ${direct}, whose real path is ${realpathSync(probe)}.`,
+        "Point it at the real directory instead, the way pnpm writes these links.",
+      );
+    }
+  }
+}
+' "$PKG_WEB"
+
+# ...and generally: nothing in the staged tree may point outside it. A symlink
+# whose target escapes $PKGROOT resolves fine on this machine — which is why
+# `cp -a` shipped seven dangling `@paco/*` links for as long as it did — and
+# resolves to nothing once dpkg unpacks the tree somewhere else. Internal
+# relative links (all of pnpm's, and the bundled npm's `.bin` entries) are
+# fine and stay as they are.
+escaping_links=$(node -e '
+const { readdirSync, readlinkSync } = require("node:fs");
+const { dirname, join, relative, resolve } = require("node:path");
+const root = resolve(process.argv[1]);
+const escaping = [];
+const walk = (dir) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      const target = resolve(dirname(full), readlinkSync(full));
+      if (relative(root, target).startsWith("..")) {
+        escaping.push(full.slice(root.length) + " -> " + readlinkSync(full));
+      }
+    } else if (entry.isDirectory()) {
+      walk(full);
+    }
+  }
+};
+walk(root);
+console.log(escaping.join("\n"));
+' "$PKGROOT")
+
+if [ -n "$escaping_links" ]; then
+  echo "build-deb: refusing to package — these symlinks point outside the package:" >&2
+  printf '%s\n' "$escaping_links" | sed 's/^/  /' >&2
+  echo "They resolve on this build machine and dangle on every install." >&2
+  exit 1
+fi
 
 # `.next/static` holds every stylesheet and client-JS chunk. Present but empty
 # is as broken as absent, and counting is what distinguishes "copied" from
