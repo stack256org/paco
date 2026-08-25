@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { TASK_STATUSES, type TaskStatus } from "@/lib/db/schema";
-import { canTransition, nextOnReviewerVerdict } from "./state";
+import { canTransition, nextForPlanRoot, nextOnReviewerVerdict } from "./state";
 
 /**
  * The complete set of legal (from, to) pairs, written independently of
@@ -125,5 +125,77 @@ describe("nextOnReviewerVerdict", () => {
         "fail",
       ),
     ).toEqual({ status: "blocked", reviewerRejections: 5 });
+  });
+});
+
+describe("nextForPlanRoot", () => {
+  test("a task with no children is not a plan root and never moves", () => {
+    expect(nextForPlanRoot("todo", [])).toEqual([]);
+  });
+
+  test("a plan whose children have all yet to start stays put", () => {
+    expect(nextForPlanRoot("todo", ["todo", "todo"])).toEqual([]);
+  });
+
+  test("the first child to start moves the plan to running", () => {
+    expect(nextForPlanRoot("todo", ["running", "todo"])).toEqual(["running"]);
+  });
+
+  test("a plan already running does not re-run", () => {
+    expect(nextForPlanRoot("running", ["running", "todo"])).toEqual([]);
+  });
+
+  test("every child done takes the plan through review to done", () => {
+    // No `running -> done` edge exists, and inventing one would let any task
+    // skip review. The plan takes the same route `passWithoutReviewer` takes.
+    expect(nextForPlanRoot("running", ["done", "done"])).toEqual([
+      "review",
+      "done",
+    ]);
+  });
+
+  test("a plan still in todo whose children all finished catches up in one path", () => {
+    expect(nextForPlanRoot("todo", ["done", "done"])).toEqual([
+      "running",
+      "review",
+      "done",
+    ]);
+  });
+
+  test("a failed child fails the plan once nothing is left to run", () => {
+    expect(nextForPlanRoot("running", ["done", "failed"])).toEqual(["failed"]);
+  });
+
+  test("a blocked child blocks the plan, but a failure outranks it", () => {
+    expect(nextForPlanRoot("running", ["done", "blocked"])).toEqual([
+      "blocked",
+    ]);
+    expect(nextForPlanRoot("running", ["blocked", "failed"])).toEqual([
+      "failed",
+    ]);
+  });
+
+  test("a plan with work still in flight does not settle early", () => {
+    expect(nextForPlanRoot("running", ["done", "failed", "running"])).toEqual(
+      [],
+    );
+    expect(nextForPlanRoot("running", ["blocked", "review"])).toEqual([]);
+  });
+
+  test("unblocking a child brings the plan back to running", () => {
+    expect(nextForPlanRoot("blocked", ["done", "running"])).toEqual([
+      "running",
+    ]);
+  });
+
+  test("a finished plan is never reopened", () => {
+    expect(nextForPlanRoot("done", ["done", "todo"])).toEqual([]);
+  });
+
+  test("retrying a subtask revives a failed plan rather than stranding it", () => {
+    expect(nextForPlanRoot("failed", ["done", "running"])).toEqual([
+      "todo",
+      "running",
+    ]);
   });
 });

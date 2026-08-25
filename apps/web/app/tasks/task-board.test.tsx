@@ -125,14 +125,17 @@ describe("TaskColumns", () => {
     expect(html).not.toContain("Start subtasks");
   });
 
-  test("Start subtasks is not offered for a grouping node in any other status", () => {
-    for (const status of [
-      "running",
-      "blocked",
-      "review",
-      "done",
-      "failed",
-    ] as const) {
+  test("Start subtasks stays available while the plan is running", () => {
+    // Roll-up moves a plan root to `running` the moment its first subtask
+    // starts (`nextForPlanRoot`), and the subtasks that have not started yet
+    // still need a way to be set going in one go.
+    const html = renderColumns([task({ status: "running", isLeaf: false })]);
+
+    expect(html).toContain("Start subtasks");
+  });
+
+  test("Start subtasks is not offered for a grouping node that has settled", () => {
+    for (const status of ["blocked", "review", "done", "failed"] as const) {
       const html = renderColumns([task({ status, isLeaf: false })]);
       expect(html).not.toContain("Start subtasks");
     }

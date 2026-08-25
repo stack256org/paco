@@ -371,6 +371,25 @@ export async function planGoal(
   }
 
   const { rootId, taskIds } = await db.transaction(async (tx) => {
+    /*
+     * The root is a grouping node, not a unit of work: `startTask` refuses
+     * a task with children, so nothing ever executes this row and no turn
+     * of its own can move it. It is kept — rather than returning bare
+     * children and grouping by `parentTaskId` in the UI — because a plan is
+     * a thing people watch progress on, and its title, goal and origin are
+     * the only record of what was asked for; the subtasks each describe a
+     * fragment of it.
+     *
+     * What moves it is roll-up: `transitionTaskStatus` calls
+     * `nextForPlanRoot` (`lib/tasks/state.ts`) whenever any child changes
+     * status, and walks the root along a legal path to match. Without that
+     * this row would be created `todo` and stay `todo` forever, which is
+     * exactly what it did until now — one dead card per plan.
+     *
+     * These inserts deliberately go straight to `tx`, not through
+     * `createTask`: the whole tree is one transaction, so a partially
+     * written plan can never reach the board.
+     */
     const [root] = await tx
       .insert(tasks)
       .values({

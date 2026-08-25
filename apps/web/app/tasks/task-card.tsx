@@ -10,7 +10,7 @@ import {
   Unlock,
 } from "lucide-react";
 import Link from "next/link";
-import type { TaskOrigin } from "@/lib/db/schema";
+import type { TaskOrigin, TaskStatus } from "@/lib/db/schema";
 import type { TaskBoardItem } from "./actions";
 
 /** Small, muted label for where a task came from. */
@@ -23,6 +23,20 @@ const ORIGIN_LABEL: Record<TaskOrigin, string> = {
 };
 
 type PendingAction = "start" | "start-subtasks" | "retry" | "unblock" | null;
+
+/**
+ * When a grouping node offers "Start subtasks".
+ *
+ * `running` as well as `todo` because roll-up (`nextForPlanRoot` in
+ * `lib/tasks/state.ts`) moves a plan root to `running` as soon as its first
+ * subtask starts, and the subtasks still sitting in `todo` need a way to be
+ * set going together after that. A settled plan — `done`, `failed`,
+ * `blocked`, `review` — has nothing left to start in bulk.
+ */
+const GROUPING_ACTION_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "todo",
+  "running",
+]);
 
 export interface TaskCardProps {
   task: TaskBoardItem;
@@ -42,9 +56,9 @@ export interface TaskCardProps {
  *
  * A task with children is a planner grouping node, never a unit of work
  * itself (`startTask` refuses it directly), so it gets "Start subtasks"
- * instead of Start — the action that actually applies to it. Without that
- * it had no button and no legal transition out of `todo` at all, which left
- * every plan's root card dead on the board forever.
+ * instead of Start — the action that actually applies to it. Its status is
+ * driven by roll-up from its children (`nextForPlanRoot`), not by any turn
+ * of its own.
  */
 export function TaskCard({
   task,
@@ -113,7 +127,7 @@ export function TaskCard({
             </button>
           ) : null}
 
-          {task.status === "todo" && !task.isLeaf ? (
+          {GROUPING_ACTION_STATUSES.has(task.status) && !task.isLeaf ? (
             <button
               className="btn btn-ghost btn-xs gap-1"
               disabled={busy}

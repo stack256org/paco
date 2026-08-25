@@ -81,3 +81,108 @@ export function nextOnReviewerVerdict(
   }
   return { status: "blocked", reviewerRejections: current.reviewerRejections };
 }
+
+/** Statuses a task never leaves on its own — nothing but a human moves these. */
+const SETTLED_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "done",
+  "failed",
+  "blocked",
+]);
+
+/**
+ * The shortest legal route from one status to another, or `[]` if there is
+ * none.
+ *
+ * A breadth-first walk of `LEGAL_TRANSITIONS` rather than a table of routes:
+ * a second table would be a second source of truth about the machine, and
+ * the first thing it would do is drift from this one — which is precisely
+ * the failure this file just had (`review -> blocked` legal in the reviewer
+ * gate's head, missing from the table).
+ */
+function shortestTransitionPath(
+  from: TaskStatus,
+  to: TaskStatus,
+): TaskStatus[] {
+  if (from === to) {
+    return [];
+  }
+  const queue: Array<{ status: TaskStatus; path: TaskStatus[] }> = [
+    { status: from, path: [] },
+  ];
+  const seen = new Set<TaskStatus>([from]);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      break;
+    }
+    for (const next of LEGAL_TRANSITIONS[current.status]) {
+      if (seen.has(next)) {
+        continue;
+      }
+      const path = [...current.path, next];
+      if (next === to) {
+        return path;
+      }
+      seen.add(next);
+      queue.push({ status: next, path });
+    }
+  }
+  return [];
+}
+
+/** What a plan root's children add up to, or `null` if they say nothing yet. */
+function planRootTarget(children: TaskStatus[]): TaskStatus | null {
+  if (children.length === 0) {
+    return null;
+  }
+  if (children.every((status) => status === "done")) {
+    return "done";
+  }
+  if (children.every((status) => SETTLED_STATUSES.has(status))) {
+    // A failure outranks a block: a plan with a failed subtask needs a human
+    // for a harder reason than one merely waiting on an approval, and the
+    // board's Retry is the affordance that fits.
+    return children.includes("failed") ? "failed" : "blocked";
+  }
+  if (children.some((status) => status !== "todo")) {
+    return "running";
+  }
+  return null;
+}
+
+/**
+ * The transitions a planner's root task should take to match its children.
+ *
+ * `planGoal` (`lib/tasks/planner.ts`) files a root task holding the tree
+ * plus one child per unit of work. The root is a grouping node, never a unit
+ * of work itself — `startTask` refuses a task with children — so nothing
+ * drives it: it was created `todo` and stayed `todo` forever, one dead card
+ * per plan, even after every subtask under it had finished. This is what
+ * drives it, called from `transitionTaskStatus` whenever a child moves.
+ *
+ * Returns a PATH rather than a single status because some of what a plan
+ * does has no single edge: `running -> done` is not a transition (a task
+ * reaches `done` through `review`, and inventing a shortcut here would hand
+ * every task a way to skip review), so a finished plan travels
+ * `review -> done` — the same route `passWithoutReviewer` takes for a task
+ * with no reviewer configured. Every step comes from `LEGAL_TRANSITIONS`
+ * itself, so a plan can never take an edge an ordinary task could not.
+ *
+ * A `done` root is never reopened. A `failed` one is: if a human retries a
+ * subtask and work is moving again, the plan is alive again, and leaving it
+ * `failed` forever would be the same dead-card disease in a different
+ * column.
+ */
+export function nextForPlanRoot(
+  current: TaskStatus,
+  children: TaskStatus[],
+): TaskStatus[] {
+  if (current === "done") {
+    return [];
+  }
+  const target = planRootTarget(children);
+  if (!target || target === current) {
+    return [];
+  }
+  return shortestTransitionPath(current, target);
+}

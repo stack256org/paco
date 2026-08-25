@@ -10,7 +10,7 @@ import {
   type TaskStatus,
 } from "@/lib/db/schema";
 import { appendSessionEvents } from "@/lib/db/session-events";
-import { canTransition } from "@/lib/tasks/state";
+import { canTransition, nextForPlanRoot } from "@/lib/tasks/state";
 
 /**
  * Records a task lifecycle event on the task's chat log — but only when
@@ -298,7 +298,61 @@ export async function transitionTaskStatus(
     from: current.status,
     to,
   });
+
+  if (row.parentTaskId) {
+    await rollUpPlanRoot(organizationId, row.parentTaskId);
+  }
   return row;
+}
+
+/**
+ * Moves a parent grouping node to match what its children now add up to.
+ *
+ * This is the only thing that ever drives a planner's root task: `startTask`
+ * refuses a task with children, so the root has no turn, no chat and no
+ * caller of its own — before this it was created `todo` and stayed `todo`
+ * forever, one dead card per plan even after every subtask beneath it had
+ * finished. Hung off `transitionTaskStatus` rather than any one caller
+ * because this is the single choke point every task status change already
+ * goes through, wherever it originates.
+ *
+ * Recursive by construction: each step is itself a `transitionTaskStatus`
+ * call, so a grouping node nested under another grouping node rolls up in
+ * turn without this needing to know the tree's shape.
+ *
+ * Best-effort, like the lifecycle events above it: the caller's own
+ * transition has already landed and is what it was promised, so a roll-up
+ * that cannot complete is logged rather than allowed to fail the write that
+ * triggered it.
+ */
+async function rollUpPlanRoot(
+  organizationId: string,
+  parentTaskId: string,
+): Promise<void> {
+  try {
+    const parent = await getTask(organizationId, parentTaskId);
+    if (!parent) {
+      return;
+    }
+    const siblings = await db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.organizationId, organizationId),
+          eq(tasks.parentTaskId, parentTaskId),
+        ),
+      );
+    const path = nextForPlanRoot(
+      parent.status,
+      siblings.map((sibling) => sibling.status),
+    );
+    for (const next of path) {
+      await transitionTaskStatus(organizationId, parentTaskId, next);
+    }
+  } catch (error) {
+    console.error("[tasks] plan roll-up failed", { parentTaskId, error });
+  }
 }
 
 export type TaskTreeNode = Task & { children: TaskTreeNode[] };

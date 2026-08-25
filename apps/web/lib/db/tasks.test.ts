@@ -740,3 +740,117 @@ describe("taskTree", () => {
     expect(tree?.children).toEqual([]);
   });
 });
+
+describe("plan roll-up", () => {
+  async function makePlan() {
+    store = [];
+    const root = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "The plan",
+      goal: "Goal",
+      origin: "planner",
+    });
+    const first = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "First",
+      goal: "Goal",
+      parentTaskId: root.id,
+    });
+    const second = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Second",
+      goal: "Goal",
+      parentTaskId: root.id,
+    });
+    return { root, first, second };
+  }
+
+  async function statusOf(taskId: string): Promise<string | undefined> {
+    return (await getTask("org-1", taskId))?.status;
+  }
+
+  test("the first subtask to start moves the plan root to running", async () => {
+    const { root, first } = await makePlan();
+
+    await transitionTaskStatus("org-1", first.id, "running", {
+      chatId: "chat-1",
+    });
+
+    // Nothing else drives this row: `startTask` refuses a task with
+    // children, so without roll-up the root sits in `todo` forever.
+    expect(await statusOf(root.id)).toBe("running");
+  });
+
+  test("the plan root reaches done only once every subtask is done", async () => {
+    const { root, first, second } = await makePlan();
+
+    await transitionTaskStatus("org-1", first.id, "running");
+    await transitionTaskStatus("org-1", first.id, "review");
+    await transitionTaskStatus("org-1", first.id, "done");
+    expect(await statusOf(root.id)).toBe("running");
+
+    await transitionTaskStatus("org-1", second.id, "running");
+    await transitionTaskStatus("org-1", second.id, "review");
+    await transitionTaskStatus("org-1", second.id, "done");
+
+    expect(await statusOf(root.id)).toBe("done");
+  });
+
+  test("a failed subtask fails the plan once nothing is left running", async () => {
+    const { root, first, second } = await makePlan();
+
+    await transitionTaskStatus("org-1", first.id, "running");
+    await transitionTaskStatus("org-1", first.id, "failed");
+    // The second subtask has not started, so the plan is still live.
+    expect(await statusOf(root.id)).toBe("running");
+
+    await transitionTaskStatus("org-1", second.id, "running");
+    await transitionTaskStatus("org-1", second.id, "review");
+    await transitionTaskStatus("org-1", second.id, "done");
+
+    expect(await statusOf(root.id)).toBe("failed");
+  });
+
+  test("a blocked subtask blocks the plan, and unblocking it revives the plan", async () => {
+    const { root, first, second } = await makePlan();
+
+    await transitionTaskStatus("org-1", first.id, "running");
+    await transitionTaskStatus("org-1", first.id, "blocked");
+    await transitionTaskStatus("org-1", second.id, "running");
+    await transitionTaskStatus("org-1", second.id, "review");
+    await transitionTaskStatus("org-1", second.id, "done");
+    expect(await statusOf(root.id)).toBe("blocked");
+
+    await transitionTaskStatus("org-1", first.id, "running");
+
+    expect(await statusOf(root.id)).toBe("running");
+  });
+
+  test("a task with no parent rolls nothing up", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Standalone",
+      goal: "Goal",
+    });
+
+    await transitionTaskStatus("org-1", task.id, "running");
+
+    expect(store).toHaveLength(1);
+  });
+
+  test("a roll-up failure never fails the subtask's own transition", async () => {
+    const { first } = await makePlan();
+    // The root is gone — the roll-up cannot find it. The subtask's own
+    // transition is the caller's promise and must still stand.
+    store = store.filter((row) => row.parentTaskId !== null);
+
+    const updated = await transitionTaskStatus("org-1", first.id, "running");
+
+    expect(updated.status).toBe("running");
+  });
+});
