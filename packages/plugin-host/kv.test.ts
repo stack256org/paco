@@ -90,6 +90,14 @@ function makeHost(options: {
  */
 const PAGE_LIMIT = 3;
 
+function isFakeSealed(value: unknown): value is { __fakeSealed: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { __fakeSealed?: unknown }).__fakeSealed === "string"
+  );
+}
+
 function makeKvHandler(store: Map<string, unknown>): CapabilityHandlers {
   return {
     "storage:kv": (_pluginId, payload) => {
@@ -100,10 +108,27 @@ function makeKvHandler(store: Map<string, unknown>): CapabilityHandlers {
         afterKey?: string;
       };
       switch (op.op) {
-        case "get":
-          return Promise.resolve(store.get(op.key ?? "") ?? null);
+        case "get": {
+          const stored = store.get(op.key ?? "") ?? null;
+          if (isFakeSealed(stored)) {
+            return Promise.resolve(
+              Buffer.from(stored.__fakeSealed, "base64").toString("utf-8"),
+            );
+          }
+          return Promise.resolve(stored);
+        }
         case "set":
           store.set(op.key ?? "", op.value);
+          return Promise.resolve({ ok: true });
+        case "setSecret":
+          // Stands in for the real handler's `seal()`: what matters here is
+          // that the worker sends a distinct op with the plaintext, and that
+          // `get` gives the plaintext back.
+          store.set(op.key ?? "", {
+            __fakeSealed: Buffer.from(String(op.value), "utf-8").toString(
+              "base64",
+            ),
+          });
           return Promise.resolve({ ok: true });
         case "delete":
           store.delete(op.key ?? "");
@@ -117,7 +142,12 @@ function makeKvHandler(store: Map<string, unknown>): CapabilityHandlers {
             items: Array<{ key: string; value: unknown }>;
             nextAfterKey?: string;
           } = {
-            items: page.map((key) => ({ key, value: store.get(key) })),
+            items: page.map((key) => {
+              const stored = store.get(key);
+              return isFakeSealed(stored)
+                ? { key, value: null, secret: true }
+                : { key, value: stored };
+            }),
           };
           if (page.length === PAGE_LIMIT) {
             result.nextAfterKey = page.at(-1);
@@ -288,6 +318,59 @@ describe("storage:kv through a real worker", () => {
     expect(outcome.ok).toBe(true);
     expect(outcome.output.afterSet).toEqual({ n: 1 });
     expect(outcome.output.afterDelete).toBeNull();
+  });
+
+  test("kv.setSecret reaches the handler as its own op and reads back through get", async () => {
+    const store = new Map<string, unknown>();
+    const descriptor = await writePlugin(
+      "kv-plugin",
+      ["tools:register", "storage:kv"],
+      {
+        "tools/kv-secret.js": `
+          export default {
+            name: "kv-secret",
+            description: "setSecret round trip.",
+            inputSchema: { type: "object", properties: {} },
+            async execute(_input, api) {
+              await api.kv.set("plain", "visible");
+              await api.kv.setSecret("token", "xoxb-super-secret");
+              const readBack = await api.kv.get("token");
+              const page = await api.kv.list();
+              return { readBack, page };
+            },
+          };
+        `,
+      },
+    );
+    const host = makeHost({
+      descriptor,
+      grantedCapabilities: ["tools:register", "storage:kv"],
+      handlers: makeKvHandler(store),
+    });
+    await host.start();
+
+    const outcome = (await host.invokeTool("kv-secret", {})) as {
+      ok: boolean;
+      output: {
+        readBack: unknown;
+        page: {
+          items: Array<{ key: string; value: unknown; secret?: boolean }>;
+        };
+      };
+    };
+
+    expect(outcome.ok).toBe(true);
+    // Sealed at rest: the raw stored value is not the plaintext.
+    expect(JSON.stringify(store.get("token"))).not.toContain(
+      "xoxb-super-secret",
+    );
+    // ...but the ordinary `get` gives it straight back.
+    expect(outcome.output.readBack).toBe("xoxb-super-secret");
+
+    const items = outcome.output.page.items;
+    expect(items.find((item) => item.key === "token")?.secret).toBe(true);
+    expect(items.find((item) => item.key === "token")?.value).toBeNull();
+    expect(items.find((item) => item.key === "plain")?.value).toBe("visible");
   });
 
   test("kv is denied by the host's grant check and never reaches the handler", async () => {

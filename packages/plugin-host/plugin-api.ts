@@ -9,7 +9,15 @@
 /** One row returned by `kv.list` — see `KvListPage`. */
 export interface KvListItem {
   key: string;
+  /** `null` for a key holding a sealed secret — see `secret`. */
   value: unknown;
+  /**
+   * Set when this key holds a secret written with `setSecret`. Listing never
+   * materializes a secret: `value` is `null` and reading it is a deliberate
+   * single-key `get`, so a plugin that logs a whole listing does not thereby
+   * log every credential it holds.
+   */
+  secret?: boolean;
 }
 
 /**
@@ -25,8 +33,36 @@ export interface KvListPage {
 }
 
 export interface PluginKvApi {
+  /**
+   * Reads a key. A key written with `setSecret` is unsealed transparently
+   * and comes back as the original string, so nothing downstream has to
+   * know which keys are sealed.
+   */
   get(key: string): Promise<unknown>;
+  /**
+   * Writes any JSON-serializable value, in the clear. Rejects a value shaped
+   * like a sealed-secret envelope — store a credential with `setSecret`
+   * instead of hand-rolling one.
+   */
   set(key: string, value: unknown): Promise<void>;
+  /**
+   * Writes a credential — a bot token, a signing secret — sealed at rest.
+   *
+   * The host encrypts `value` with the same application secret every other
+   * stored secret in Paco uses and keeps only the ciphertext, so a database
+   * dump, a backup, or a `select *` in a log does not hand it over. Read it
+   * back through the ordinary `get`.
+   *
+   * Opt-in per key rather than a blanket encryption of plugin storage: most
+   * of what a plugin keeps here is ordinary bookkeeping an operator should
+   * be able to read while debugging, and only the plugin knows which of its
+   * keys are credentials. This protects the value at rest, not from the
+   * plugin itself — the plugin wrote it and can read it back.
+   *
+   * `value` is a string (credentials are strings) and is capped well below
+   * the ordinary value limit.
+   */
+  setSecret(key: string, value: string): Promise<void>;
   delete(key: string): Promise<void>;
   /** Pass the previous page's `nextAfterKey` to continue; omit to start from the beginning. */
   list(afterKey?: string): Promise<KvListPage>;

@@ -6,6 +6,13 @@ import { pluginKv, type PluginRow } from "@/lib/db/schema";
 // server component and has nothing to do with what is being tested.
 mock.module("server-only", () => ({}));
 
+// `storage:kv`'s `setSecret` op seals with `lib/crypto/secret-box`, which
+// derives its key from APP_SECRET — same fixture value `secret-box.test.ts`
+// and the channel ingress route's test use. Nothing about sealing is mocked:
+// the point of these tests is that what lands in the column is genuinely
+// unreadable, so the real cipher has to run.
+process.env.APP_SECRET ??= "test-secret-for-capability-handlers-00000000";
+
 type KvRow = { pluginId: string; key: string; value: unknown; updatedAt: Date };
 type Predicate = (row: KvRow) => boolean;
 
@@ -196,7 +203,14 @@ mock.module("@/lib/chat/submit-message", () => ({
   submitChatMessage: submitChatMessageSpy,
 }));
 
+// Spread the real module rather than replacing it: `lib/config/required-env`
+// (reached through `lib/crypto/secret-box`, which `storage:kv`'s setSecret
+// op uses) imports `isHttpUrlWithHost` from here, and a mock that supplies
+// only `appUrl` breaks that import.
+const actualAppUrl = await import("@/lib/app-url");
+
 mock.module("@/lib/app-url", () => ({
+  ...actualAppUrl,
   appUrl: () => new URL("http://localhost:3000"),
 }));
 
@@ -478,6 +492,150 @@ describe("storage:kv", () => {
 
     expect(await kv("plugin-a", { op: "get", key: "foo" })).toBeNull();
     expect(await kv("plugin-b", { op: "get", key: "foo" })).toBe(2);
+  });
+
+  test("setSecret does not store the plaintext in the row", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await kv("plugin-a", {
+      op: "setSecret",
+      key: "bot-token",
+      value: "xoxb-super-secret",
+    });
+
+    const row = kvStore.find((candidate) => candidate.key === "bot-token");
+    expect(row).toBeDefined();
+    expect(JSON.stringify(row?.value)).not.toContain("xoxb-super-secret");
+  });
+
+  test("a sealed secret round-trips through the ordinary get", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await kv("plugin-a", {
+      op: "setSecret",
+      key: "bot-token",
+      value: "xoxb-super-secret",
+    });
+
+    expect(await kv("plugin-a", { op: "get", key: "bot-token" })).toBe(
+      "xoxb-super-secret",
+    );
+  });
+
+  test("a sealed secret is still namespaced to the plugin that wrote it", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await kv("plugin-a", {
+      op: "setSecret",
+      key: "bot-token",
+      value: "xoxb-super-secret",
+    });
+
+    expect(await kv("plugin-b", { op: "get", key: "bot-token" })).toBeNull();
+  });
+
+  test("list never materializes a secret; it marks the key instead", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await kv("plugin-a", { op: "set", key: "plain", value: "visible" });
+    await kv("plugin-a", {
+      op: "setSecret",
+      key: "secret",
+      value: "xoxb-super-secret",
+    });
+
+    const listed = (await kv("plugin-a", { op: "list" })) as {
+      items: Array<{ key: string; value: unknown; secret?: boolean }>;
+    };
+    const serialized = JSON.stringify(listed);
+
+    expect(serialized).not.toContain("xoxb-super-secret");
+    const secretItem = listed.items.find((item) => item.key === "secret");
+    expect(secretItem?.secret).toBe(true);
+    expect(secretItem?.value).toBeNull();
+    const plainItem = listed.items.find((item) => item.key === "plain");
+    expect(plainItem?.value).toBe("visible");
+    expect(plainItem?.secret).toBeUndefined();
+  });
+
+  test("delete removes a sealed secret like any other key", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await kv("plugin-a", { op: "setSecret", key: "k", value: "v" });
+    await kv("plugin-a", { op: "delete", key: "k" });
+
+    expect(await kv("plugin-a", { op: "get", key: "k" })).toBeNull();
+  });
+
+  test("a plain set cannot forge a sealed-secret envelope", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    // Without this guard a plaintext value shaped like the envelope would be
+    // fed to `open()` on the way back out, turning every read of that key
+    // into an error the plugin could not clear.
+    await expect(
+      kv("plugin-a", {
+        op: "set",
+        key: "k",
+        value: { __pacoSealedSecret: 1, sealed: "not-really-sealed" },
+      }),
+    ).rejects.toThrow(/setSecret/);
+  });
+
+  test("setSecret rejects a non-string value", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await expect(
+      kv("plugin-a", { op: "setSecret", key: "k", value: { not: "a string" } }),
+    ).rejects.toThrow(/invalid payload/);
+  });
+
+  test("setSecret rejects a value far larger than any credential", async () => {
+    kvStore = [];
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const kv = handlers["storage:kv"];
+    if (!kv) {
+      throw new Error("storage:kv handler missing");
+    }
+
+    await expect(
+      kv("plugin-a", { op: "setSecret", key: "k", value: "x".repeat(8193) }),
+    ).rejects.toThrow(/invalid payload/);
   });
 
   test("rejects a malformed payload", async () => {

@@ -96,6 +96,9 @@ const api: PluginApi = {
     set: async (key: string, value: unknown) => {
       await requestCapability("storage:kv", { op: "set", key, value });
     },
+    setSecret: async (key: string, value: string) => {
+      await requestCapability("storage:kv", { op: "setSecret", key, value });
+    },
     delete: async (key: string) => {
       await requestCapability("storage:kv", { op: "delete", key });
     },

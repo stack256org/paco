@@ -15,6 +15,7 @@ import type { WebAgentUIMessage } from "@/app/types";
 import { isAdmin } from "@/lib/admin/require-admin";
 import { appUrl } from "@/lib/app-url";
 import { submitChatMessage } from "@/lib/chat/submit-message";
+import { open as openSealed, seal } from "@/lib/crypto/secret-box";
 import { db } from "@/lib/db/client";
 import { pluginKv, type PluginRow } from "@/lib/db/schema";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
@@ -34,6 +35,14 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const KV_KEY_MAX_LENGTH = 256;
 const KV_VALUE_MAX_BYTES = 64 * 1024;
 const KV_LIST_LIMIT = 1000;
+/**
+ * Cap on a `setSecret` plaintext. Far tighter than `KV_VALUE_MAX_BYTES`
+ * because a secret is a credential — a token, a signing key — not a
+ * document, and because the sealed form is roughly a third larger than the
+ * plaintext plus ~60 bytes of framing; 8 KiB in keeps the stored envelope
+ * comfortably under the ordinary value cap.
+ */
+const KV_SECRET_MAX_BYTES = 8 * 1024;
 
 /**
  * Every address a plugin must never reach through `net:fetch`, no matter what
@@ -143,9 +152,64 @@ const kvValueSchema = z.unknown().refine(
   },
 );
 
+/**
+ * The envelope a sealed secret is stored as, inside the same `jsonb` column
+ * every other value uses.
+ *
+ * Per-key rather than sealing the whole column: `storage:kv` is a plugin's
+ * ordinary scratch storage — thread ids, channel maps, cursors — and
+ * encrypting all of it would make every row opaque to an operator debugging
+ * a plugin while protecting almost nothing. What has to be sealed is the
+ * handful of keys that hold a credential, and only the plugin knows which
+ * those are, so it opts in per key.
+ *
+ * The marker is a shape a plausible plugin value would not accidentally
+ * take, and `set` refuses to write it (below) so a plugin cannot plant a
+ * forgery that turns every later read of that key into an unseal error.
+ */
+const SEALED_SECRET_MARKER = "__pacoSealedSecret";
+
+interface SealedSecretEnvelope {
+  [SEALED_SECRET_MARKER]: 1;
+  sealed: string;
+}
+
+function isSealedSecretEnvelope(value: unknown): value is SealedSecretEnvelope {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    SEALED_SECRET_MARKER in value &&
+    typeof (value as { sealed?: unknown }).sealed === "string"
+  );
+}
+
+/** A value is only accepted by a plain `set` if it is not a forged envelope. */
+const kvPlainValueSchema = kvValueSchema.refine(
+  (value) => !isSealedSecretEnvelope(value),
+  {
+    message:
+      "value looks like a sealed-secret envelope; use setSecret to store a secret",
+  },
+);
+
+const kvSecretSchema = z
+  .string()
+  .refine((value) => Buffer.byteLength(value, "utf-8") <= KV_SECRET_MAX_BYTES, {
+    message: `secret must be at most ${KV_SECRET_MAX_BYTES} bytes`,
+  });
+
 const kvPayloadSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("get"), key: kvKeySchema }),
-  z.object({ op: z.literal("set"), key: kvKeySchema, value: kvValueSchema }),
+  z.object({
+    op: z.literal("set"),
+    key: kvKeySchema,
+    value: kvPlainValueSchema,
+  }),
+  z.object({
+    op: z.literal("setSecret"),
+    key: kvKeySchema,
+    value: kvSecretSchema,
+  }),
   z.object({ op: z.literal("delete"), key: kvKeySchema }),
   z.object({
     op: z.literal("list"),
@@ -153,6 +217,21 @@ const kvPayloadSchema = z.discriminatedUnion("op", [
     afterKey: kvKeySchema.optional(),
   }),
 ]);
+
+/** One upsert, shared by `set` and `setSecret` — see `set`'s note on races. */
+async function upsertKvValue(
+  pluginId: string,
+  key: string,
+  value: unknown,
+): Promise<void> {
+  await db
+    .insert(pluginKv)
+    .values({ pluginId, key, value, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: [pluginKv.pluginId, pluginKv.key],
+      set: { value, updatedAt: new Date() },
+    });
+}
 
 async function handleStorageKv(
   pluginId: string,
@@ -170,7 +249,23 @@ async function handleStorageKv(
         .select({ value: pluginKv.value })
         .from(pluginKv)
         .where(and(eq(pluginKv.pluginId, pluginId), eq(pluginKv.key, op.key)));
-      return row ? row.value : null;
+      if (!row) {
+        return null;
+      }
+      // Unsealing is transparent: a plugin stores a secret with `setSecret`
+      // and reads it back with the ordinary `get`, so nothing downstream has
+      // to know which of its keys are sealed.
+      if (isSealedSecretEnvelope(row.value)) {
+        try {
+          return openSealed(row.value.sealed);
+        } catch (error) {
+          throw new Error(
+            `storage:kv: secret "${op.key}" could not be unsealed — it was stored under a different APP_SECRET, or the row is damaged. Store it again.`,
+            { cause: error },
+          );
+        }
+      }
+      return row.value;
     }
     case "set": {
       // A single upsert, not a select-then-branch: two concurrent `set`
@@ -178,18 +273,20 @@ async function handleStorageKv(
       // shape into either a duplicate-key error or a lost update. The
       // database's own conflict handling is the only thing that can make
       // this atomic.
-      await db
-        .insert(pluginKv)
-        .values({
-          pluginId,
-          key: op.key,
-          value: op.value,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: [pluginKv.pluginId, pluginKv.key],
-          set: { value: op.value, updatedAt: new Date() },
-        });
+      await upsertKvValue(pluginId, op.key, op.value);
+      return { ok: true };
+    }
+    case "setSecret": {
+      // Sealed with the same `lib/crypto/secret-box` every other stored
+      // secret on this branch uses (`githubTokens.sealedToken`,
+      // `plugins.ingressSecret`, `smtpPasswordSealed`), so a database dump,
+      // a backup, or a `select *` in a log does not hand over a plugin's
+      // bot token.
+      const envelope: SealedSecretEnvelope = {
+        [SEALED_SECRET_MARKER]: 1,
+        sealed: seal(op.value),
+      };
+      await upsertKvValue(pluginId, op.key, envelope);
       return { ok: true };
     }
     case "delete": {
@@ -211,7 +308,17 @@ async function handleStorageKv(
         .orderBy(asc(pluginKv.key))
         .limit(KV_LIST_LIMIT);
 
-      const result: KvListPage = { items: rows };
+      // `list` deliberately does NOT unseal. Enumerating keys is a bulk,
+      // often incidental operation — a plugin logging `await kv.list()`
+      // would otherwise dump every credential it holds — so a sealed key is
+      // reported as such, with a null value, and reading it stays a
+      // deliberate single-key `get`.
+      const items = rows.map((row) =>
+        isSealedSecretEnvelope(row.value)
+          ? { key: row.key, value: null, secret: true }
+          : row,
+      );
+      const result: KvListPage = { items };
       if (rows.length === KV_LIST_LIMIT) {
         result.nextAfterKey = rows.at(-1)?.key;
       }
