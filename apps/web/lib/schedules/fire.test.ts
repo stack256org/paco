@@ -121,17 +121,32 @@ describe("fireSchedule", () => {
 
     const result = await fireSchedule("sched-1");
 
-    expect(result.ok).toBe(false);
+    expect(result).toEqual({
+      ok: false,
+      error: 'Schedule "sched-1" is disabled',
+      reason: "disabled",
+    });
     expect(createTaskMock).not.toHaveBeenCalled();
     expect(stampScheduleFiredMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * The `reason: "not-found"` distinction here is what lets
+   * `lib/jobs/schedule-job.ts`'s worker tell "this schedule was deleted out
+   * from under an orphaned pg-boss registration" apart from every other
+   * failure and self-heal by unregistering — see that file's test for the
+   * self-healing behaviour itself.
+   */
   test("a missing schedule is skipped: no task, no stamp", async () => {
     scheduleRow = undefined;
 
     const result = await fireSchedule("sched-1");
 
-    expect(result.ok).toBe(false);
+    expect(result).toEqual({
+      ok: false,
+      error: 'Schedule "sched-1" not found',
+      reason: "not-found",
+    });
     expect(createTaskMock).not.toHaveBeenCalled();
     expect(stampScheduleFiredMock).not.toHaveBeenCalled();
   });
@@ -141,7 +156,11 @@ describe("fireSchedule", () => {
 
     const result = await fireSchedule("sched-1");
 
-    expect(result).toEqual({ ok: false, error: "session not found" });
+    expect(result).toEqual({
+      ok: false,
+      error: "session not found",
+      reason: "start-failed",
+    });
     expect(stampScheduleFiredMock).toHaveBeenCalledTimes(1);
   });
 });

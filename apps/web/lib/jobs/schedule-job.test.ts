@@ -55,7 +55,11 @@ mock.module("./queue", () => ({
 
 type FireScheduleResult =
   | { ok: true; taskId: string }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      reason: "not-found" | "disabled" | "start-failed";
+    };
 
 const fireScheduleMock = mock(
   async (_scheduleId: string): Promise<FireScheduleResult> => ({
@@ -112,6 +116,7 @@ describe("startScheduleJob", () => {
       async (): Promise<FireScheduleResult> => ({
         ok: false,
         error: "disabled",
+        reason: "disabled",
       }),
     );
     await startScheduleJob();
@@ -119,6 +124,45 @@ describe("startScheduleJob", () => {
     await expect(
       registeredHandler?.([{ data: { scheduleId: "sched-1" } }]),
     ).resolves.toBeUndefined();
+    expect(unscheduleMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The orphaned-registration bug this guards against: `schedules.sessionId`
+   * cascades on delete, so deleting a session removes the schedule row with
+   * no application code running — nothing ever calls `unregisterSchedule`
+   * for it. Without this self-heal, the pg-boss cron entry survives forever,
+   * firing (and failing to find the schedule) on every future tick,
+   * logging an error every time. The fix: when `fireSchedule` reports
+   * `reason: "not-found"`, the worker unregisters the entry itself and logs
+   * once, so a deleted schedule's orphaned cron is cleaned up on its very
+   * next tick instead of nagging forever.
+   */
+  test("a fire that reports the schedule as gone self-heals by unregistering it", async () => {
+    fireScheduleMock.mockImplementationOnce(
+      async (): Promise<FireScheduleResult> => ({
+        ok: false,
+        error: 'Schedule "sched-1" not found',
+        reason: "not-found",
+      }),
+    );
+    await startScheduleJob();
+
+    const errorSpy = mock(() => {
+      // no-op
+    });
+    const originalError = console.error;
+    console.error = errorSpy;
+
+    try {
+      await registeredHandler?.([{ data: { scheduleId: "sched-1" } }]);
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(unscheduleMock).toHaveBeenCalledWith("fire-schedule", "sched-1");
+    // Housekeeping, not a failure: never logged at error level.
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });
 

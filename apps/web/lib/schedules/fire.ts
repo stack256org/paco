@@ -6,7 +6,11 @@ import { startTask } from "@/lib/tasks/start";
 
 export type FireScheduleResult =
   | { ok: true; taskId: string }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      reason: "not-found" | "disabled" | "start-failed";
+    };
 
 /**
  * Fires one schedule: creates a task in its target session (origin
@@ -37,9 +41,13 @@ export type FireScheduleResult =
  * (`lib/jobs/schedule-job.ts`'s `syncScheduleRegistration` unschedules a
  * disabled row from pg-boss) — defense in depth against a job that was
  * already enqueued for this tick the moment before the schedule was
- * disabled, and a `null` outcome for the fire path in general when nothing
- * is supposed to fire, so it never needs its own separate "why didn't this
- * count" check at the call sites.
+ * disabled. The `reason` field on a failure lets the two callers react
+ * differently: `lib/jobs/schedule-job.ts`'s worker treats `"not-found"`
+ * specially (see that file) because `schedules.sessionId` cascades on
+ * delete — a session getting deleted removes the schedule row with no
+ * application code in the loop to call `unregisterSchedule`, so the
+ * pg-boss cron entry would otherwise fire forever into a schedule that no
+ * longer exists.
  *
  * `lastFiredAt` is stamped as soon as the task exists — "firing" means the
  * schedule produced a task and attempted to start it, whether or not the
@@ -55,10 +63,18 @@ export async function fireSchedule(
 ): Promise<FireScheduleResult> {
   const schedule = await getScheduleById(scheduleId);
   if (!schedule) {
-    return { ok: false, error: `Schedule "${scheduleId}" not found` };
+    return {
+      ok: false,
+      error: `Schedule "${scheduleId}" not found`,
+      reason: "not-found",
+    };
   }
   if (!schedule.enabled) {
-    return { ok: false, error: `Schedule "${scheduleId}" is disabled` };
+    return {
+      ok: false,
+      error: `Schedule "${scheduleId}" is disabled`,
+      reason: "disabled",
+    };
   }
 
   const task = await createTask({
@@ -75,7 +91,7 @@ export async function fireSchedule(
 
   const result = await startTask(schedule.organizationId, task.id);
   if (!result.ok) {
-    return { ok: false, error: result.error };
+    return { ok: false, error: result.error, reason: "start-failed" };
   }
   return { ok: true, taskId: task.id };
 }

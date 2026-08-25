@@ -45,22 +45,43 @@ async function registerScheduleWorker(): Promise<void> {
     { batchSize: 5 },
     async (jobs: Array<{ data: { scheduleId: string } }>) => {
       for (const job of jobs) {
-        const result = await fireSchedule(job.data.scheduleId);
-        if (!result.ok) {
-          // Not thrown: `fireSchedule` already created (and attempted to
-          // start) the task by the time it can fail, so a pg-boss retry
-          // here would fire the schedule a second time for the same tick
-          // rather than retry anything idempotently. "disabled" and "not
-          // found" are expected outcomes of a race with
-          // `syncScheduleRegistration`/deletion, not failures; a
-          // `startTask` failure is real but already recorded on the task
-          // itself (`lib/tasks/start.ts` moves it to `failed`), so logging
-          // here is enough.
-          console.error(
-            `[jobs] schedule "${job.data.scheduleId}" fire did not start a task:`,
-            result.error,
-          );
+        const { scheduleId } = job.data;
+        const result = await fireSchedule(scheduleId);
+        if (result.ok) {
+          continue;
         }
+
+        // Not thrown: `fireSchedule` already created (and attempted to
+        // start) the task by the time it can fail, so a pg-boss retry here
+        // would fire the schedule a second time for the same tick rather
+        // than retry anything idempotently.
+        if (result.reason === "not-found") {
+          // `schedules.sessionId` cascades on delete, so a session getting
+          // deleted removes the schedule row with no application code in
+          // the loop to call `unregisterSchedule` — the pg-boss cron entry
+          // for it would otherwise survive forever, firing (and failing to
+          // find a schedule) on every future tick. Self-heal here instead:
+          // the first tick after the row is gone reaps its own
+          // registration, so this is a one-time cleanup, not a
+          // once-per-tick error. Logged at info level, not error: an
+          // orphaned registration catching up with a deleted row is
+          // expected housekeeping, not a failure.
+          await unregisterSchedule(scheduleId);
+          console.log(
+            `[jobs] schedule "${scheduleId}" no longer exists; removed its orphaned cron registration`,
+          );
+          continue;
+        }
+
+        // "disabled" is an expected outcome of a race with
+        // `syncScheduleRegistration` (already unschedules a disabled row);
+        // a `startTask` failure is real but already recorded on the task
+        // itself (`lib/tasks/start.ts` moves it to `failed`), so logging
+        // here is enough.
+        console.error(
+          `[jobs] schedule "${scheduleId}" fire did not start a task:`,
+          result.error,
+        );
       }
     },
   );

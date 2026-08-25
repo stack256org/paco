@@ -199,6 +199,33 @@ function validateInput(
 }
 
 /**
+ * Confirms `sessionId` names one of `userId`'s own sessions before it is
+ * ever written into a schedule row.
+ *
+ * Shared by `createScheduleAction` and `updateScheduleAction`: a schedule
+ * always fires into a specific session's worktree, so both the initial
+ * create and every later edit have to re-check this the same way — an edit
+ * that skipped it would let an admin retarget an existing schedule at a
+ * session that was never theirs, even though the picker only ever offers
+ * their own (`listMySessionsForScheduleAction`).
+ */
+async function requireOwnSession(
+  userId: string,
+  sessionId: string,
+): Promise<ScheduleActionResult | null> {
+  const sessions = await getSessionsByUserId(userId);
+  const owned = sessions.some((row) => row.id === sessionId);
+  if (!owned) {
+    return {
+      success: false,
+      error: "That session isn't yours.",
+      fieldErrors: { sessionId: "That session isn't yours." },
+    };
+  }
+  return null;
+}
+
+/**
  * Creates a schedule, then registers its pg-boss cron entry
  * (`syncScheduleRegistration`) so it actually starts firing — a schedule row
  * with no registration would sit in the database forever without a
@@ -215,15 +242,9 @@ export async function createScheduleAction(
     return validated;
   }
 
-  const session = await getSessionsByUserId(userId).then((sessions) =>
-    sessions.find((row) => row.id === input.sessionId),
-  );
-  if (!session) {
-    return {
-      success: false,
-      error: "That session isn't yours.",
-      fieldErrors: { sessionId: "That session isn't yours." },
-    };
+  const ownershipError = await requireOwnSession(userId, input.sessionId);
+  if (ownershipError) {
+    return ownershipError;
   }
 
   const result = await createSchedule({
@@ -247,16 +268,28 @@ export async function createScheduleAction(
   return { success: true };
 }
 
-/** Edits a schedule in place and re-syncs its pg-boss cron registration. */
+/**
+ * Edits a schedule in place and re-syncs its pg-boss cron registration.
+ *
+ * Re-checks session ownership (`requireOwnSession`) the same way create
+ * does — `sessionId` on an edit is caller input just like it is on create,
+ * so it gets the same check, not a lighter one just because a row already
+ * exists.
+ */
 export async function updateScheduleAction(
   scheduleId: string,
   input: ScheduleFormInput,
 ): Promise<ScheduleActionResult> {
-  const { organizationId } = await requireOrgAdmin();
+  const { userId, organizationId } = await requireOrgAdmin();
 
   const validated = validateInput(input);
   if ("success" in validated) {
     return validated;
+  }
+
+  const ownershipError = await requireOwnSession(userId, input.sessionId);
+  if (ownershipError) {
+    return ownershipError;
   }
 
   const result = await updateSchedule(organizationId, scheduleId, {

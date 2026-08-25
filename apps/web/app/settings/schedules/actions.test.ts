@@ -328,6 +328,29 @@ describe("updateScheduleAction validation", () => {
     expect(result.success).toBe(false);
     expect(syncScheduleRegistrationMock).not.toHaveBeenCalled();
   });
+
+  /**
+   * Mirrors the create-side "a session that isn't the caller's own is
+   * rejected" test above: an edit retargeting an existing schedule at a
+   * session the caller doesn't own must be refused the same way a create
+   * naming one is, not trusted just because the schedule row already
+   * exists.
+   */
+  test("retargeting an existing schedule at a session that isn't the caller's own is rejected", async () => {
+    adminOk = true;
+    store = [makeSchedule()];
+
+    const result = await updateScheduleAction("sched-1", {
+      ...VALID_INPUT,
+      sessionId: "someone-elses-session",
+    });
+
+    expect(result.success).toBe(false);
+    expect(updateScheduleMock).not.toHaveBeenCalled();
+    expect(syncScheduleRegistrationMock).not.toHaveBeenCalled();
+    // The stored row must be untouched by the refused write.
+    expect(store[0]?.sessionId).toBe("session-1");
+  });
 });
 
 describe("setScheduleEnabledAction", () => {
