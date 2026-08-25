@@ -118,6 +118,20 @@ mock.module("@/lib/db/sessions", () => ({
 const getUserPreferencesMock = mock(async (_userId: string) => ({
   defaultModelId: "opus",
 }));
+/*
+ * `startTask` reads the LIVE roster so a task naming a since-disabled agent
+ * degrades instead of instructing the executor to delegate to a subagent
+ * that no longer exists. Mocked here because the real module reaches the
+ * database; the two defaults are what `DEFAULT_ROSTER` seeds.
+ */
+let rosterAgents: Record<string, unknown> = {
+  explorer: { description: "explorer", prompt: "", tools: [] },
+  executor: { description: "executor", prompt: "", tools: [] },
+};
+mock.module("@/lib/db/roster", () => ({
+  getRoster: () => Promise.resolve(rosterAgents),
+}));
+
 mock.module("@/lib/db/user-preferences", () => ({
   getUserPreferences: getUserPreferencesMock,
 }));
@@ -200,6 +214,46 @@ describe("buildTaskPrompt", () => {
 
     expect(buildTaskPrompt(task)).toBe(
       'Add tests for the widget\n\nDelegate this work to the "qa-reviewer" subagent.',
+    );
+  });
+
+  test("drops the delegation line when the named agent is no longer on the roster", () => {
+    // `assignedAgent` is validated on save, but disabling or renaming a
+    // roster entry afterwards never revisits the tasks and schedules that
+    // already name it — a schedule keeps firing forever with a stale name.
+    // Instructing the executor to delegate to a subagent that does not exist
+    // is an instruction it can neither follow nor diagnose.
+    const task = makeTask({
+      goal: "Add tests for the widget",
+      assignedAgent: "retired-agent",
+    });
+
+    expect(buildTaskPrompt(task, null, new Set(["explorer", "executor"]))).toBe(
+      "Add tests for the widget",
+    );
+  });
+
+  test("keeps the delegation line when the named agent is on the roster", () => {
+    const task = makeTask({
+      goal: "Add tests for the widget",
+      assignedAgent: "qa-reviewer",
+    });
+
+    expect(
+      buildTaskPrompt(task, null, new Set(["executor", "qa-reviewer"])),
+    ).toBe(
+      'Add tests for the widget\n\nDelegate this work to the "qa-reviewer" subagent.',
+    );
+  });
+
+  test("an empty roster drops the line rather than trusting the stored name", () => {
+    const task = makeTask({
+      goal: "Add tests for the widget",
+      assignedAgent: "qa-reviewer",
+    });
+
+    expect(buildTaskPrompt(task, null, new Set())).toBe(
+      "Add tests for the widget",
     );
   });
 
@@ -330,6 +384,10 @@ describe("startTask", () => {
   });
 
   test("builds the prompt from the parent task and the assigned agent", async () => {
+    rosterAgents = {
+      ...rosterAgents,
+      "qa-reviewer": { description: "qa", prompt: "", tools: [] },
+    };
     taskTreeNode = makeNode({
       parentTaskId: "task-parent",
       assignedAgent: "qa-reviewer",
@@ -349,6 +407,26 @@ describe("startTask", () => {
     expect(input.messages[0]?.parts[0]?.text).toBe(
       'Add tests for the widget\n\nParent task: "Ship the widget" — Build and ship the customer widget end-to-end\n\nDelegate this work to the "qa-reviewer" subagent.',
     );
+  });
+
+  test("drops a delegation to an agent the roster no longer has", async () => {
+    // The end-to-end half of the buildTaskPrompt case: a schedule created
+    // when "qa-reviewer" existed keeps firing after the roster entry is
+    // disabled, and `assignedAgent` is only validated on save. The turn must
+    // not be told to delegate to something that cannot be resolved.
+    rosterAgents = {
+      explorer: { description: "explorer", prompt: "", tools: [] },
+      executor: { description: "executor", prompt: "", tools: [] },
+    };
+    taskTreeNode = makeNode({ assignedAgent: "qa-reviewer" });
+
+    await startTask("org-1", "task-1");
+
+    const input = submitChatMessageMock.mock.calls[0]?.[0] as {
+      messages: Array<{ parts: Array<{ text: string }> }>;
+    };
+    expect(input.messages[0]?.parts[0]?.text).toBe("Add tests for the widget");
+    expect(input.messages[0]?.parts[0]?.text).not.toContain("qa-reviewer");
   });
 
   test("passes opts.maxTurns through as maxSteps", async () => {

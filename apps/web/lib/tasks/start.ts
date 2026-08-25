@@ -4,6 +4,7 @@ import { generateId } from "ai";
 import { nanoid } from "nanoid";
 import { submitChatMessage } from "@/lib/chat/submit-message";
 import type { Task } from "@/lib/db/schema";
+import { getRoster } from "@/lib/db/roster";
 import { createChat, deleteChat, getSessionById } from "@/lib/db/sessions";
 import {
   getTask,
@@ -24,14 +25,34 @@ import { getUserPreferences } from "@/lib/db/user-preferences";
  * explicit delegation instruction so the orchestrator routes the work to
  * that roster subagent by name instead of handling it inline.
  */
-export function buildTaskPrompt(task: Task, parent?: Task | null): string {
+export function buildTaskPrompt(
+  task: Task,
+  parent?: Task | null,
+  /**
+   * The subagent names actually available to this turn. Omit to skip the
+   * check — callers that already know the roster should pass it.
+   *
+   * `assignedAgent` is validated against the roster when a task or schedule
+   * is SAVED, but a roster entry can be disabled or renamed afterwards and
+   * nothing revisits the rows already naming it. A schedule then keeps
+   * firing with a stale name, and without this check the executor is told
+   * to "delegate this work to the X subagent" for an X that no longer
+   * exists — an instruction it cannot follow and cannot diagnose. Dropping
+   * the line degrades to "do the work yourself", which is what the task
+   * actually wants.
+   */
+  availableAgents?: ReadonlySet<string>,
+): string {
   const sections = [task.goal];
 
   if (parent) {
     sections.push("", `Parent task: "${parent.title}" — ${parent.goal}`);
   }
 
-  if (task.assignedAgent) {
+  if (
+    task.assignedAgent &&
+    (availableAgents === undefined || availableAgents.has(task.assignedAgent))
+  ) {
     sections.push(
       "",
       `Delegate this work to the "${task.assignedAgent}" subagent.`,
@@ -128,6 +149,16 @@ export async function startTask(
     : null;
 
   const preferences = await getUserPreferences(session.userId);
+  /*
+   * The roster as it stands NOW, not as it stood when the task was saved.
+   * `assignedAgent` is validated on save, but disabling or renaming a roster
+   * entry afterwards does not revisit the tasks and schedules already naming
+   * it — a schedule in particular keeps firing indefinitely with a name that
+   * no longer resolves. Read once here and hand it to `buildTaskPrompt`, so a
+   * stale name degrades to "do the work yourself" instead of instructing the
+   * executor to delegate to a subagent that does not exist.
+   */
+  const availableAgents = new Set(Object.keys(await getRoster(organizationId)));
   const chat = await createChat({
     id: nanoid(),
     sessionId: node.sessionId,
@@ -158,7 +189,10 @@ export async function startTask(
           id: generateId(),
           role: "user" as const,
           parts: [
-            { type: "text" as const, text: buildTaskPrompt(node, parent) },
+            {
+              type: "text" as const,
+              text: buildTaskPrompt(node, parent, availableAgents),
+            },
           ],
         },
       ],
