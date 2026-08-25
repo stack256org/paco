@@ -1,6 +1,7 @@
 "use server";
 
 import { repoDir } from "@paco/sandbox";
+import { isAdmin } from "@/lib/admin/require-admin";
 import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
 import { listEvalRuns } from "@/lib/db/eval-runs";
 import type { EvalRun } from "@/lib/db/schema";
@@ -17,11 +18,22 @@ import { getOrganization } from "@/lib/org/organization";
 import { getServerSession } from "@/lib/session/get-server-session";
 
 /**
- * Auth gate every action in this file re-checks, the same as `requireAdmin`
- * does for the admin-only actions elsewhere: session ownership (the same
- * check every `/sessions/[sessionId]` page makes) plus organisation
- * membership, since evals write `evalRuns` rows scoped to the organisation,
- * not just the session's owner.
+ * Auth gate every action in this file re-checks: session ownership (the same
+ * check every `/sessions/[sessionId]` page makes) plus a place in the
+ * organisation, since evals write `evalRuns` rows scoped to the
+ * organisation, not just the session's owner.
+ *
+ * "A place in the organisation" is a membership row OR `users.is_admin`, the
+ * same OR `isAdmin` (`lib/admin/require-admin.ts`) applies everywhere else —
+ * not a bare `getMemberRole` check. Requiring the row alone locked out the
+ * exact population that file's docstring warns about: migration `0005`
+ * promotes accounts by flag and makes only the oldest of them an org
+ * `owner`, so a flag-only admin could use every settings page in the product
+ * except this one.
+ *
+ * Session ownership is a separate gate and is unaffected — being an admin
+ * has never meant being allowed to run evals inside someone else's session,
+ * and it still doesn't.
  */
 async function requireEvalAccess(
   sessionId: string,
@@ -30,14 +42,18 @@ async function requireEvalAccess(
   if (!authSession?.user?.id) {
     throw new Error(SIGNED_OUT);
   }
+  const userId = authSession.user.id;
 
   const session = await getSessionById(sessionId);
-  if (!session || session.userId !== authSession.user.id) {
+  if (!session || session.userId !== userId) {
     throw new Error(NOT_YOURS);
   }
 
-  const role = await getMemberRole(authSession.user.id);
-  if (!role) {
+  const [role, admin] = await Promise.all([
+    getMemberRole(userId),
+    isAdmin(userId),
+  ]);
+  if (!(role || admin)) {
     throw new Error(NOT_YOURS);
   }
 

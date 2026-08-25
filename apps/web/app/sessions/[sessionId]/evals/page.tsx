@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { isAdmin } from "@/lib/admin/require-admin";
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { getMemberRole } from "@/lib/org/membership";
 import { getServerSession } from "@/lib/session/get-server-session";
@@ -18,10 +19,15 @@ interface EvalsPageProps {
 /**
  * Auth follows the same shape every `/sessions/[sessionId]` page uses
  * (`layout.tsx`, `chats/[chatId]/page.tsx`): sign-in, session ownership,
- * `notFound()` for a session that doesn't exist. Organisation membership is
- * checked on top of that — evals write rows scoped to the organisation, not
- * just this session — the same gate `./actions.ts` re-applies on every
+ * `notFound()` for a session that doesn't exist. A place in the organisation
+ * is checked on top of that — evals write rows scoped to the organisation,
+ * not just this session — the same gate `./actions.ts` re-applies on every
  * mutation regardless of what this page already checked.
+ *
+ * A membership row OR `users.is_admin`, matching `requireEvalAccess` exactly.
+ * Checking only the row here would send a flag-only admin (migration `0005`'s
+ * population, see `lib/admin/require-admin.ts`) back to `/` even though the
+ * actions behind this page would happily serve them.
  */
 export default async function EvalsPage({ params }: EvalsPageProps) {
   const { sessionId } = await params;
@@ -38,7 +44,11 @@ export default async function EvalsPage({ params }: EvalsPageProps) {
   if (sessionRecord.userId !== session.user.id) {
     redirect("/");
   }
-  if (!(await getMemberRole(session.user.id))) {
+  const [role, admin] = await Promise.all([
+    getMemberRole(session.user.id),
+    isAdmin(session.user.id),
+  ]);
+  if (!(role || admin)) {
     redirect("/");
   }
 
