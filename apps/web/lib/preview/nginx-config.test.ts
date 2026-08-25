@@ -131,14 +131,17 @@ describe("previewServerBlock", () => {
   });
 
   describe("design-candidate blocks (isDesignCandidate: true)", () => {
-    test("injects the inspector script before </body> via sub_filter", () => {
+    const APP_ORIGIN = "https://paco.example.com";
+
+    test("injects the inspector script before </body> via sub_filter, pinned to the app origin", () => {
       const block = previewServerBlock({
         ...base,
         certDir: null,
         isDesignCandidate: true,
+        appOrigin: APP_ORIGIN,
       });
       expect(block).toContain(
-        `sub_filter '</body>' '<script src="${DESIGN_INSPECTOR_PATH}"></script></body>';`,
+        `sub_filter '</body>' '<script src="${DESIGN_INSPECTOR_PATH}" data-paco-origin="${APP_ORIGIN}"></script></body>';`,
       );
       expect(block).toContain("sub_filter_once on;");
     });
@@ -148,6 +151,7 @@ describe("previewServerBlock", () => {
         ...base,
         certDir: null,
         isDesignCandidate: true,
+        appOrigin: APP_ORIGIN,
       });
       expect(block).toContain('proxy_set_header Accept-Encoding "";');
     });
@@ -157,6 +161,7 @@ describe("previewServerBlock", () => {
         ...base,
         certDir: null,
         isDesignCandidate: true,
+        appOrigin: APP_ORIGIN,
       });
       expect(block).toContain(`location = ${DESIGN_INSPECTOR_PATH} {`);
       expect(block).toContain(
@@ -169,9 +174,75 @@ describe("previewServerBlock", () => {
         ...base,
         certDir: null,
         isDesignCandidate: true,
+        appOrigin: APP_ORIGIN,
       });
       expect(block).toContain("auth_request /_paco_auth");
       expect(block).toContain("http://127.0.0.1:49213");
+    });
+
+    test("emits X-Frame-Options and a frame-ancestors CSP naming only the app origin", () => {
+      const block = previewServerBlock({
+        ...base,
+        certDir: null,
+        isDesignCandidate: true,
+        appOrigin: APP_ORIGIN,
+      });
+      expect(block).toContain(
+        `add_header X-Frame-Options "ALLOW-FROM ${APP_ORIGIN}" always;`,
+      );
+      expect(block).toContain(
+        `add_header Content-Security-Policy "frame-ancestors ${APP_ORIGIN};" always;`,
+      );
+    });
+
+    test("refuses to build a candidate block with no appOrigin", () => {
+      expect(() =>
+        previewServerBlock({
+          ...base,
+          certDir: null,
+          isDesignCandidate: true,
+        }),
+      ).toThrow();
+    });
+
+    test("refuses an appOrigin that could break out of the generated config", () => {
+      expect(() =>
+        previewServerBlock({
+          ...base,
+          certDir: null,
+          isDesignCandidate: true,
+          appOrigin: 'https://evil.example"; } server { listen 80;',
+        }),
+      ).toThrow();
+    });
+
+    test("refuses an appOrigin with a path, query, or fragment", () => {
+      expect(() =>
+        previewServerBlock({
+          ...base,
+          certDir: null,
+          isDesignCandidate: true,
+          appOrigin: "https://paco.example.com/some/path",
+        }),
+      ).toThrow();
+    });
+  });
+
+  describe("ordinary chat blocks never carry the frame-ancestors guard", () => {
+    test("no X-Frame-Options or Content-Security-Policy header", () => {
+      const block = previewServerBlock({ ...base, certDir: null });
+      expect(block).not.toContain("X-Frame-Options");
+      expect(block).not.toContain("Content-Security-Policy");
+    });
+
+    test("appOrigin is ignored (and not required) when isDesignCandidate is false", () => {
+      expect(() =>
+        previewServerBlock({
+          ...base,
+          certDir: null,
+          isDesignCandidate: false,
+        }),
+      ).not.toThrow();
     });
   });
 });

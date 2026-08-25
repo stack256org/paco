@@ -76,6 +76,35 @@ export const DESIGN_INSPECTOR_PATH = "/__paco/design-inspector.js";
  * container port to whatever host port Docker actually published it on —
  * `listSandboxPreviewPorts` already does exactly that, called once per
  * container port instead of just `PREVIEW_PORT`'s.
+ *
+ * ---
+ * **CONTRACT FOR WHOEVER WIRES UP THE DESIGN TURN** (plan Task 2,
+ * `apps/web/lib/design/design-turn.ts` — not yet written as of this
+ * comment): this function is only half of making a candidate's preview
+ * reachable. The other half has to happen wherever a candidate's dev
+ * server actually gets started, and nothing in this codebase enforces it —
+ * there is no test that can, short of Task 2's own code existing to test.
+ *
+ * The design-turn's per-candidate system prompt (or whatever starts each
+ * candidate's dev server on its behalf) MUST force candidate `n`'s dev
+ * server to bind `candidateContainerPort(n)` — 5173 for candidate 1, 4321
+ * for candidate 2, 8000 for candidate 3 — instead of whatever port that
+ * framework defaults to. Concretely: pass `PORT=<candidateContainerPort(n)>`
+ * (Next.js/Express/Remix) or the framework's own `--port` flag, the same
+ * way the chat's own dev server is expected to bind `PREVIEW_PORT` (3000).
+ *
+ * If a candidate's dev server binds the wrong port (or the chat's own
+ * 3000, colliding with the chat's preview), `collectActivePreviewRoutes`
+ * (`nginx-reload.ts`) will find the candidate's worktree directory but
+ * never a published port for it, silently skip that candidate's route
+ * forever, and the design-mode UI will show that candidate as unreachable
+ * with no error surfaced anywhere in this codebase — there is nothing here
+ * that can detect "the dev server started, but on the wrong port" from
+ * the outside. This comment, and this function's exact return values
+ * (covered by `nginx-config.test.ts`'s `candidateContainerPort` suite),
+ * are the whole of that contract until Task 2 exists to test its own side
+ * of it.
+ * ---
  */
 export function candidateContainerPort(index: 1 | 2 | 3): number {
   return DEFAULT_SANDBOX_PORTS[index];
@@ -109,6 +138,22 @@ function assertValidPort(port: number, label: string): void {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(
       `Refusing to generate an nginx config with an invalid ${label}: ${port}`,
+    );
+  }
+}
+
+/**
+ * An origin of exactly `scheme://host[:port]` — no path, query, fragment,
+ * or characters that could break out of the `add_header`/HTML-attribute
+ * contexts this gets interpolated into (an `add_header` value ends at
+ * unescaped whitespace or `;`, same as the rest of this file's directives).
+ */
+const ORIGIN_PATTERN = /^https?:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?$/;
+
+function assertSafeOrigin(origin: string): void {
+  if (!ORIGIN_PATTERN.test(origin)) {
+    throw new Error(
+      `Refusing to generate an nginx config for an unsafe app origin: ${JSON.stringify(origin)}`,
     );
   }
 }
@@ -157,6 +202,28 @@ export type PreviewServerBlockInput = {
    * a design surface meant to be clicked on.
    */
   isDesignCandidate?: boolean;
+  /**
+   * Paco's own public origin (`scheme://host[:port]`, e.g.
+   * `https://paco.example.com`) — required when `isDesignCandidate` is
+   * true, ignored otherwise.
+   *
+   * Two independent uses, both about keeping a candidate's inspector
+   * talking to Paco's own UI and nobody else:
+   *
+   * 1. Embedded in the injected `<script>` tag as `data-paco-origin`.
+   *    `design-inspector.js` reads it off its own `<script>` element
+   *    (`document.currentScript`) and uses it both as the required
+   *    `origin` on every `paco-inspect-arm` message it will accept, and as
+   *    the exact `targetOrigin` it posts `paco-inspect-click` back to —
+   *    `postMessage(..., "*")` would hand a click's selector and text to
+   *    whatever page happens to have this preview framed.
+   * 2. Emitted as `X-Frame-Options` and a `Content-Security-Policy:
+   *    frame-ancestors` response header, so nothing but Paco's own UI can
+   *    frame a candidate preview in the first place. Pinning the
+   *    `postMessage` origin (above) is worthless if any origin can embed
+   *    the page and read what gets posted out of it.
+   */
+  appOrigin?: string;
 };
 
 /**
@@ -173,11 +240,21 @@ export function previewServerBlock(input: PreviewServerBlockInput): string {
     appPort,
     certDir,
     isDesignCandidate = false,
+    appOrigin,
   } = input;
 
   assertSafeHostname(hostname);
   assertValidPort(upstreamPort, "upstreamPort");
   assertValidPort(appPort, "appPort");
+
+  if (isDesignCandidate) {
+    if (!appOrigin) {
+      throw new Error(
+        "previewServerBlock: isDesignCandidate requires appOrigin (Paco's own public origin) — it pins both the inspector's postMessage origin and the frame-ancestors policy.",
+      );
+    }
+    assertSafeOrigin(appOrigin);
+  }
 
   // A certificate directory is interpolated into generated nginx config, so
   // it gets the same treatment as the hostname: `;` or whitespace in a path
@@ -222,8 +299,21 @@ export function previewServerBlock(input: PreviewServerBlockInput): string {
   // decompress and re-encode it here.
   const inspectorSubFilter = isDesignCandidate
     ? `        proxy_set_header Accept-Encoding "";
-        sub_filter '</body>' '<script src="${DESIGN_INSPECTOR_PATH}"></script></body>';
+        sub_filter '</body>' '<script src="${DESIGN_INSPECTOR_PATH}" data-paco-origin="${appOrigin}"></script></body>';
         sub_filter_once on;
+`
+    : "";
+
+  // Only a design-candidate host may be framed at all, and only by Paco's
+  // own UI: `frame-ancestors` is what modern browsers actually enforce;
+  // `X-Frame-Options` rides along for anything old enough to ignore CSP.
+  // Emitted at server level so it lands on every location's response,
+  // `location /`'s (the actual page) included — an nginx `add_header` at
+  // one level is inherited into every location under it that defines no
+  // `add_header` of its own, which is true of all three locations here.
+  const frameAncestorsGuard = isDesignCandidate
+    ? `    add_header X-Frame-Options "ALLOW-FROM ${appOrigin}" always;
+    add_header Content-Security-Policy "frame-ancestors ${appOrigin};" always;
 `
     : "";
 
@@ -233,7 +323,7 @@ export function previewServerBlock(input: PreviewServerBlockInput): string {
 server {
 ${listenLines}    server_name ${hostname};
 
-${httpsRedirect}    # Every preview is authorized by Paco on every request, public or
+${frameAncestorsGuard}${httpsRedirect}    # Every preview is authorized by Paco on every request, public or
     # private alike. decidePreviewAccess reads the chat's live visibility,
     # so this subrequest is never conditioned on it here — see this file's
     # header comment for why a config that decided for itself broke the

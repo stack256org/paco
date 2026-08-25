@@ -124,6 +124,21 @@ describe("buildSelector", () => {
     expect(buildSelector(target)).toBe("#weird\\:id\\.with\\ space");
   });
 
+  test("escapes a leading digit the way CSS.escape does — as a hex code point", () => {
+    // `#1a` is not a valid CSS selector on its own (an id may not start
+    // with an unescaped digit); CSS.escape("1a") === "\\31 a", and this is
+    // the case the naive per-character backslash escape used to get wrong
+    // (a bare "1a" passes `[^a-zA-Z0-9_-]` unchanged, which looks fine as a
+    // string but is not a selector `querySelector` can use unescaped).
+    const target = new FakeElement("div", { id: "1a" });
+    expect(buildSelector(target)).toBe("#\\31 a");
+  });
+
+  test("escapes a leading hyphen-digit the way CSS.escape does", () => {
+    const target = new FakeElement("div", { id: "-1a" });
+    expect(buildSelector(target)).toBe("#-\\31 a");
+  });
+
   test("escapes a double quote inside a data-testid value", () => {
     const target = new FakeElement("div", {
       dataset: { testid: 'has"quote' },

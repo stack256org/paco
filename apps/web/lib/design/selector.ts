@@ -38,10 +38,71 @@ export interface SelectorElement {
 // === PACO_SELECTOR_LOGIC_START ===
 // Byte-for-byte identical to design-inspector.js's copy of this block,
 // modulo type annotations and `export` — see this file's header comment.
+// No object literals or ternaries anywhere in this block: the drift-check
+// normalizer (`selector.build-check.test.ts`) strips `: Identifier` type
+// annotations with a plain regex, which cannot tell an object literal's
+// `key: value` or a ternary's `cond ? a : b` apart from a real type
+// annotation. Keep this block to declarations, if/while, and plain
+// expressions so that regex stays safe.
 export const MAX_SELECTOR_DEPTH = 6;
 
+/**
+ * A dependency-free re-implementation of the CSSOM `CSS.escape()`
+ * algorithm, used when the real one is not available (`escapeForSelector`
+ * below prefers the native one when it exists). Needed because this
+ * module's own tests run under Bun, which has no `CSS` global, and because
+ * `design-inspector.js` should not simply break if some future host page
+ * runs in an environment without one either.
+ */
+function cssEscapeIdent(value: string): string {
+  const length = value.length;
+  let result = "";
+  let index = -1;
+  const firstCodeUnit = value.charCodeAt(0);
+
+  while (++index < length) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit === 0x00) {
+      result += "�";
+      continue;
+    }
+    if (
+      (codeUnit >= 0x01 && codeUnit <= 0x1f) ||
+      codeUnit === 0x7f ||
+      (index === 0 && codeUnit >= 0x30 && codeUnit <= 0x39) ||
+      (index === 1 &&
+        codeUnit >= 0x30 &&
+        codeUnit <= 0x39 &&
+        firstCodeUnit === 0x2d)
+    ) {
+      result += `\\${codeUnit.toString(16)} `;
+      continue;
+    }
+    if (index === 0 && length === 1 && codeUnit === 0x2d) {
+      result += `\\${value.charAt(index)}`;
+      continue;
+    }
+    if (
+      codeUnit >= 0x80 ||
+      codeUnit === 0x2d ||
+      codeUnit === 0x5f ||
+      (codeUnit >= 0x30 && codeUnit <= 0x39) ||
+      (codeUnit >= 0x41 && codeUnit <= 0x5a) ||
+      (codeUnit >= 0x61 && codeUnit <= 0x7a)
+    ) {
+      result += value.charAt(index);
+      continue;
+    }
+    result += `\\${value.charAt(index)}`;
+  }
+  return result;
+}
+
 function escapeForSelector(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return cssEscapeIdent(value);
 }
 
 function nthOfType(el: SelectorElement): number {

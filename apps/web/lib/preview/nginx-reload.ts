@@ -3,12 +3,21 @@ import "server-only";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { listSandboxPreviewPorts, toContainerName } from "@paco/sandbox";
+import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
+import { appUrl } from "@/lib/app-url";
 import {
   getChatsBySessionId,
   getSessionsWithActiveSandbox,
 } from "@/lib/db/sessions";
-import { previewHostname } from "@/lib/preview/hostname";
-import { previewCertDir, previewServerBlock } from "@/lib/preview/nginx-config";
+import {
+  candidatePreviewHostname,
+  previewHostname,
+} from "@/lib/preview/hostname";
+import {
+  candidateContainerPort,
+  previewCertDir,
+  previewServerBlock,
+} from "@/lib/preview/nginx-config";
 import { runHostCommand } from "@/lib/reaping/run-host-command";
 import { PACO_APP_PORT, PREVIEW_PORT } from "@/lib/sandbox/config";
 import {
@@ -17,6 +26,65 @@ import {
   isSandboxActive,
 } from "@/lib/sandbox/utils";
 import { readInstanceSettings } from "@/lib/settings/instance-settings";
+
+/**
+ * Every design-candidate index, in the order candidates are created.
+ * `DesignCandidate.index` (`lib/design/candidates.ts`) is the same `1 | 2 |
+ * 3` literal union.
+ */
+const CANDIDATE_INDEXES = [1, 2, 3] as const;
+
+/**
+ * Directory holding design-candidate worktrees, relative to the session
+ * workspace root — `designs/<chatId>/<n>/`, mirroring
+ * `lib/design/candidates.ts`'s own (private) `designWorktreeDir`. Kept as a
+ * second, independent literal here rather than importing that helper: it is
+ * not exported, and duplicating one path-join convention is cheaper than
+ * widening that module's public surface for a single directory name that
+ * the plan's Global Constraints already fix (`designs/<chatId>/<n>/`, a
+ * sibling of `chats/<chatId>/`).
+ */
+const DESIGNS_DIRNAME = "designs";
+
+function candidateWorktreeDir(
+  workspaceRoot: string,
+  chatId: string,
+  index: 1 | 2 | 3,
+): string {
+  return path.join(workspaceRoot, DESIGNS_DIRNAME, chatId, String(index));
+}
+
+async function pathExists(candidatePath: string): Promise<boolean> {
+  try {
+    await fs.access(candidatePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Which of a chat's design candidates (1..3) currently have a live
+ * worktree directory on disk.
+ *
+ * Directory presence, not `git worktree list`, is the detection signal —
+ * cheap, and exactly what `createCandidates`/`removeCandidates`
+ * (`lib/design/candidates.ts`) create and delete. A worktree existing here
+ * says nothing about whether its dev server has actually started yet;
+ * `collectActivePreviewRoutes` still has to check the published port
+ * separately before routing to it.
+ */
+async function listLiveCandidateIndexes(
+  workspaceRoot: string,
+  chatId: string,
+): Promise<Array<1 | 2 | 3>> {
+  const checks = await Promise.all(
+    CANDIDATE_INDEXES.map((index) =>
+      pathExists(candidateWorktreeDir(workspaceRoot, chatId, index)),
+    ),
+  );
+  return CANDIDATE_INDEXES.filter((_, i) => checks[i]);
+}
 
 /**
  * Reconcile nginx's preview routing against every session with a live
@@ -56,9 +124,67 @@ const FILE_PREFIX = "paco-preview-";
 interface ActivePreviewRoute {
   hostname: string;
   upstreamPort: number;
+  /** Set only for a design-candidate's own route — see `previewServerBlock`'s
+   * `isDesignCandidate`. Omitted (not `false`) for an ordinary chat route. */
+  isDesignCandidate?: true;
 }
 
-async function collectActivePreviewRoutes(
+/**
+ * Reconcile one chat's live design candidates into extra preview routes,
+ * alongside its own.
+ *
+ * `listSandboxPreviewPorts` is called at most once per distinct candidate
+ * container port across the *entire* sync (`portsForContainerPort` below
+ * memoizes it) — not once per chat — since it is already a bulk call across
+ * every running container, exactly like the chat-route lookup above it
+ * reuses `portsByContainer` for the same reason.
+ */
+async function collectCandidateRoutes(params: {
+  chatId: string;
+  containerName: string;
+  workspaceRoot: string;
+  previewBaseDomain: string | null;
+  portsForContainerPort: (
+    containerPort: number,
+  ) => Promise<Map<string, number>>;
+}): Promise<ActivePreviewRoute[]> {
+  const {
+    chatId,
+    containerName,
+    workspaceRoot,
+    previewBaseDomain,
+    portsForContainerPort,
+  } = params;
+
+  const liveIndexes = await listLiveCandidateIndexes(workspaceRoot, chatId);
+  if (liveIndexes.length === 0) {
+    return [];
+  }
+
+  const routes: ActivePreviewRoute[] = [];
+  for (const index of liveIndexes) {
+    const hostname = candidatePreviewHostname(chatId, index, previewBaseDomain);
+    if (!hostname) {
+      continue;
+    }
+
+    const ports = await portsForContainerPort(candidateContainerPort(index));
+    const upstreamPort = ports.get(containerName);
+    if (!upstreamPort) {
+      // The worktree exists, but candidate n's dev server has not
+      // published `candidateContainerPort(n)` yet — not started, still
+      // starting, or (a misconfigured candidate) bound to the wrong port.
+      // Nothing to route to until it has.
+      continue;
+    }
+
+    routes.push({ hostname, upstreamPort, isDesignCandidate: true });
+  }
+
+  return routes;
+}
+
+export async function collectActivePreviewRoutes(
   previewBaseDomain: string | null,
 ): Promise<ActivePreviewRoute[]> {
   const sessions = (await getSessionsWithActiveSandbox()).filter((session) =>
@@ -70,6 +196,22 @@ async function collectActivePreviewRoutes(
   }
 
   const portsByContainer = await listSandboxPreviewPorts(PREVIEW_PORT);
+
+  // Memoized per distinct candidate container port, and only ever fetched
+  // when some chat actually has a live candidate worktree — most syncs, on
+  // an instance with no design turn in flight, never call this at all.
+  const candidatePortMaps = new Map<number, Promise<Map<string, number>>>();
+  function portsForContainerPort(
+    containerPort: number,
+  ): Promise<Map<string, number>> {
+    let promise = candidatePortMaps.get(containerPort);
+    if (!promise) {
+      promise = listSandboxPreviewPorts(containerPort);
+      candidatePortMaps.set(containerPort, promise);
+    }
+    return promise;
+  }
+
   const routes: ActivePreviewRoute[] = [];
 
   for (const session of sessions) {
@@ -96,11 +238,40 @@ async function collectActivePreviewRoutes(
     }
 
     const hostname = previewHostname(previewChat.id, previewBaseDomain);
-    if (!hostname) {
+    if (hostname) {
+      routes.push({ hostname, upstreamPort });
+    }
+
+    // A design candidate is a worktree of THIS chat's own repository, so it
+    // runs inside the very same container — its dev server just has to be
+    // told to bind `candidateContainerPort(n)` instead of `PREVIEW_PORT`
+    // (see that function's doc comment in `nginx-config.ts`).
+    if (!isSandboxActive(session.sandboxState)) {
+      // Already excluded by the `sessions` filter above — this is here
+      // purely so TypeScript narrows `session.sandboxState` to a non-null
+      // `SandboxState` before `hostWorkspaceFor` below, which requires one.
       continue;
     }
 
-    routes.push({ hostname, upstreamPort });
+    let workspaceRoot: string;
+    try {
+      workspaceRoot = hostWorkspaceFor(session.sandboxState);
+    } catch {
+      // Sandbox state carries neither `hostWorkspace` nor a resolvable
+      // name — already unusual enough that the chat's own route above may
+      // also be stale, but candidates are pure upside here: skipping them
+      // costs nothing beyond not showing candidates for this one session.
+      continue;
+    }
+
+    const candidateRoutes = await collectCandidateRoutes({
+      chatId: previewChat.id,
+      containerName,
+      workspaceRoot,
+      previewBaseDomain,
+      portsForContainerPort,
+    });
+    routes.push(...candidateRoutes);
   }
 
   return routes;
@@ -189,6 +360,11 @@ export async function syncPreviewRoutes(): Promise<void> {
         certDir: settings.tlsEnabled
           ? await existingPreviewCertDir(route.hostname)
           : null,
+        isDesignCandidate: route.isDesignCandidate ?? false,
+        // Only a candidate block actually uses this (see its doc comment
+        // in nginx-config.ts) — computed unconditionally anyway since
+        // `appUrl()` is a cheap, synchronous read of `APP_URL`.
+        appOrigin: route.isDesignCandidate ? appUrl().origin : undefined,
       }),
     );
   }
