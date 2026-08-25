@@ -177,6 +177,17 @@ type UpdateRaceOutcome =
  * starts the next turn with the steer text and the returned resumeToken,
  * which is what actually resumes the session (PROTOCOL.md §7 steering row —
  * ACP has no method to inject text into a running prompt).
+ *
+ * Unlike `ClaudeCodeBackend`, `ctx.abortSignal`'s listener is removed in
+ * exactly one place (`result.finally(...)`), not also from `chunks`'s own
+ * `finally`. That's safe here specifically because `orchestrate()` runs
+ * detached (`void orchestrate()`) from a top-level `try/finally` that always
+ * settles `stopReasonDeferred` and therefore `result` — whether the caller
+ * ever reads `chunks` or not. `ClaudeCodeBackend` needs a second cleanup
+ * site because its transport result can, in the abandonment case, depend on
+ * `chunks` having been driven forward at all (see its own comment on
+ * `abandonment`); this backend's `result` always settles on its own, so one
+ * cleanup site suffices.
  */
 export class OpenFxBackend implements AgentBackend {
   private readonly config: OpenFxBackendConfig;
@@ -258,6 +269,20 @@ export class OpenFxBackend implements AgentBackend {
     const stopReasonDeferred = Promise.withResolvers<StopReason>();
     stopReasonDeferred.promise.catch(() => undefined);
 
+    // Resolved by chunksGen()'s normal-completion path only (never on
+    // abandonment/interrupt/steer, which settle `result` through the
+    // `abandonment` race instead — see its own comment below). Exists so
+    // `transportResult`'s normal-completion branch can wait on it: without
+    // this, `result` would settle as soon as the underlying ACP turn
+    // finishes, regardless of whether the caller has ever looked at
+    // `chunks` — a direct violation of interface.ts's CONTRACT ("result
+    // settles only after chunks is fully consumed"). The orchestration
+    // (initialize/session/prompt) itself still runs eagerly and
+    // independently of chunks consumption — only the value exposed via
+    // `result` is gated.
+    const chunksDrained = Promise.withResolvers<undefined>();
+    chunksDrained.promise.catch(() => undefined);
+
     async function orchestrate(): Promise<void> {
       try {
         await client.initialize(INITIALIZE_PARAMS);
@@ -321,18 +346,28 @@ export class OpenFxBackend implements AgentBackend {
 
     const transportResult: Promise<TurnResult> =
       stopReasonDeferred.promise.then(
-        (stopReason): TurnResult => {
+        async (stopReason): Promise<TurnResult> => {
           // `cancelledByUs` is checked here too, not just below: a steer/
           // interrupt whose session/cancel arrived too late to actually stop
           // the scripted/real turn must still report AbortError/steered per
           // the CONTRACT, even though the transport itself reports a normal
-          // completion.
+          // completion. This branch (like the rejection branch below) keeps
+          // its existing AbortError/steered semantics and does NOT wait on
+          // `chunksDrained` — abandonment already has its own settlement
+          // path (the `abandonment` race below), and steer/interrupt are
+          // defined to resolve/reject `result` on their own, independent of
+          // chunk consumption.
           if (stopReason === "cancelled" || cancelledByUs) {
             if (steerText !== undefined) {
               return buildSteeredResult(steerText);
             }
             throw abortError();
           }
+          // Normal completion: the CONTRACT (interface.ts) requires
+          // `result` to settle only once the caller has fully drained
+          // `chunks`, so wait for chunksGen()'s own normal-completion
+          // signal before producing a value.
+          await chunksDrained.promise;
           return {
             finishReason: toFinishReason(stopReason),
             isError: stopReason === "refused",
@@ -390,6 +425,7 @@ export class OpenFxBackend implements AgentBackend {
           yield chunk;
         }
         completed = true;
+        chunksDrained.resolve(undefined);
       } finally {
         // A consumer that abandons `chunks` early (break/return/throw on
         // the iterator) resumes this generator at this `finally` without
@@ -397,6 +433,13 @@ export class OpenFxBackend implements AgentBackend {
         // equivalent to interrupt(): make sure `result` still settles
         // (rather than dangling) and the process actually gets torn down.
         if (!completed) {
+          // Close out the mapper's own state (e.g. an open text block) even
+          // though its output is discarded here — the turn is being
+          // abandoned, not gracefully finished, so nothing should be
+          // yielded from a `finally` mid-forced-return, but a mapper that
+          // might be inspected or reused later should never be left
+          // thinking a block is still open.
+          mapper.finish();
           cancelAndClose();
           if (steerText !== undefined) {
             abandonment.resolve(buildSteeredResult(steerText));

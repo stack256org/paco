@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TurnContext } from "@paco/agent-backend";
 import { runBackendConformance } from "@paco/agent-backend/conformance.js";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type {
   PermissionDecision,
   PermissionRequestParams,
@@ -14,6 +14,7 @@ import {
   type OpenFxBackendConfig,
   type OpenFxBackendOptions,
 } from "./backend.ts";
+import { AcpChunkMapper } from "./chunk-mapper.ts";
 
 const STUB_PATH = join(import.meta.dir, "test", "stub-acp-server.ts");
 
@@ -127,6 +128,68 @@ describe("OpenFxBackend", () => {
     // PROTOCOL.md §4/§7: the ACP sessionId is the durable resume handle.
     expect(typeof result.resumeToken).toBe("string");
     expect((result.resumeToken ?? "").length).toBeGreaterThan(0);
+  });
+
+  test("result stays pending until chunks are fully drained, even on a fast (no hold-open) script", async () => {
+    // No HOLD_OPEN_SCRIPT here on purpose: the real ACP turn (init +
+    // session/new + prompt, all local) finishes essentially immediately.
+    // `chunks` is never touched below until well after that — proving
+    // `result` doesn't settle just because the underlying transport did.
+    const backend = new OpenFxBackend(
+      stubConfig({
+        steps: [{ kind: "update", update: agentMessageChunk("fast") }],
+        stopReason: "end_turn",
+      }),
+    );
+    const handle = backend.startTurn(turnContext());
+
+    let settled = false;
+    handle.result
+      .then(() => {
+        settled = true;
+      })
+      .catch(() => {
+        settled = true;
+      });
+
+    // Real wall-clock wait, comfortably longer than the actual (local,
+    // in-process) ACP turn takes to finish end-to-end — nothing here reads
+    // `chunks` yet.
+    await sleep(300);
+    expect(settled).toBe(false);
+
+    const chunks = [];
+    for await (const chunk of handle.chunks) {
+      chunks.push(chunk);
+    }
+    // Let the `.then` callback above actually run.
+    await sleep(0);
+    expect(settled).toBe(true);
+
+    const result = await handle.result;
+    expect(
+      chunks.some((c) => c.type === "text-delta" && c.delta === "fast"),
+    ).toBe(true);
+    expect(result.finishReason).toBe("stop");
+  });
+
+  test("abandonment calls mapper.finish() for state consistency, even though its output is discarded", async () => {
+    const finishSpy = spyOn(AcpChunkMapper.prototype, "finish");
+    try {
+      const backend = new OpenFxBackend(stubConfig(HOLD_OPEN_SCRIPT));
+      const handle = backend.startTurn(turnContext());
+
+      // Opens a text block (HOLD_OPEN_SCRIPT's first step), then abandon
+      // before the turn ends.
+      const iterator = handle.chunks[Symbol.asyncIterator]();
+      await iterator.next();
+      await iterator.return?.();
+      await handle.result.catch(() => undefined);
+
+      expect(finishSpy).toHaveBeenCalled();
+    } finally {
+      finishSpy.mockRestore();
+    }
   });
 
   test("interrupt(): cancel + kill; result rejects with name AbortError", async () => {
