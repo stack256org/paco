@@ -21,8 +21,15 @@ import { canTransition } from "@/lib/tasks/state";
  * invariant.
  */
 export class TaskTransitionError extends Error {
-  constructor(taskId: string, from: TaskStatus, to: TaskStatus) {
-    super(`Task "${taskId}" cannot transition from "${from}" to "${to}"`);
+  constructor(
+    taskId: string,
+    from: TaskStatus,
+    to: TaskStatus,
+    reason?: string,
+  ) {
+    super(
+      reason ?? `Task "${taskId}" cannot transition from "${from}" to "${to}"`,
+    );
     this.name = "TaskTransitionError";
   }
 }
@@ -128,14 +135,28 @@ export async function transitionTaskStatus(
     throw new TaskTransitionError(taskId, current.status, to);
   }
 
+  // Guard the write with the status this decision was based on: two
+  // concurrent transitions can both read the same `current.status` and both
+  // pass `canTransition` above, so without this the second writer would
+  // silently clobber the first instead of losing the race visibly. Zero
+  // rows back means someone else's write landed first.
   const [row] = await db
     .update(tasks)
     .set({ ...patch, status: to, updatedAt: new Date() })
-    .where(and(eq(tasks.organizationId, organizationId), eq(tasks.id, taskId)))
+    .where(
+      and(
+        eq(tasks.organizationId, organizationId),
+        eq(tasks.id, taskId),
+        eq(tasks.status, current.status),
+      ),
+    )
     .returning();
   if (!row) {
-    throw new Error(
-      `transitionTaskStatus: update returned no row for "${taskId}"`,
+    throw new TaskTransitionError(
+      taskId,
+      current.status,
+      to,
+      `Task "${taskId}" status changed concurrently while transitioning "${current.status}" -> "${to}"`,
     );
   }
   return row;
@@ -146,31 +167,43 @@ export type TaskTreeNode = Task & { children: TaskTreeNode[] };
 /**
  * Assembles a task and its full subtree, recursing on `parentTaskId`.
  *
- * Not organization-scoped by itself — a root id already names one specific
- * row, and every caller reaches it through an org-scoped lookup first (e.g.
- * `listTasks`/`getTask`), so re-checking here would only duplicate that
- * check. One query per node rather than a recursive CTE: planner trees are
- * shallow (a goal decomposed into subtasks, not deeply nested), so the
- * simplicity is worth more than the extra round trips.
+ * Organization-scoped at every level, not just the root: a user-supplied
+ * task id must never let a caller walk into another organization's subtree,
+ * even indirectly through `parentTaskId` links. One query per node rather
+ * than a recursive CTE: planner trees are shallow (a goal decomposed into
+ * subtasks, not deeply nested), so the simplicity is worth more than the
+ * extra round trips.
  */
 export async function taskTree(
+  organizationId: string,
   rootId: string,
 ): Promise<TaskTreeNode | undefined> {
-  const [root] = await db.select().from(tasks).where(eq(tasks.id, rootId));
+  const [root] = await db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.organizationId, organizationId), eq(tasks.id, rootId)));
   if (!root) {
     return;
   }
-  return { ...root, children: await childrenOf(root.id) };
+  return { ...root, children: await childrenOf(organizationId, root.id) };
 }
 
-async function childrenOf(parentId: string): Promise<TaskTreeNode[]> {
+async function childrenOf(
+  organizationId: string,
+  parentId: string,
+): Promise<TaskTreeNode[]> {
   const rows = await db
     .select()
     .from(tasks)
-    .where(eq(tasks.parentTaskId, parentId));
+    .where(
+      and(
+        eq(tasks.organizationId, organizationId),
+        eq(tasks.parentTaskId, parentId),
+      ),
+    );
   const nodes: TaskTreeNode[] = [];
   for (const row of rows) {
-    nodes.push({ ...row, children: await childrenOf(row.id) });
+    nodes.push({ ...row, children: await childrenOf(organizationId, row.id) });
   }
   return nodes;
 }

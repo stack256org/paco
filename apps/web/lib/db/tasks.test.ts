@@ -376,6 +376,41 @@ describe("transitionTaskStatus", () => {
     );
     expect(unblocked.status).toBe("running");
   });
+
+  test("a lost race throws TaskTransitionError and never clobbers the winner's write", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Title",
+      goal: "Goal",
+    });
+
+    // Both calls read the same "todo" snapshot before either writes — the
+    // fake resolves every db call through a microtask, same as a real
+    // concurrent pair of requests racing the same row. The loser's UPDATE
+    // WHERE clause no longer matches (the winner already flipped the
+    // status), so it must throw instead of silently overwriting.
+    const [first, second] = await Promise.allSettled([
+      transitionTaskStatus("org-1", task.id, "running"),
+      transitionTaskStatus("org-1", task.id, "running"),
+    ]);
+
+    const settled = [first, second];
+    const fulfilled = settled.filter((r) => r.status === "fulfilled");
+    const rejected = settled.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    if (rejected[0]?.status === "rejected") {
+      expect(rejected[0].reason).toBeInstanceOf(TaskTransitionError);
+    }
+
+    // The loser's write never landed: exactly one row, and it reflects only
+    // the winner's transition.
+    expect(store).toHaveLength(1);
+    const reread = await getTask("org-1", task.id);
+    expect(reread?.status).toBe("running");
+  });
 });
 
 describe("taskTree", () => {
@@ -409,7 +444,7 @@ describe("taskTree", () => {
       parentTaskId: childA.id,
     });
 
-    const tree = await taskTree(root.id);
+    const tree = await taskTree("org-1", root.id);
 
     expect(tree?.title).toBe("Root");
     expect(tree?.children).toHaveLength(2);
@@ -420,7 +455,7 @@ describe("taskTree", () => {
 
   test("returns undefined for a task id that does not exist", async () => {
     store = [];
-    expect(await taskTree("no-such-task")).toBeUndefined();
+    expect(await taskTree("org-1", "no-such-task")).toBeUndefined();
   });
 
   test("a leaf task has an empty children array", async () => {
@@ -432,7 +467,41 @@ describe("taskTree", () => {
       goal: "Goal",
     });
 
-    const tree = await taskTree(task.id);
+    const tree = await taskTree("org-1", task.id);
+    expect(tree?.children).toEqual([]);
+  });
+
+  test("is scoped to the organization: another org's task id resolves to nothing", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Someone else's task",
+      goal: "Goal",
+    });
+
+    expect(await taskTree("org-2", task.id)).toBeUndefined();
+  });
+
+  test("is scoped to the organization: a child from another org is excluded from the tree", async () => {
+    store = [];
+    const root = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Root",
+      goal: "Root goal",
+    });
+    // Not a realistic row (parentTaskId would normally be same-org), but it
+    // proves the child fetch itself is org-filtered, not just the root.
+    await createTask({
+      organizationId: "org-2",
+      sessionId: "session-2",
+      title: "Cross-org child",
+      goal: "Goal",
+      parentTaskId: root.id,
+    });
+
+    const tree = await taskTree("org-1", root.id);
     expect(tree?.children).toEqual([]);
   });
 });
