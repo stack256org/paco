@@ -32,6 +32,44 @@ function isKnownBackend(value: string): value is ChatBackendId {
 }
 
 /**
+ * The single fallback rule for `chats.backend`: `"claude-code"` for
+ * anything that isn't a recognised backend id — `null`/`undefined` (a chat
+ * predating the column, or a caller that never fetched it) exactly like an
+ * unrecognised non-null string (a stale client, a manual row edit, a future
+ * enum value this build doesn't know about yet).
+ *
+ * Exported so every reader of `chat.backend` — `resolveBackend` below, and
+ * the chat workflow's own `currentBackend` (`app/workflows/chat.ts`, which
+ * decides which key a turn's resume token is written under) — normalizes
+ * through the exact same rule. Two independently-written fallbacks used to
+ * exist here: `resolveBackend` treated an unrecognised *non-null* string as
+ * claude-code, while the workflow's `chat?.backend ?? "claude-code"` only
+ * caught `null`/`undefined` and would have passed an unrecognised string
+ * straight through. A chat somehow holding one would then have run its
+ * turn on Claude Code (via `resolveBackend`'s fallback) while writing the
+ * result's resume token under that unrecognised string's key instead of
+ * `"claude-code"` — the exact class of cross-backend-token bug fixed in
+ * "Scope agent resume tokens per backend". The PATCH route already
+ * validates against the enum before any write, so this was prevention, not
+ * a live bug — but a future write path that skips the route must not be
+ * able to reintroduce the divergence by construction.
+ */
+export function normalizeBackendId(
+  value: string | null | undefined,
+): ChatBackendId {
+  if (value == null) {
+    return "claude-code";
+  }
+  if (isKnownBackend(value)) {
+    return value;
+  }
+  console.warn(
+    `[backend-factory] Unknown chat backend "${value}"; falling back to claude-code.`,
+  );
+  return "claude-code";
+}
+
+/**
  * Map stored OpenFX provider settings onto `OpenFxBackendConfig`.
  *
  * A pure function on purpose, split out of `resolveBackend` so it is testable
@@ -79,14 +117,7 @@ export function buildOpenFxBackendConfig(
 export async function resolveBackend(
   chat: BackendSelectionInput,
 ): Promise<AgentBackend> {
-  const requested = chat.backend ?? "claude-code";
-
-  if (!isKnownBackend(requested)) {
-    console.warn(
-      `[backend-factory] Unknown chat backend "${requested}"; falling back to claude-code.`,
-    );
-    return new ClaudeCodeBackend();
-  }
+  const requested = normalizeBackendId(chat.backend);
 
   if (requested === "openfx") {
     const settings = await readInstanceSettings();

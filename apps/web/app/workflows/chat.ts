@@ -19,6 +19,7 @@ import {
   setupFailureMessage,
 } from "@/lib/sandbox/setup-failure-copy";
 import { approvalToken } from "@/lib/agent/approvals/token";
+import { normalizeBackendId } from "@/lib/agent/backend-factory";
 import { getGithubToken } from "@/lib/db/github-tokens";
 import {
   appendSessionEvents,
@@ -1428,7 +1429,11 @@ const runAgentStep = async (
     // replay independently under the durable workflow runtime, and the chat's
     // current policy is what decides whether a steer monitor is armed at all.
     const chat = await getChatById(chatId);
-    const currentBackend = chat?.backend ?? "claude-code";
+    // Normalized through the same rule `resolveBackend` uses, so the backend
+    // that RUNS the turn and the key its resume token is stored under can
+    // never disagree — see `normalizeBackendId`'s doc for what diverging
+    // fallbacks would cost.
+    const currentBackend = normalizeBackendId(chat?.backend);
     const turnPolicy: TurnPolicy = chat?.turnPolicy ?? "steer";
     if (turnPolicy === "steer") {
       steerMonitor = startSteerMonitor(chatId, abortController, (steered) => {

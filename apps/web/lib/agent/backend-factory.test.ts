@@ -83,6 +83,68 @@ describe("resolveBackend", () => {
   });
 });
 
+describe("normalizeBackendId", () => {
+  test("passes a known backend id through unchanged", async () => {
+    const { normalizeBackendId } = await modulePromise;
+
+    expect(normalizeBackendId("claude-code")).toBe("claude-code");
+    expect(normalizeBackendId("openfx")).toBe("openfx");
+  });
+
+  test("falls back to claude-code for null and undefined", async () => {
+    const { normalizeBackendId } = await modulePromise;
+
+    expect(normalizeBackendId(null)).toBe("claude-code");
+    expect(normalizeBackendId(undefined)).toBe("claude-code");
+  });
+
+  test("falls back to claude-code for an unrecognised non-null string", async () => {
+    // The whole point of sharing this rule: the workflow's own fallback used
+    // to catch only null/undefined, so an unrecognised string would have run
+    // its turn on Claude Code while filing the resume token under that
+    // string's key -- a token no later turn could ever find.
+    const { normalizeBackendId } = await modulePromise;
+    const warnings: unknown[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args[0]);
+    };
+
+    try {
+      expect(normalizeBackendId("some-future-backend")).toBe("claude-code");
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(String(warnings[0])).toContain("some-future-backend");
+  });
+
+  test("agrees with resolveBackend for every input, so the two can never diverge", async () => {
+    const { normalizeBackendId, resolveBackend } = await modulePromise;
+    const inputs = [
+      "claude-code",
+      "openfx",
+      "some-future-backend",
+      "",
+      null,
+      undefined,
+    ] as const;
+    const originalWarn = console.warn;
+    console.warn = () => {
+      // Silenced: the unknown-id cases warn on purpose.
+    };
+
+    try {
+      for (const input of inputs) {
+        const resolved = await resolveBackend({ backend: input });
+        expect(resolved.capabilities().id).toBe(normalizeBackendId(input));
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
 describe("buildOpenFxBackendConfig", () => {
   test("maps a fully configured settings row onto executable + env", async () => {
     const { buildOpenFxBackendConfig } = await modulePromise;
