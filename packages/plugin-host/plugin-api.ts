@@ -6,11 +6,30 @@
  * granted list — whether anything happens. A rejected promise is the normal
  * outcome for an ungranted capability, so plugin code must handle it.
  */
+/** One row returned by `kv.list` — see `KvListPage`. */
+export interface KvListItem {
+  key: string;
+  value: unknown;
+}
+
+/**
+ * A single page of `storage:kv`'s "list" op, exactly as the host's handler
+ * returns it: keyset-paginated (ordered by key, capped per page) rather than
+ * prefix-filtered. `nextAfterKey` is present iff the page was full; pass it
+ * back as `afterKey` to fetch the next page, and its absence means listing is
+ * complete.
+ */
+export interface KvListPage {
+  items: KvListItem[];
+  nextAfterKey?: string;
+}
+
 export interface PluginKvApi {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<void>;
-  list(prefix?: string): Promise<string[]>;
+  /** Pass the previous page's `nextAfterKey` to continue; omit to start from the beginning. */
+  list(afterKey?: string): Promise<KvListPage>;
 }
 
 export interface PluginFetchRequest {

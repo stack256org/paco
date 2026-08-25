@@ -12,6 +12,8 @@ export { PluginHost, workerEntryPath, workerPreloadPath } from "./host.ts";
 export type { FetchAllowDecision } from "./net-allowlist.ts";
 export { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
 export type {
+  KvListItem,
+  KvListPage,
   PluginApi,
   PluginChannelModule,
   PluginChannelRequest,

@@ -10,11 +10,11 @@
  * `capability-request` messages and the host answers them; the worker only
  * ever learns the answer.
  */
-import { basename } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
-import type { Capability } from "@paco/plugin-kit";
+import { channelSlotKey, type Capability } from "@paco/plugin-kit";
 import type {
+  KvListPage,
   PluginApi,
   PluginChannelModule,
   PluginChannelResponse,
@@ -99,13 +99,11 @@ const api: PluginApi = {
     delete: async (key: string) => {
       await requestCapability("storage:kv", { op: "delete", key });
     },
-    list: async (prefix?: string) => {
-      const keys = await requestCapability("storage:kv", {
+    list: (afterKey?: string) =>
+      requestCapability("storage:kv", {
         op: "list",
-        prefix,
-      });
-      return Array.isArray(keys) ? keys.map(String) : [];
-    },
+        afterKey,
+      }) as Promise<KvListPage>,
   },
   postMessage: (message) => requestCapability("messages:post", message),
   events: {
@@ -148,11 +146,6 @@ function isChannelModule(value: unknown): value is PluginChannelModule {
     (candidate.name === undefined || typeof candidate.name === "string") &&
     typeof candidate.handle === "function"
   );
-}
-
-/** A slot file's basename with its `.ts`/`.js` extension stripped. */
-function slotKey(filePath: string): string {
-  return basename(filePath).replace(/\.(js|ts)$/, "");
 }
 
 async function loadDefaultExport(filePath: string): Promise<unknown> {
@@ -205,7 +198,7 @@ async function loadChannels(slots: PluginSlots): Promise<void> {
         api.log("warn", `channel slot ${filePath} has no valid default export`);
         continue;
       }
-      channels.set(slotModule.name ?? slotKey(filePath), slotModule);
+      channels.set(slotModule.name ?? channelSlotKey(filePath), slotModule);
     } catch (error) {
       api.log(
         "error",

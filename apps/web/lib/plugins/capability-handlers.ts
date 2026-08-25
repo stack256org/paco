@@ -3,7 +3,11 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { BlockList } from "node:net";
-import { checkFetchAllowed, type CapabilityHandlers } from "@paco/plugin-host";
+import {
+  checkFetchAllowed,
+  type CapabilityHandlers,
+  type KvListPage,
+} from "@paco/plugin-host";
 import { and, asc, eq, gt } from "drizzle-orm";
 import { Agent, type Dispatcher } from "undici";
 import { z } from "zod";
@@ -113,12 +117,6 @@ const kvPayloadSchema = z.discriminatedUnion("op", [
   }),
 ]);
 
-export interface KvListResult {
-  items: Array<{ key: string; value: unknown }>;
-  /** Present iff the page was full — pass back as `afterKey` for the next one. */
-  nextAfterKey?: string;
-}
-
 async function handleStorageKv(
   pluginId: string,
   payload: unknown,
@@ -176,7 +174,7 @@ async function handleStorageKv(
         .orderBy(asc(pluginKv.key))
         .limit(KV_LIST_LIMIT);
 
-      const result: KvListResult = { items: rows };
+      const result: KvListPage = { items: rows };
       if (rows.length === KV_LIST_LIMIT) {
         result.nextAfterKey = rows.at(-1)?.key;
       }
