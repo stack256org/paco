@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { FakeBackend } from "@paco/agent-backend";
 import type { UIMessage, UIMessageChunk } from "ai";
 mock.module("server-only", () => ({}));
 
@@ -30,26 +31,47 @@ const result = {
   },
 };
 
+/**
+ * `runAgentTurn` now talks to `@paco/claude-code` only through
+ * `ClaudeCodeBackend` (the default when no `backend` is passed in). The
+ * default-path tests below don't exercise `ClaudeCodeBackend` itself — that's
+ * covered by `packages/claude-code/backend.test.ts` — they exercise
+ * `runAgentTurn`'s wiring and its mapping of `TurnResult` back onto
+ * `AgentStepResult`. So the fake here plays the role of `ClaudeCodeBackend`,
+ * returning a `TurnHandle`/`TurnResult` directly instead of the CLI's raw
+ * result shape that the real backend would translate.
+ */
 mock.module("@paco/claude-code", () => ({
   DEFAULT_AGENTS: {},
   buildApprovalSettings: () => ({ hooks: {} }),
-  streamClaudeAgent: () => ({
-    chunks: (async function* () {
-      for (const chunk of chunks) {
-        yield chunk;
-      }
-    })(),
-    result: Promise.resolve(result),
-    sessionId: Promise.resolve("claude-session-1"),
-  }),
-  toRunUsage: () => ({
-    inputTokens: 1,
-    outputTokens: 1,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    models: {},
-  }),
-  toFinishReason: () => "stop" as const,
+  ClaudeCodeBackend: class {
+    startTurn() {
+      return {
+        chunks: (async function* () {
+          for (const chunk of chunks) {
+            yield chunk;
+          }
+        })(),
+        result: Promise.resolve({
+          finishReason: "stop" as const,
+          isError: result.is_error,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cachedInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            models: {},
+          },
+          costUsd: result.total_cost_usd,
+          resumeToken: result.session_id,
+        }),
+        steer: () => Promise.resolve(),
+        interrupt: () => {
+          // no-op: not exercised by the default-path tests
+        },
+      };
+    }
+  },
 }));
 
 mock.module("@paco/sandbox", () => ({
@@ -102,5 +124,45 @@ describe("runAgentTurn", () => {
 
     expect(step.claudeSessionId).toBe("claude-session-1");
     expect(step.finishReason).toBe("stop");
+  });
+
+  test("drives a provided AgentBackend", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const fakeChunks: UIMessageChunk[] = [
+      { type: "text-start", id: "text-1" },
+      { type: "text-delta", id: "text-1", delta: "from the fake backend" },
+      { type: "text-end", id: "text-1" },
+    ];
+    const backend = new FakeBackend({ script: fakeChunks });
+
+    const seen: UIMessageChunk[] = [];
+
+    const step = await runAgentTurn<UIMessage>({
+      prompt: "hi",
+      options: makeOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend,
+      onChunk: async (chunk) => {
+        seen.push(chunk);
+      },
+    });
+
+    expect(seen).toEqual(fakeChunks);
+
+    const textPart = step.responseMessage?.parts.find(
+      (part): part is { type: "text"; text: string } => part.type === "text",
+    );
+    expect(textPart?.text).toContain("from the fake backend");
+
+    expect(step.usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      models: {},
+    });
+    expect(step.claudeSessionId).toBe("fake-session-1");
   });
 });

@@ -1,27 +1,28 @@
 import "server-only";
 
+import type { AgentBackend, TurnUsage } from "@paco/agent-backend";
 import {
+  buildApprovalSettings,
   type ClaudeAgentDefinition,
-  type ClaudeRunUsage,
+  type ClaudeBackendOptions,
+  ClaudeCodeBackend,
   DEFAULT_AGENTS,
-  streamClaudeAgent,
-  toFinishReason,
-  toRunUsage,
 } from "@paco/claude-code";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
-import { buildApprovalSettings } from "@paco/claude-code";
 import { buildAppendSystemPrompt } from "./system-prompt";
 import type { AgentCallOptions } from "./types";
 import { hostWorkspaceFor } from "./workspace-paths";
 
 export interface AgentStepResult<UI extends UIMessage> {
   responseMessage?: UI;
-  usage: ClaudeRunUsage;
+  usage: TurnUsage;
   finishReason: "stop" | "length" | "error" | "tool-calls";
   /** Claude Code session id, to persist for the next turn's `--resume`. */
   claudeSessionId: string;
   costUsd?: number;
   isError: boolean;
+  /** Set when the turn ended because the caller steered it mid-run. */
+  steered?: { text: string };
 }
 
 /**
@@ -87,6 +88,7 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
   approval?: { url: string; token: string };
   abortSignal?: AbortSignal;
   onChunk: (chunk: UIMessageChunk) => Promise<void>;
+  backend?: AgentBackend;
 }): Promise<AgentStepResult<UI>> {
   const { options } = params;
 
@@ -98,69 +100,71 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     hasGithubToken: params.githubToken !== undefined,
   });
 
-  const run = streamClaudeAgent(
-    params.prompt,
-    {
-      cwd: resolveHostCwd(options),
-      ...(params.approval && params.chatId
-        ? { settings: buildApprovalSettings() }
+  const backendOptions: ClaudeBackendOptions = {
+    ...(params.approval && params.chatId
+      ? { settings: buildApprovalSettings() }
+      : {}),
+    env: {
+      ...(params.githubToken
+        ? {
+            GH_TOKEN: params.githubToken,
+            GITHUB_TOKEN: params.githubToken,
+          }
         : {}),
-      env: {
-        ...(params.githubToken
-          ? {
-              GH_TOKEN: params.githubToken,
-              GITHUB_TOKEN: params.githubToken,
-            }
-          : {}),
-        // Read by the PreToolUse hook, which runs as its own process and has
-        // no other way to know where Paco is or who it is acting for.
-        ...(params.approval && params.chatId
-          ? {
-              PACO_APPROVAL_URL: params.approval.url,
-              PACO_APPROVAL_TOKEN: params.approval.token,
-              PACO_APPROVAL_CHAT_ID: params.chatId,
-            }
-          : {}),
-      },
-      model: options.model?.id,
-      ...(options.model?.effort && { effort: options.model.effort }),
-      agents: resolveAgents(options),
-      ...(appendSystemPrompt && { appendSystemPrompt }),
-      /*
-       * The run is non-interactive, so anything that asks for approval is simply
-       * refused — there is no one to ask.
-       *
-       * `acceptEdits` sounds right but only covers file edits: the CLI still
-       * gates Bash, so the agent could write an app and then fail to install,
-       * build, or serve it. That was observed — it tried four times to start a
-       * dev server and gave up. `dontAsk` is worse, denying Bash outright.
-       *
-       * Bypassing the CLI's own prompts does not mean nothing is checked.
-       * A `PreToolUse` hook fires even in this mode, and Paco routes every
-       * tool call through it: reads and in-worktree edits proceed untouched,
-       * while anything that reaches outside the worktree or is destructive
-       * stops and asks the user. That is the approval an interactive session
-       * would give, without the modes that make the product unusable —
-       * `acceptEdits` gates Bash, so the agent could write an app and then not
-       * be allowed to start it, and `dontAsk` denies Bash outright.
-       */
-      permissionMode: "bypassPermissions",
-      // Resume keeps the CLI's own history so the full transcript is not
-      // replayed on every turn.
-      // --session-id requires a UUID; message ids are nanoids, so mint one.
-      ...(params.claudeSessionId
-        ? { resume: params.claudeSessionId }
-        : { sessionId: crypto.randomUUID() }),
-      ...(params.maxTurns !== undefined && { maxTurns: params.maxTurns }),
-      includePartialMessages: true,
+      // Read by the PreToolUse hook, which runs as its own process and has
+      // no other way to know where Paco is or who it is acting for.
+      ...(params.approval && params.chatId
+        ? {
+            PACO_APPROVAL_URL: params.approval.url,
+            PACO_APPROVAL_TOKEN: params.approval.token,
+            PACO_APPROVAL_CHAT_ID: params.chatId,
+          }
+        : {}),
     },
-    params.abortSignal,
-  );
+    model: options.model?.id,
+    ...(options.model?.effort && { effort: options.model.effort }),
+    agents: resolveAgents(options),
+    ...(appendSystemPrompt && { appendSystemPrompt }),
+    /*
+     * The run is non-interactive, so anything that asks for approval is simply
+     * refused — there is no one to ask.
+     *
+     * `acceptEdits` sounds right but only covers file edits: the CLI still
+     * gates Bash, so the agent could write an app and then fail to install,
+     * build, or serve it. That was observed — it tried four times to start a
+     * dev server and gave up. `dontAsk` is worse, denying Bash outright.
+     *
+     * Bypassing the CLI's own prompts does not mean nothing is checked.
+     * A `PreToolUse` hook fires even in this mode, and Paco routes every
+     * tool call through it: reads and in-worktree edits proceed untouched,
+     * while anything that reaches outside the worktree or is destructive
+     * stops and asks the user. That is the approval an interactive session
+     * would give, without the modes that make the product unusable —
+     * `acceptEdits` gates Bash, so the agent could write an app and then not
+     * be allowed to start it, and `dontAsk` denies Bash outright.
+     */
+    permissionMode: "bypassPermissions",
+    // Resume keeps the CLI's own history so the full transcript is not
+    // replayed on every turn.
+    // --session-id requires a UUID; message ids are nanoids, so mint one.
+    ...(params.claudeSessionId ? {} : { sessionId: crypto.randomUUID() }),
+    ...(params.maxTurns !== undefined && { maxTurns: params.maxTurns }),
+    includePartialMessages: true,
+  };
+
+  const backend = params.backend ?? new ClaudeCodeBackend();
+  const handle = backend.startTurn({
+    cwd: resolveHostCwd(options),
+    prompt: params.prompt,
+    ...(params.claudeSessionId ? { resumeToken: params.claudeSessionId } : {}),
+    ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+    backendOptions,
+  });
 
   const stream = new ReadableStream<UIMessageChunk>({
     async start(controller) {
       try {
-        for await (const chunk of run.chunks) {
+        for await (const chunk of handle.chunks) {
           await params.onChunk(chunk);
           controller.enqueue(chunk);
         }
@@ -181,7 +185,7 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     responseMessage = message;
   }
 
-  const result = await run.result;
+  const result = await handle.result;
 
   /*
    * Stamp the caller's id on the reconstructed message.
@@ -200,10 +204,14 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     responseMessage: responseMessage
       ? { ...responseMessage, id: params.messageId }
       : undefined,
-    usage: toRunUsage(result),
-    finishReason: toFinishReason(result),
-    claudeSessionId: result.session_id,
-    costUsd: result.total_cost_usd,
-    isError: result.is_error,
+    usage: result.usage,
+    finishReason: result.finishReason,
+    // `ClaudeCodeBackend` always sets `resumeToken` from the CLI's terminal
+    // message; the `?? ""` is only a type-narrowing fallback for the neutral
+    // `TurnResult` shape, where it is optional for backends that don't resume.
+    claudeSessionId: result.resumeToken ?? "",
+    costUsd: result.costUsd,
+    isError: result.isError,
+    ...(result.steered ? { steered: result.steered } : {}),
   };
 }
