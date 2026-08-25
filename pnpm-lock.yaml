@@ -197,6 +197,9 @@ importers:
 
   packages/claude-code:
     dependencies:
+      '@paco/agent-backend':
+        specifier: workspace:*
+        version: link:../agent-backend
       ai:
         specifier: 'catalog:'
         version: 6.0.236(zod@4.4.3)

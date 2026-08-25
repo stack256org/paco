@@ -6,6 +6,7 @@ export {
   toFinishReason,
   toRunUsage,
 } from "./agent.ts";
+export { type ClaudeBackendOptions, ClaudeCodeBackend } from "./backend.ts";
 export {
   generateObject,
   generateText,
