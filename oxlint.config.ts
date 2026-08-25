@@ -28,7 +28,6 @@ export default defineConfig({
     "import/no-duplicates": "off",
     "jsx-a11y/prefer-tag-over-role": "off",
     "logical-assignment-operators": "off",
-    "no-barrel-file": "off",
     "no-duplicate-imports": "off",
     // Sequential awaits are load-bearing here: migrations, retry backoffs, and
     // ordered git operations must not be parallelized.
