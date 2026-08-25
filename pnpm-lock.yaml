@@ -45,6 +45,9 @@ importers:
       '@base-ui/react':
         specifier: 1.6.0
         version: 1.6.0(@date-fns/tz@1.5.0)(@types/react@19.2.18)(date-fns@4.4.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@paco/agent-backend':
+        specifier: workspace:*
+        version: link:../../packages/agent-backend
       '@paco/claude-code':
         specifier: workspace:*
         version: link:../../packages/claude-code

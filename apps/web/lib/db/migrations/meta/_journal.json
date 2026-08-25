@@ -8,6 +8,13 @@
       "when": 1785942019614,
       "tag": "0000_supreme_fat_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787663319222,
+      "tag": "0001_legal_korg",
+      "breakpoints": true
     }
   ]
 }

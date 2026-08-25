@@ -20,6 +20,7 @@
   "dependencies": {
     "@ai-sdk/react": "catalog:",
     "@base-ui/react": "1.6.0",
+    "@paco/agent-backend": "workspace:*",
     "@paco/claude-code": "workspace:*",
     "@paco/sandbox": "workspace:*",
     "@paco/shared": "workspace:*",

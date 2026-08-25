@@ -1,6 +1,7 @@
 import type { SandboxState } from "@paco/sandbox";
 import { sql } from "drizzle-orm";
 import {
+  bigserial,
   boolean,
   index,
   integer,
@@ -386,6 +387,30 @@ export const chatReads = pgTable(
   (table) => [
     primaryKey({ columns: [table.userId, table.chatId] }),
     index("chat_reads_chat_id_idx").on(table.chatId),
+  ],
+);
+
+/**
+ * Append-only session event log — the source of truth for what happened in a
+ * chat (spec: Section 1 of 2026-08-25-paco-platform-design.md).
+ *
+ * `chatMessages` is a projection of this log. Ordering is the bigserial `id`:
+ * a single writer per chat is already enforced by the active-stream claim, so
+ * global insert order is per-chat order.
+ */
+export const sessionEvents = pgTable(
+  "session_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    chatId: text("chat_id")
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    payload: jsonb("payload").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("session_events_chat_id_id_idx").on(table.chatId, table.id),
   ],
 );
 
