@@ -505,7 +505,7 @@ describe("session-event fan-out wiring", () => {
     expect(fanoutStartCalls).toBeGreaterThan(0);
   });
 
-  test("registers a restarted host again after a crash", async () => {
+  test("registers a restarted host again after a crash, and unregisters the crashed one it replaced", async () => {
     rows = [row("plugin-a")];
     await startPluginHost("plugin-a");
     const firstHost = FakePluginHost.instances[0] as FakePluginHost;
@@ -515,6 +515,37 @@ describe("session-event fan-out wiring", () => {
     const secondHost = FakePluginHost.instances.at(-1) as FakePluginHost;
 
     expect(fanoutRegisterCalls).toEqual([firstHost, secondHost]);
+    // The whole point of a successful restart: the dead host it replaced
+    // must not keep polling forever inside `SessionEventFanout` — a plugin
+    // that crashes and successfully restarts N times must never accumulate
+    // N live registrations for one plugin id.
+    expect(fanoutUnregisterCalls).toEqual([firstHost]);
+  });
+
+  test("a plugin that exhausts every restart attempt ends with zero fan-out registrations", async () => {
+    rows = [row("plugin-a")];
+    await startPluginHost("plugin-a");
+    const host = FakePluginHost.instances[0] as FakePluginHost;
+    host.simulateCrash("boom");
+
+    // Every restart attempt fails, so the plugin is permanently crashed
+    // once the third one is exhausted.
+    startBehavior = async () => {
+      throw new Error("still broken");
+    };
+
+    await ensurePluginsStarted(); // restart attempt 1 of 3
+    expect(fanoutUnregisterCalls).toEqual([]);
+    await ensurePluginsStarted(); // restart attempt 2 of 3
+    expect(fanoutUnregisterCalls).toEqual([]);
+    await ensurePluginsStarted(); // restart attempt 3 of 3: now exhausted
+    await ensurePluginsStarted(); // 4th call: no-op, nothing left to try
+
+    expect(getPluginRegistry().get("plugin-a")?.state).toBe("crashed");
+    // A permanently-dead plugin must end with ZERO fan-out registrations —
+    // not the one it started with, still sitting there forever.
+    expect(fanoutRegisterCalls).toEqual([host]);
+    expect(fanoutUnregisterCalls).toEqual([host]);
   });
 });
 

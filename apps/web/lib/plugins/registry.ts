@@ -204,19 +204,39 @@ async function discoverAndStartHost(
 }
 
 /**
- * Records a host that just (re-)started: puts it in the registry, remembers
- * its registered tools for `listEnabledPluginsForMcp`, and resets its
+ * Records a host that just (re-)started: unregisters whatever host
+ * previously held this plugin id from the session-event fan-out (if any —
+ * a fresh start has none), puts the new host in the registry, remembers its
+ * registered tools for `listEnabledPluginsForMcp`, and resets its
  * restart-attempt counter — a plugin that is actually running again has
  * earned a fresh set of `MAX_RESTART_ATTEMPTS` the next time it crashes,
  * rather than carrying a grudge from a crash episode it has since recovered
  * from.
+ *
+ * The unregister-before-replace here is what keeps "at most one fan-out
+ * registration per plugin id" true by construction rather than by every
+ * caller remembering to do it: `discoverAndStartHost` registers every host
+ * it successfully starts (including a crash-restart's replacement), and
+ * this is the one place that swaps a plugin id's registry entry — so it is
+ * the one place that can guarantee the outgoing host's registration is
+ * dropped in the same breath the incoming one lands. Without this, a
+ * plugin that crashes and successfully restarts N times accumulates N dead
+ * `SessionEventFanout` registrations — each one real DB work
+ * (`listSessionEvents`/`latestSessionEventId`) on every poll tick, forever,
+ * for a host that can never deliver anything again.
  */
 function registerStartedHost(
   pluginId: string,
   host: PluginHost,
   tools: RegisteredTool[],
 ): void {
-  getPluginRegistry().set(pluginId, host);
+  const registry = getPluginRegistry();
+  const previous = registry.get(pluginId);
+  if (previous && previous !== host) {
+    getPluginEventFanout().unregister(previous);
+  }
+
+  registry.set(pluginId, host);
   pluginToolsMap().set(pluginId, tools);
   restartAttemptsMap().delete(pluginId);
 }
@@ -267,17 +287,35 @@ function needsStartAttempt(
 /**
  * Attempts to restart one crashed plugin, counting the attempt against
  * `MAX_RESTART_ATTEMPTS` regardless of outcome. A successful restart resets
- * the counter (`registerStartedHost`); a failed one leaves the previous
- * (still `"crashed"`) host in the registry untouched, so its state — and an
+ * the counter (`registerStartedHost`, which also unregisters the outgoing
+ * host from the fan-out); a failed one leaves the previous (still
+ * `"crashed"`) host in the registry untouched, so its state — and an
  * operator's `pluginStatusAction` view of it — stay accurate either way.
+ *
+ * When this was the LAST attempt (`used >= MAX_RESTART_ATTEMPTS`), the
+ * still-crashed host is unregistered from the fan-out right here: after
+ * this point `needsStartAttempt` will never consider this plugin again
+ * (short of an operator disabling/re-enabling or reinstalling it, which go
+ * through `stopPluginHost` and clear it some other way), so its
+ * registration would otherwise sit in `SessionEventFanout` forever — dead
+ * weight polled on every tick for a host that can never deliver an event
+ * again. A plugin that is permanently crashed must end with ZERO fan-out
+ * registrations, not one stuck open.
  */
 async function restartCrashedPlugin(row: PluginRow): Promise<void> {
   const attempts = restartAttemptsMap();
-  attempts.set(row.id, (attempts.get(row.id) ?? 0) + 1);
+  const used = (attempts.get(row.id) ?? 0) + 1;
+  attempts.set(row.id, used);
 
   const result = await discoverAndStartHost(row);
   if (!result.ok) {
     logStartFailure(row.id, result.error);
+    if (used >= MAX_RESTART_ATTEMPTS) {
+      const exhausted = getPluginRegistry().get(row.id);
+      if (exhausted) {
+        getPluginEventFanout().unregister(exhausted);
+      }
+    }
     return;
   }
   registerStartedHost(row.id, result.host, result.tools);
