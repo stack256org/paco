@@ -9,7 +9,7 @@
     "db:migrate:apply": "node lib/db/migrate.ts && node scripts/workflow-bootstrap.ts",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "db:generate": "drizzle-kit generate && pnpm -w exec ultracite fix lib/db/migrations/meta",
+    "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
