@@ -47,6 +47,27 @@ No `--allow-net` is ever passed, on any version.
 
 The test suite says loudly which tiers it could not verify.
 
+## Deployment requirements
+
+These are operational, not advisory. Hardened plugin hosting does not work
+without them.
+
+1. **Node >= 24 must be available to the process that hosts plugins**, and
+   **Paco's bundled Node must satisfy that floor**. If the shipped runtime is
+   ever pinned below 24, hardened plugin hosting stops working entirely —
+   every `start()` fails with the floor error rather than silently running
+   unsandboxed. That is the intended failure mode.
+2. **The embedder must pass `nodeExecutable`** pointing at that binary.
+   `PluginHost` defaults to `process.execPath`, which under bun (and under any
+   non-Node runtime) is refused by the floor check. The plugin registry owns
+   this.
+3. **`hardened` must be left at its default of `true`** everywhere real plugin
+   code runs.
+4. **CI should verify containment on the Node it ships.** The test suite prints
+   which Node tiers it resolved and warns loudly for any it could not; a build
+   that silently skips those tiers has not tested the sandbox. Set
+   `PACO_NODE_EXECUTABLE` and fail the build if a tier is skipped.
+
 ## What IS enforced
 
 ### No ambient secrets
@@ -109,14 +130,21 @@ can even reach:
 1. `fetch`, `WebSocket`, `XMLHttpRequest` and `EventSource` are deleted from
    `globalThis`.
 2. **Plugin code may load only an allowlist of builtins**: `assert`, `buffer`,
-   `crypto`, `events`, `fs`, `fs/promises`, `os`, `path`, `querystring`,
-   `stream`, `stream/promises`, `string_decoder`, `timers`, `timers/promises`,
-   `url`, `util`, `zlib` — and their `node:` forms. **Nothing is denied by
-   name.** Every other builtin is refused by default: `net` and `http`, the
+   `crypto`, `events`, `fs`, `fs/promises`, `path`, `querystring`, `stream`,
+   `stream/promises`, `string_decoder`, `timers`, `timers/promises`, `url`,
+   `util`, `zlib` — and their `node:` forms. **Nothing is denied by name.**
+   Every other builtin is refused by default: `net` and `http`, the
    underscore-prefixed internals, modules nobody here has heard of, and
-   builtins that future Node releases will add. `fs` is on the list and is
-   harmless there, because Node's permission model confines it independently to
-   the plugin's own directory and state directory.
+   builtins that future Node releases will add.
+
+   Two entries are worth naming. `fs` is on the list and is harmless there,
+   because Node's permission model confines it independently to the plugin's
+   own directory and state directory. **`os` is deliberately NOT on the list**:
+   it reaches no socket, but `os.networkInterfaces()` hands over the host's
+   internal IP addresses and `os.userInfo()` its username, and either could
+   later leave through a granted `net:fetch` domain. A plugin that genuinely
+   needs platform information should get it through a capability, with consent,
+   rather than by reading the host.
 3. Both routes to a builtin are gated, because there are two and they are
    independent:
    - **Module resolution** — a synchronous resolve hook. It asks Node to
@@ -211,11 +239,13 @@ Be precise about this. The consent screen must not imply otherwise.
   than one instance — but it still lives in the same VM as the plugin, which is
   why the host refuses to run below Node 24, where the runtime's socket gate
   stands behind it.
-- **Allowed builtins still leak host metadata.** `os` is on the allowlist, so a
-  plugin can read the hostname, the CPU list, the user's name and
-  `os.networkInterfaces()` — including internal IP addresses. None of that
-  reaches the network by itself, but it is reconnaissance a plugin can perform
-  and later exfiltrate through a granted `net:fetch` domain.
+- **A plugin can still see a little of the host.** `os` is off the allowlist,
+  which closes the worst of it (internal IPs, usernames), but the `process`
+  global is not a module and cannot be taken away: `process.platform`,
+  `process.arch`, `process.version`, `process.pid` and `process.cwd()` are all
+  readable. That is a small, deliberate residue — enough to fingerprint the
+  platform, not enough to enumerate the network — and like anything a plugin
+  learns, it can leave through a granted `net:fetch` domain.
 - **SSRF is only half-prevented here.** The host checks the URL string. It cannot
   see where DNS resolves or where a redirect goes. The `net:fetch` handler is
   *required* to fetch with `redirect: "manual"`, re-check every hop with

@@ -169,7 +169,8 @@ interface PendingToolCall {
  *   `start()` refuses to run hardened on anything older. Behind that,
  *   `worker-preload.ts` deletes the network globals and confines plugin code
  *   to a small ALLOWLIST of builtins — `fs`, `path`, `crypto` and a dozen
- *   more — closing both routes to a builtin: module resolution, and
+ *   more, but NOT `os`, `net` or anything else that reads the host or
+ *   reaches a socket — closing both routes to a builtin: module resolution, and
  *   `process.getBuiltinModule` / `process.binding`, which skip resolution
  *   entirely. Nothing is denied by name, so unknown, underscore-prefixed and
  *   future builtins are refused by default; a denylist here leaked
@@ -520,14 +521,23 @@ export class PluginHost {
       return;
     }
     const major = await detectRuntimeMajorVersion(this.nodeExecutable);
+    const fix =
+      `Point the \`nodeExecutable\` option at a Node >= ${MIN_HARDENED_NODE_MAJOR} binary ` +
+      "(Paco's bundled Node satisfies this), or set `hardened: false` — which " +
+      "removes the sandbox entirely and is only for this package's own tests.";
+    const why =
+      `Node >= ${MIN_HARDENED_NODE_MAJOR} gates network sockets in its permission model; ` +
+      "older releases do not, which would leave the in-process module " +
+      "allowlist as the only barrier between the plugin and the network.";
+
     if (major === undefined) {
       throw new Error(
-        `plugin ${this.pluginId} cannot start: the version of ${this.nodeExecutable} could not be determined, and a hardened plugin worker requires Node >= ${MIN_HARDENED_NODE_MAJOR}`,
+        `plugin ${this.pluginId} cannot start: could not determine the version of the runtime at ${this.nodeExecutable}. A hardened plugin worker requires Node >= ${MIN_HARDENED_NODE_MAJOR}. ${why} ${fix}`,
       );
     }
     if (major < MIN_HARDENED_NODE_MAJOR) {
       throw new Error(
-        `plugin ${this.pluginId} cannot start: ${this.nodeExecutable} is Node ${major}, and a hardened plugin worker requires Node >= ${MIN_HARDENED_NODE_MAJOR} — older releases do not gate network sockets in the permission model, which would leave the in-process module allowlist as the only barrier`,
+        `plugin ${this.pluginId} cannot start: the runtime at ${this.nodeExecutable} reports major version ${major}, but a hardened plugin worker requires Node >= ${MIN_HARDENED_NODE_MAJOR}. ${why} ${fix}`,
       );
     }
   }

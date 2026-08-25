@@ -1110,8 +1110,9 @@ describe("PluginHost failure handling", () => {
     const descriptor = await writePlugin("bloated-plugin", ["tools:register"], {
       "tools/echo.js": ECHO_TOOL,
       "hooks/bloat.js": `export default function bloat() {
-        // 70KB with no newline in sight: readline would buffer this forever.
-        process.stdout.write("x".repeat(70000));
+        // Well past the 64 KiB cap, with no newline in sight: readline would
+        // buffer this forever waiting for one that never comes.
+        process.stdout.write("x".repeat(200000));
       };
       `,
     });
@@ -1705,7 +1706,6 @@ function describeContainment(label: string, node: NodeCandidate): void {
           const crypto = await import("node:crypto");
           const zlib = await import("node:zlib");
           const util = await import("node:util");
-          const os = await import("node:os");
           const buffer = await import("node:buffer");
           const events = await import("node:events");
           const stream = await import("node:stream");
@@ -1723,7 +1723,6 @@ function describeContainment(label: string, node: NodeCandidate): void {
             joined: path.join("a", "b"),
             hashed: crypto.createHash("sha256").update("x").digest("hex").slice(0, 8),
             gzipped: gzip.length > 0,
-            hostnameType: typeof os.hostname(),
             bufferOk: buffer.Buffer.from("hi").toString() === "hi",
             emitterOk: typeof events.EventEmitter === "function",
             streamOk: typeof stream.Readable === "function",
@@ -1949,6 +1948,11 @@ function describeContainment(label: string, node: NodeCandidate): void {
         "node:module",
         "node:vm",
         "node:worker_threads",
+        // Not socket-capable, but pure reconnaissance: networkInterfaces()
+        // hands over internal IPs and userInfo() the username, either of
+        // which could later leave through a granted net:fetch domain.
+        "os",
+        "node:os",
         // The socket-capable INTERNALS the third review used. None were on
         // any denylist; a plugin with no net grant reached `_tls_wrap`
         // .connect and got back HTTP/1.1 200 OK.
@@ -2025,7 +2029,6 @@ function describeContainment(label: string, node: NodeCandidate): void {
         "node:crypto",
         "node:util",
         "node:zlib",
-        "node:os",
         "node:buffer",
         "node:events",
         "node:stream",
@@ -2052,7 +2055,6 @@ function describeContainment(label: string, node: NodeCandidate): void {
         joined: path.join("a", "b"),
         hashed: "2d711642",
         gzipped: true,
-        hostnameType: "string",
         bufferOk: true,
         emitterOk: true,
         streamOk: true,
@@ -2190,6 +2192,8 @@ const denied = ${JSON.stringify([
   "_http_common",
   "node:_http_common",
   "_stream_wrap",
+  "os",
+  "node:os",
   "node:some_future_builtin_2030",
   "node:fs ",
   "node:/fs",
@@ -2202,7 +2206,6 @@ const allowed = ${JSON.stringify([
   "node:crypto",
   "node:util",
   "node:zlib",
-  "node:os",
   "node:buffer",
   "node:events",
   "node:stream",
@@ -2290,9 +2293,16 @@ describeFloor("hardened Node floor", () => {
     });
     running.push(host);
 
-    await expect(host.start()).rejects.toThrow(
-      /requires Node >= 24|could not be determined/,
+    const error = await host.start().then(
+      () => undefined,
+      (thrown: unknown) => thrown as Error,
     );
+
+    // The error has to be actionable: what was found, what is needed, and
+    // which knob fixes it.
+    expect(error?.message).toMatch(/reports major version 22/);
+    expect(error?.message).toMatch(/requires Node >= 24/);
+    expect(error?.message).toMatch(/nodeExecutable/);
     expect(host.state).toBe("crashed");
   });
 });
@@ -2316,7 +2326,14 @@ describe("hardened Node floor, unusable runtimes", () => {
     });
     running.push(host);
 
-    await expect(host.start()).rejects.toThrow(/could not be determined/);
+    const error = await host.start().then(
+      () => undefined,
+      (thrown: unknown) => thrown as Error,
+    );
+
+    expect(error?.message).toMatch(/could not determine the version/);
+    expect(error?.message).toMatch(/requires Node >= 24/);
+    expect(error?.message).toMatch(/nodeExecutable/);
     expect(host.state).toBe("crashed");
   });
 

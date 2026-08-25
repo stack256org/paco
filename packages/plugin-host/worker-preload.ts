@@ -58,6 +58,13 @@ import { pathToFileURL } from "node:url";
  * `fs` is deliberately included and deliberately harmless: it is gated
  * independently by Node's permission model, which confines it to the plugin's
  * own directory and its state directory.
+ *
+ * `os` is deliberately EXCLUDED. It reaches no socket, but it is pure
+ * reconnaissance — `os.networkInterfaces()` hands over the host's internal IP
+ * addresses and `os.userInfo()` its username, either of which could later
+ * leave through a granted `net:fetch` domain. A plugin that genuinely needs
+ * platform information should get it through a capability, with consent, not
+ * by reading the host.
  */
 const ALLOWED_BUILTINS: ReadonlySet<string> = new Set([
   "assert",
@@ -66,7 +73,6 @@ const ALLOWED_BUILTINS: ReadonlySet<string> = new Set([
   "events",
   "fs",
   "fs/promises",
-  "os",
   "path",
   "querystring",
   "stream",
