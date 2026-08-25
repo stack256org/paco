@@ -6,6 +6,14 @@ import type {
 } from "@paco/agent-backend";
 import { appendSessionEvents } from "@/lib/db/session-events";
 
+/**
+ * Appends one batch of events for a chat.
+ *
+ * Must never throw or reject: `TurnEventRecorder` chains every call off the
+ * previous one's settlement, and a rejection that escaped that chain would
+ * surface as an unhandled rejection rather than a caught error. The default,
+ * `appendSessionEvents`, already upholds this by catching internally.
+ */
 type Appender = (chatId: string, events: SessionEvent[]) => Promise<void>;
 
 const CHUNK_FLUSH_SIZE = 50;
@@ -14,6 +22,15 @@ const CHUNK_FLUSH_SIZE = 50;
  * Batches a turn's session events so chunk volume doesn't turn into row-per-
  * delta insert traffic. All appends go through the never-throwing
  * appendSessionEvents, so recording cannot fail a turn.
+ *
+ * Every append is serialized through one promise chain (`appendChain`)
+ * rather than fired independently. The underlying store assigns ids in
+ * insert order, not call order, so on a pooled client two concurrent
+ * appends can land out of order — a `turn/end` racing ahead of an earlier
+ * `assistant/chunk` batch would get a lower id than a row that logically
+ * precedes it, breaking replay-by-id. Chaining makes each append wait for
+ * every append enqueued before it, so completion order always matches
+ * enqueue order.
  */
 export class TurnEventRecorder {
   private readonly chatId: string;
@@ -21,6 +38,7 @@ export class TurnEventRecorder {
   private readonly append: Appender;
   private pendingChunks: SessionEvent[] = [];
   private loggedPrompt: string | undefined;
+  private appendChain: Promise<void> = Promise.resolve();
 
   constructor(
     chatId: string,
@@ -32,13 +50,31 @@ export class TurnEventRecorder {
     this.append = append;
   }
 
+  /**
+   * Enqueue a batch behind every previously enqueued batch.
+   *
+   * The `.catch` here is defensive, not the primary contract: `Appender`
+   * must never reject. It exists so a misbehaving injected appender (e.g. in
+   * a test) can't turn `appendChain` into a permanently-rejected promise —
+   * which would fail every subsequent append forever — or produce an
+   * unhandled rejection.
+   */
+  private enqueue(events: SessionEvent[]): Promise<void> {
+    this.appendChain = this.appendChain
+      .then(() => this.append(this.chatId, events))
+      .catch((error: unknown) => {
+        console.error("event-recorder: append failed", error);
+      });
+    return this.appendChain;
+  }
+
   async start(params: {
     messageId: string;
     prompt: string;
     policy: TurnPolicy;
   }): Promise<void> {
     this.loggedPrompt = params.prompt;
-    await this.append(this.chatId, [
+    await this.enqueue([
       {
         type: "turn/start",
         turnId: this.turnId,
@@ -76,7 +112,7 @@ export class TurnEventRecorder {
     if (this.pendingChunks.length >= CHUNK_FLUSH_SIZE) {
       const batch = this.pendingChunks;
       this.pendingChunks = [];
-      void this.append(this.chatId, batch);
+      void this.enqueue(batch);
     }
   }
 
@@ -104,6 +140,6 @@ export class TurnEventRecorder {
       isError: params.isError,
       ...(params.steered ? { steered: params.steered } : {}),
     });
-    await this.append(this.chatId, tail);
+    await this.enqueue(tail);
   }
 }

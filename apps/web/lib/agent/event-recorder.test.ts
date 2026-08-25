@@ -73,4 +73,62 @@ describe("TurnEventRecorder", () => {
     const end = batches.flat().find((e) => e.type === "turn/end");
     expect(end).toMatchObject({ steered: { text: "go left" } });
   });
+  test("chunk appends serialize before finish, even when the first append is slow", async () => {
+    const completionOrder: string[] = [];
+    let calls = 0;
+    const append = mock((_chatId: string, _events: SessionEvent[]) => {
+      const callNumber = calls;
+      calls += 1;
+      return new Promise<void>((resolve) => {
+        const delay = callNumber === 0 ? 30 : 0;
+        setTimeout(() => {
+          completionOrder.push(callNumber === 0 ? "chunks" : "finish");
+          resolve();
+        }, delay);
+      });
+    });
+    const recorder = new TurnEventRecorder("chat1", "turn1", append);
+    for (let i = 0; i < 50; i++) {
+      recorder.chunk({ type: "text-delta", id: "t", delta: String(i) });
+    }
+    // The 50th chunk triggers the flush: that's append call 0, delayed 30ms.
+    const finishPromise = recorder.finish({
+      finishReason: "stop",
+      isError: false,
+    });
+    let finishResolved = false;
+    void finishPromise.then(() => {
+      finishResolved = true;
+    });
+
+    // Before the delayed chunk batch settles, finish's own (immediate) append
+    // must not have completed yet -- it is chained behind the chunk batch.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(finishResolved).toBe(false);
+
+    await finishPromise;
+    expect(finishResolved).toBe(true);
+    expect(completionOrder).toEqual(["chunks", "finish"]);
+  });
+
+  test("a rejecting appender does not surface as an unhandled rejection and finish still resolves", async () => {
+    const append = mock((_chatId: string, _events: SessionEvent[]) =>
+      Promise.reject(new Error("boom")),
+    );
+    const originalConsoleError = console.error;
+    const consoleErrorSpy = mock(() => undefined);
+    console.error = consoleErrorSpy;
+    try {
+      const recorder = new TurnEventRecorder("chat1", "turn1", append);
+      await expect(
+        recorder.start({ messageId: "m1", prompt: "p", policy: "steer" }),
+      ).resolves.toBeUndefined();
+      await expect(
+        recorder.finish({ finishReason: "stop", isError: false }),
+      ).resolves.toBeUndefined();
+      expect(consoleErrorSpy).toHaveBeenCalled();
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
 });
