@@ -1,6 +1,7 @@
 "use client";
 
-import { AlertTriangle, Loader2, Play } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Loader2, Play } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import type { EvalRun, EvalScenario } from "./actions";
@@ -178,6 +179,24 @@ export function EvalsPageContent({
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-6 p-6">
+      {/*
+        The way back out.
+
+        This route sits under the session layout but has no `chatId`, so the
+        chat tab strip — which is what `EvalsTabLink` lives on, and the only
+        in-app route back to a conversation — does not render here. Without
+        this the page is somewhere you can get to and not leave, which is the
+        same reachability bug over again in the other direction. `/sessions/
+        <id>` redirects to the session's first chat.
+      */}
+      <Link
+        className="flex w-fit items-center gap-2 text-sm text-base-content/60 transition-colors hover:text-base-content"
+        href={`/sessions/${sessionId}`}
+      >
+        <ArrowLeft aria-hidden="true" className="size-4" />
+        Back to chats
+      </Link>
+
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">Evals</h1>
