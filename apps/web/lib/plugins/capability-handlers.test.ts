@@ -630,6 +630,67 @@ describe("net:fetch", () => {
     dnsAddresses = {};
   });
 
+  /**
+   * Every range the whole-branch security review verified was NOT blocked
+   * before this fix, plus the reserved/documentation/multicast space no
+   * legitimate plugin target ever lives in.
+   *
+   * `0.0.0.0` is the load-bearing one: on Linux a connection to it lands on
+   * loopback, so a plugin author who points an allowlisted domain's A record
+   * at it reaches Paco's own internal routes (`/api/internal/plugin-tools`,
+   * `/api/internal/approvals`) straight through an allowlist that says the
+   * hostname is fine.
+   */
+  const NON_PUBLIC_ADDRESSES: Array<{ address: string; family: number }> = [
+    { address: "0.0.0.0", family: 4 },
+    { address: "0.1.2.3", family: 4 },
+    { address: "100.64.0.1", family: 4 },
+    { address: "192.0.0.1", family: 4 },
+    { address: "198.18.0.1", family: 4 },
+    { address: "192.0.2.1", family: 4 },
+    { address: "198.51.100.1", family: 4 },
+    { address: "203.0.113.1", family: 4 },
+    { address: "224.0.0.1", family: 4 },
+    { address: "255.255.255.255", family: 4 },
+    { address: "::", family: 6 },
+    { address: "::ffff:0.0.0.0", family: 6 },
+    { address: "ff02::1", family: 6 },
+  ];
+
+  /** Built outside the loop so no closure captures a loop variable. */
+  function rejectsNonPublic(entry: { address: string; family: number }) {
+    return async () => {
+      dnsAddresses = { "api.linear.app": [entry] };
+      withFetch(() => {
+        throw new Error(
+          `net:fetch must not reach the network for ${entry.address}`,
+        );
+      });
+
+      try {
+        const handlers = buildCapabilityHandlers(pluginRow());
+        const netFetch = handlers["net:fetch"];
+        if (!netFetch) {
+          throw new Error("net:fetch handler missing");
+        }
+
+        await expect(
+          netFetch("plugin-a", { url: "https://api.linear.app/graphql" }),
+        ).rejects.toThrow(/non-public address/);
+      } finally {
+        restoreFetch();
+        dnsAddresses = {};
+      }
+    };
+  }
+
+  for (const entry of NON_PUBLIC_ADDRESSES) {
+    test(
+      `rejects an allowlisted hostname that resolves to ${entry.address}`,
+      rejectsNonPublic(entry),
+    );
+  }
+
   test("follows a redirect to another allowlisted domain", async () => {
     dnsAddresses = {};
     withFetch(async (input) => {
@@ -762,7 +823,10 @@ describe("net:fetch", () => {
 
   test("pins the connection to the resolved address, ignoring whatever a later lookup would say", async () => {
     dnsAddresses = {
-      "api.linear.app": [{ address: "203.0.113.5", family: 4 }],
+      // A genuinely public address: the documentation ranges (192.0.2/24,
+      // 198.51.100/24, 203.0.113/24) this fixture used to borrow are now
+      // themselves blocked by the SSRF guard.
+      "api.linear.app": [{ address: "93.184.216.34", family: 4 }],
     };
     agentConstructorCalls = [];
     let capturedDispatcher: unknown;
@@ -801,7 +865,7 @@ describe("net:fetch", () => {
         results.push([err, address, family]);
       });
 
-      expect(results).toEqual([[null, "203.0.113.5", 4]]);
+      expect(results).toEqual([[null, "93.184.216.34", 4]]);
     } finally {
       restoreFetch();
       dnsAddresses = {};

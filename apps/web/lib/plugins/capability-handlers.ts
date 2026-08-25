@@ -34,23 +34,58 @@ const KV_VALUE_MAX_BYTES = 64 * 1024;
 const KV_LIST_LIMIT = 1000;
 
 /**
- * Loopback, link-local, and RFC1918/RFC4193 private ranges — the addresses a
- * plugin must never reach through `net:fetch`, no matter what hostname or
- * redirect chain got there. This is the SSRF guard: a granted domain can
- * still resolve (or be redirected, or rebind) to the host's own network, and
- * an exact-hostname allowlist alone says nothing about where that hostname
- * actually points at request time.
+ * Every address a plugin must never reach through `net:fetch`, no matter what
+ * hostname or redirect chain got there. This is the SSRF guard: a granted
+ * domain can still resolve (or be redirected, or rebind) to the host's own
+ * network, and an exact-hostname allowlist alone says nothing about where
+ * that hostname actually points at request time.
+ *
+ * Loopback and RFC1918/RFC4193 are the obvious half. The rest are here
+ * because a whole-branch security review checked this list against Node's
+ * real `BlockList` and found them missing:
+ *
+ * - `0.0.0.0/8` ("this network"). The load-bearing one. On Linux a
+ *   connection to `0.0.0.0` is delivered to loopback, so a plugin author who
+ *   points an allowlisted domain's A record at it reaches Paco's own
+ *   internal routes — `/api/internal/plugin-tools`, `/api/internal/approvals`
+ *   — while every hostname check above still says the target is fine.
+ * - `::` (the IPv6 unspecified address) is the same trick over IPv6.
+ * - `100.64.0.0/10` (RFC6598 CGNAT) and `192.0.0.0/24` (IETF protocol
+ *   assignments) both routinely address infrastructure on the host's side of
+ *   a NAT, not the public internet.
+ * - `198.18.0.0/15` (RFC2544 benchmarking) is non-routable and used
+ *   internally by appliances.
+ * - The documentation (`192.0.2/24`, `198.51.100/24`, `203.0.113/24`),
+ *   multicast (`224.0.0.0/4`, `ff00::/8`) and reserved (`240.0.0.0/4`,
+ *   which includes the `255.255.255.255` broadcast address) ranges have no
+ *   legitimate plugin target in them at all, so blocking them costs nothing
+ *   and removes a class of "what does the OS do with this?" question.
+ *
+ * IPv4-mapped IPv6 forms (`::ffff:127.0.0.1`, `::ffff:0.0.0.0`) need no
+ * separate entries: Node's `BlockList` checks an `ipv6` address against
+ * `ipv4` rules when it is a mapped address.
  */
 function buildPrivateRangesBlockList(): BlockList {
   const blockList = new BlockList();
+  blockList.addSubnet("0.0.0.0", 8, "ipv4"); // "this network" -> loopback on Linux
   blockList.addSubnet("127.0.0.0", 8, "ipv4"); // loopback
   blockList.addSubnet("169.254.0.0", 16, "ipv4"); // link-local
   blockList.addSubnet("10.0.0.0", 8, "ipv4"); // private
   blockList.addSubnet("172.16.0.0", 12, "ipv4"); // private
   blockList.addSubnet("192.168.0.0", 16, "ipv4"); // private
+  blockList.addSubnet("100.64.0.0", 10, "ipv4"); // CGNAT (RFC6598)
+  blockList.addSubnet("192.0.0.0", 24, "ipv4"); // IETF protocol assignments
+  blockList.addSubnet("198.18.0.0", 15, "ipv4"); // benchmarking (RFC2544)
+  blockList.addSubnet("192.0.2.0", 24, "ipv4"); // TEST-NET-1
+  blockList.addSubnet("198.51.100.0", 24, "ipv4"); // TEST-NET-2
+  blockList.addSubnet("203.0.113.0", 24, "ipv4"); // TEST-NET-3
+  blockList.addSubnet("224.0.0.0", 4, "ipv4"); // multicast
+  blockList.addSubnet("240.0.0.0", 4, "ipv4"); // reserved, incl. broadcast
+  blockList.addAddress("::", "ipv6"); // unspecified -> loopback on Linux
   blockList.addSubnet("::1", 128, "ipv6"); // loopback
   blockList.addSubnet("fe80::", 10, "ipv6"); // link-local
   blockList.addSubnet("fc00::", 7, "ipv6"); // unique local
+  blockList.addSubnet("ff00::", 8, "ipv6"); // multicast
   return blockList;
 }
 
