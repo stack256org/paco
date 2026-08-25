@@ -4,6 +4,7 @@ import {
   Activity,
   ChartLine,
   ArrowLeft,
+  Bot,
   Cable,
   LogOut,
   Menu,
@@ -115,6 +116,12 @@ const adminSidebarItems = [
     label: "Users",
     href: "/settings/users",
     icon: Users,
+  },
+  {
+    id: "agents",
+    label: "Agents",
+    href: "/settings/agents",
+    icon: Bot,
   },
   {
     id: "health",
