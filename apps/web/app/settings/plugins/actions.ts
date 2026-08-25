@@ -64,6 +64,14 @@ function validatePluginId(
  * Returns the manifest's declared capabilities so the consent screen can
  * show the operator exactly what a subsequent `grantAndEnableAction` call
  * would be allowed to grant, before they decide whether to grant any of it.
+ *
+ * `requireAdmin()`'s return value — the administrator performing this
+ * install — is recorded as the plugin's `installedBy`
+ * (`lib/db/schema.ts`), and that is the plugin's SECURITY PRINCIPAL: every
+ * capability that later acts inside a session authorizes as this person,
+ * and every task the plugin files is attributed to them. It is taken from
+ * the server session, never from `input`, so the client cannot nominate
+ * someone else's id as the principal a plugin will act under.
  */
 export async function installPluginAction(input: { source: string }): Promise<{
   ok: boolean;
@@ -71,14 +79,14 @@ export async function installPluginAction(input: { source: string }): Promise<{
   requested?: Capability[];
   error?: string;
 }> {
-  await requireAdmin();
+  const installedBy = await requireAdmin();
 
   const parsed = parseInstallSource(input.source);
   if (!parsed.ok) {
     return { ok: false, error: parsed.error };
   }
 
-  const result = await installPlugin(parsed.source);
+  const result = await installPlugin(parsed.source, installedBy);
   if (!result.ok) {
     return { ok: false, error: result.error };
   }

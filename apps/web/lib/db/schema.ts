@@ -774,6 +774,45 @@ export const plugins = pgTable("plugins", {
    * break its already-configured webhook.
    */
   ingressSecret: text("ingress_secret"),
+  /**
+   * The administrator who installed the plugin — the plugin's SECURITY
+   * PRINCIPAL, and the whole reason this column exists.
+   *
+   * A plugin process is not a person, so "what may this plugin touch?" has
+   * no answer until something records whom it acts for. Without this column
+   * the strictest rule `authorizeSessionForPlugin`
+   * (`lib/plugins/capability-handlers.ts`) could derive was "the target
+   * session's owner must be an administrator" — a property of the victim,
+   * not of the actor, which let a plugin into an admin's session while
+   * locking it out of an ordinary member's. That is backwards for the
+   * product's own worked example (`docs/plugins.md`: a Slack `channelMap`
+   * points at whichever sessions the team actually works in, mostly
+   * non-admins'). `installPluginAction` runs behind `requireAdmin`, so the
+   * installer is always an administrator at the moment it is written, and
+   * "a plugin may reach what its installer could reach" is a rule about the
+   * actor.
+   *
+   * NULLABLE, deliberately, in two directions:
+   *
+   * - Rows written before this column existed have no installer on record.
+   *   Backfilling them to "some administrator" would invent a principal
+   *   nobody consented as, so they stay null and every capability that
+   *   authorizes through this column REFUSES for them (fail closed) until
+   *   an administrator re-installs the plugin. That is a visible,
+   *   fixable outage, not a silent widening.
+   * - `onDelete: "set null"` for the same reason `invitations.invitedBy`
+   *   and `tasks.createdBy` use it: deleting a user must not cascade into
+   *   deleting installed plugins, and a plugin whose installer no longer
+   *   exists has lost its principal — null, and therefore refused, is the
+   *   correct end state rather than an orphaned id or a blocked user
+   *   deletion.
+   *
+   * Being an administrator is re-checked live at every call, never trusted
+   * from this column: a demoted installer's plugin stops being able to act.
+   */
+  installedBy: text("installed_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
   installedAt: timestamp("installed_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

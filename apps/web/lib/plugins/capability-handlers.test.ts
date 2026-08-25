@@ -270,17 +270,32 @@ mock.module("undici", () => ({
 }));
 
 /**
- * Both `messages:post` and `tasks:create` additionally require the session's
- * OWNER to be an administrator — a plugin has no user principal of its own,
- * and administrators are exactly the people who could have installed and
- * granted the plugin in the first place, so reaching one of their sessions
- * is not an escalation while reaching a plain member's is.
+ * Both `messages:post` and `tasks:create` authorize as the plugin's
+ * INSTALLER (`plugins.installedBy`) — a plugin may reach what the
+ * administrator who installed it could reach — not as the target session's
+ * owner. Keyed by user id, so a test can make the installer an admin while
+ * the target session's owner is a plain member (the Slack `channelMap`
+ * case), and the other way round.
  */
-let isAdminResult = true;
-const isAdminSpy = mock(async (_userId: string) => isAdminResult);
+let adminUserIds = new Set<string>(["installer-1"]);
+const isAdminSpy = mock(async (userId: string) => adminUserIds.has(userId));
 
 mock.module("@/lib/admin/require-admin", () => ({
   isAdmin: isAdminSpy,
+}));
+
+/**
+ * The installer's account still existing is part of the principal check: a
+ * plugin whose installer has been deleted has no principal left to act as,
+ * and must fail closed rather than fall back to anything.
+ */
+let existingUserIds = new Set<string>(["installer-1", "user-1"]);
+const userExistsSpy = mock(async (userId: string) =>
+  existingUserIds.has(userId),
+);
+
+mock.module("@/lib/db/users", () => ({
+  userExists: userExistsSpy,
 }));
 
 const { buildCapabilityHandlers } = await import("./capability-handlers");
@@ -309,6 +324,7 @@ function pluginRow(overrides: Partial<PluginRow> = {}): PluginRow {
     consentedNetDomains: ["api.linear.app"],
     enabled: true,
     ingressSecret: null,
+    installedBy: "installer-1",
     installedAt: now,
     updatedAt: now,
     ...overrides,
@@ -1233,7 +1249,11 @@ function resetAuthorizationMocks(): void {
   chatRow = { sessionId: "session-1", activeStreamId: null };
   sessionRow = { id: "session-1", userId: "user-1", status: "running" };
   sessionBelongsToOrganizationResult = true;
-  isAdminResult = true;
+  // The installer is an admin; the session's owner (`user-1`) deliberately
+  // is NOT, so every "allowed" test below is also proving that a plain
+  // member's session is reachable — the `channelMap` case in docs/plugins.md.
+  adminUserIds = new Set<string>(["installer-1"]);
+  existingUserIds = new Set<string>(["installer-1", "user-1"]);
   submitOutcome = {
     kind: "streaming",
     runId: "run-42",
@@ -1242,6 +1262,7 @@ function resetAuthorizationMocks(): void {
   getOrganizationSpy.mockClear();
   sessionBelongsToOrganizationSpy.mockClear();
   isAdminSpy.mockClear();
+  userExistsSpy.mockClear();
 }
 
 describe("messages:post", () => {
@@ -1381,9 +1402,45 @@ describe("messages:post", () => {
     expect(submitChatMessageSpy).not.toHaveBeenCalled();
   });
 
-  test("rejects a chat owned by a plain member, so a plugin cannot inject into anyone's session", async () => {
+  test("posts into a chat owned by a plain member, and authorizes as the INSTALLER rather than the chat's owner", async () => {
     resetAuthorizationMocks();
-    isAdminResult = false;
+    submitChatMessageSpy.mockClear();
+
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const messagesPost = handlers["messages:post"];
+    if (!messagesPost) {
+      throw new Error("messages:post handler missing");
+    }
+
+    // `user-1` is deliberately not an administrator — this is the
+    // docs/plugins.md `channelMap` shape, where a Slack channel is mapped to
+    // an ordinary member's session.
+    await messagesPost("my-plugin", { chatId: "chat-1", text: "hi" });
+
+    expect(submitChatMessageSpy).toHaveBeenCalled();
+    expect(isAdminSpy).toHaveBeenCalledWith("installer-1");
+    expect(isAdminSpy).not.toHaveBeenCalledWith("user-1");
+  });
+
+  test("rejects when the plugin row predates installedBy, rather than falling back to any rule", async () => {
+    resetAuthorizationMocks();
+    submitChatMessageSpy.mockClear();
+
+    const handlers = buildCapabilityHandlers(pluginRow({ installedBy: null }));
+    const messagesPost = handlers["messages:post"];
+    if (!messagesPost) {
+      throw new Error("messages:post handler missing");
+    }
+
+    await expect(
+      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
+    ).rejects.toThrow(/not found/);
+    expect(submitChatMessageSpy).not.toHaveBeenCalled();
+  });
+
+  test("rejects when the installer's account has been deleted", async () => {
+    resetAuthorizationMocks();
+    existingUserIds = new Set<string>(["user-1"]);
     submitChatMessageSpy.mockClear();
 
     const handlers = buildCapabilityHandlers(pluginRow());
@@ -1396,7 +1453,42 @@ describe("messages:post", () => {
       messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
     ).rejects.toThrow(/not found/);
     expect(submitChatMessageSpy).not.toHaveBeenCalled();
-    expect(isAdminSpy).toHaveBeenCalledWith("user-1");
+  });
+
+  test("rejects when the installer is no longer an administrator", async () => {
+    resetAuthorizationMocks();
+    adminUserIds = new Set<string>();
+    submitChatMessageSpy.mockClear();
+
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const messagesPost = handlers["messages:post"];
+    if (!messagesPost) {
+      throw new Error("messages:post handler missing");
+    }
+
+    await expect(
+      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
+    ).rejects.toThrow(/not found/);
+    expect(submitChatMessageSpy).not.toHaveBeenCalled();
+  });
+
+  test("a demoted installer is refused even when the target session's own owner is an administrator", async () => {
+    resetAuthorizationMocks();
+    // Precisely the fallback being removed: the old rule allowed any
+    // admin-owned session regardless of who installed the plugin.
+    adminUserIds = new Set<string>(["user-1"]);
+    submitChatMessageSpy.mockClear();
+
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const messagesPost = handlers["messages:post"];
+    if (!messagesPost) {
+      throw new Error("messages:post handler missing");
+    }
+
+    await expect(
+      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
+    ).rejects.toThrow(/not found/);
+    expect(submitChatMessageSpy).not.toHaveBeenCalled();
   });
 
   test("no write happens before the authorization check", async () => {
@@ -1590,7 +1682,7 @@ describe("tasks:create", () => {
       title: "Investigate the outage",
       goal: "Find out why the outage happened",
       origin: "channel",
-      createdBy: "user-1",
+      createdBy: "installer-1",
     });
     expect(startTaskSpy).not.toHaveBeenCalled();
   });
@@ -1657,44 +1749,101 @@ describe("tasks:create", () => {
     expect(result).toEqual({ taskId: "task-1", error: "sandbox unavailable" });
   });
 
-  test("rejects a session owned by a plain org member, identically to an unknown session", async () => {
+  test("creates a task on a plain member's session — the docs/plugins.md channelMap case — authorizing as the installer", async () => {
     resetTasksCreateMocks();
     const handlers = buildCapabilityHandlers(pluginRow());
     const tasksCreate = handlers["tasks:create"];
     if (!tasksCreate) {
       throw new Error("tasks:create handler missing");
     }
+
+    // `user-1` owns the mapped session and is NOT an administrator.
+    const result = await tasksCreate(freshPluginId(), {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+    });
+
+    expect(result).toEqual({ taskId: "task-1" });
+    expect(createTaskSpy).toHaveBeenCalled();
+    expect(isAdminSpy).toHaveBeenCalledWith("installer-1");
+    expect(isAdminSpy).not.toHaveBeenCalledWith("user-1");
+  });
+
+  test("rejects a plugin row with no installer, identically to an unknown session", async () => {
+    resetTasksCreateMocks();
     const payload = {
       sessionId: "session-1",
       title: "Investigate",
       goal: "Investigate the thing",
     };
 
+    const withInstaller = buildCapabilityHandlers(pluginRow())["tasks:create"];
+    const withoutInstaller = buildCapabilityHandlers(
+      pluginRow({ installedBy: null }),
+    )["tasks:create"];
+    if (!(withInstaller && withoutInstaller)) {
+      throw new Error("tasks:create handler missing");
+    }
+
     sessionRow = undefined;
-    const unknownSessionError = await tasksCreate(
+    const unknownSessionError = await withInstaller(
       freshPluginId(),
       payload,
     ).catch((error: unknown) => error);
 
-    // In the organization, but not an administrator: the UI path rejects a
-    // session that is not the actor's own, and a plugin has no "own" session
-    // at all, so a member's session must be unreachable to it.
     sessionRow = { id: "session-1", userId: "user-1", status: "running" };
-    isAdminResult = false;
-    const memberSessionError = await tasksCreate(
+    const noPrincipalError = await withoutInstaller(
       freshPluginId(),
       payload,
     ).catch((error: unknown) => error);
 
-    expect(memberSessionError).toBeInstanceOf(Error);
-    expect((memberSessionError as Error).message).toBe(
+    expect(noPrincipalError).toBeInstanceOf(Error);
+    expect((noPrincipalError as Error).message).toBe(
       (unknownSessionError as Error).message,
     );
     expect(createTaskSpy).not.toHaveBeenCalled();
-    expect(isAdminSpy).toHaveBeenCalledWith("user-1");
   });
 
-  test("attributes the task to the session's owner instead of leaving it creatorless", async () => {
+  test("rejects when the installer's account has been deleted", async () => {
+    resetTasksCreateMocks();
+    existingUserIds = new Set<string>(["user-1"]);
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    await expect(
+      tasksCreate(freshPluginId(), {
+        sessionId: "session-1",
+        title: "Investigate",
+        goal: "Investigate the thing",
+      }),
+    ).rejects.toThrow(/not found/);
+    expect(createTaskSpy).not.toHaveBeenCalled();
+  });
+
+  test("rejects when the installer is no longer an administrator, even for an admin-owned session", async () => {
+    resetTasksCreateMocks();
+    adminUserIds = new Set<string>(["user-1"]);
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    await expect(
+      tasksCreate(freshPluginId(), {
+        sessionId: "session-1",
+        title: "Investigate",
+        goal: "Investigate the thing",
+      }),
+    ).rejects.toThrow(/not found/);
+    expect(createTaskSpy).not.toHaveBeenCalled();
+  });
+
+  test("attributes the task to the plugin's installer, keeping origin as the plugin marker", async () => {
     resetTasksCreateMocks();
     const handlers = buildCapabilityHandlers(pluginRow());
     const tasksCreate = handlers["tasks:create"];
@@ -1708,8 +1857,12 @@ describe("tasks:create", () => {
       goal: "Investigate the thing",
     });
 
-    const call = createTaskSpy.mock.calls[0]?.[0] as { createdBy?: string };
-    expect(call.createdBy).toBe("user-1");
+    const call = createTaskSpy.mock.calls[0]?.[0] as {
+      createdBy?: string;
+      origin?: string;
+    };
+    expect(call.createdBy).toBe("installer-1");
+    expect(call.origin).toBe("channel");
   });
 
   test("bounds how many tasks one plugin can create in a minute", async () => {

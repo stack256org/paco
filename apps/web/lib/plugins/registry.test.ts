@@ -133,6 +133,7 @@ function row(
     consentedNetDomains: [],
     enabled,
     ingressSecret: null,
+    installedBy: "admin-1",
     installedAt: new Date(),
     updatedAt: new Date(),
   };

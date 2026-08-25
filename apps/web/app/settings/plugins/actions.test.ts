@@ -130,11 +130,18 @@ type InstallResult =
 
 let installBehavior: (source: unknown) => Promise<InstallResult>;
 const installCalls: unknown[] = [];
+/**
+ * The `installedBy` argument each `installPlugin` call carried — the
+ * plugin's security principal, which must come from `requireAdmin()` and
+ * never from the action's own input.
+ */
+const installInstallerIds: unknown[] = [];
 let pluginDirImpl: (id: string) => string = (id) => `/plugins/${id}`;
 
 mock.module("@/lib/plugins/install", () => ({
-  installPlugin: (source: unknown) => {
+  installPlugin: (source: unknown, installedBy: unknown) => {
     installCalls.push(source);
+    installInstallerIds.push(installedBy);
     return installBehavior(source);
   },
   pluginDir: (id: string) => pluginDirImpl(id),
@@ -287,6 +294,7 @@ beforeEach(() => {
   ).__pacoPluginStartLocks = undefined;
   stopCalls = [];
   installCalls.length = 0;
+  installInstallerIds.length = 0;
   pluginDirImpl = (id) => `/plugins/${id}`;
   installBehavior = async () => ({
     ok: true,
@@ -394,6 +402,20 @@ describe("installPluginAction", () => {
     expect(installCalls).toEqual([
       { kind: "github", repo: "acme/widgets", ref: undefined },
     ]);
+  });
+
+  test("records the administrator from requireAdmin as the plugin's principal", async () => {
+    installBehavior = async () => ({
+      ok: true,
+      pluginId: "widgets",
+      requested: [],
+    });
+
+    await installPluginAction({ source: "acme/widgets" });
+
+    // Straight from the server session (`requireAdmin`'s return), not from
+    // `input` — the client cannot nominate whom a plugin will act as.
+    expect(installInstallerIds).toEqual(["admin-1"]);
   });
 
   test("surfaces an install failure as a value", async () => {

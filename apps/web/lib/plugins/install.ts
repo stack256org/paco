@@ -211,9 +211,19 @@ async function removeQuietly(dir: string): Promise<void> {
  * left half-installed: the fetch happens in a temp directory first, and a
  * failed re-install restores the previously installed copy rather than
  * deleting it.
+ *
+ * `installedBy` is REQUIRED, not optional, and it is what gives the
+ * installed plugin a security principal at all (`plugins.installedBy`,
+ * `lib/db/schema.ts`): capabilities that act inside a session authorize as
+ * the administrator who installed the plugin, so a row without one can do
+ * nothing. Every call site reaches this behind `requireAdmin`, so an
+ * administrator's id is always available; making the parameter mandatory
+ * means a future install path cannot quietly create a principal-less row
+ * that silently fails closed at runtime — it fails to compile instead.
  */
 export async function installPlugin(
   source: InstallSource,
+  installedBy: string,
 ): Promise<InstallResult> {
   const pluginsRoot = pluginsDir();
 
@@ -271,6 +281,7 @@ export async function installPlugin(
       finalDir,
       pluginId,
       manifest,
+      installedBy,
       sourceLabel:
         source.kind === "github"
           ? `github:${source.repo}${source.ref ? `#${source.ref}` : ""}`
@@ -295,9 +306,11 @@ async function commitInstall(params: {
   finalDir: string;
   pluginId: string;
   manifest: PluginManifest;
+  installedBy: string;
   sourceLabel: string;
 }): Promise<InstallResult> {
-  const { tempDir, finalDir, pluginId, manifest, sourceLabel } = params;
+  const { tempDir, finalDir, pluginId, manifest, installedBy, sourceLabel } =
+    params;
   const backupDir = `${finalDir}.bak-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   let hasBackup = false;
@@ -344,6 +357,7 @@ async function commitInstall(params: {
       manifest,
       grantedCapabilities: [],
       enabled: false,
+      installedBy,
     });
   } catch (error) {
     // Roll back the filesystem swap too: remove the newly-moved tree and
