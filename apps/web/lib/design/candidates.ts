@@ -92,6 +92,77 @@ function gitOutput(result: GitResult): string {
 }
 
 /**
+ * Re-derive nginx's preview routing after this chat's candidate worktrees
+ * changed on disk.
+ *
+ * nginx has no equivalent of Traefik's Docker-label auto-discovery, so
+ * `syncPreviewRoutes` (`lib/preview/nginx-reload.ts`) is the whole routing
+ * table — and it detects a candidate purely by `designs/<chatId>/<n>/`
+ * existing. Creating and removing those directories is what this module
+ * does, which makes it the one place that knows the routing input changed.
+ * Before this call existed, `syncPreviewRoutes` had a single production
+ * caller — cold sandbox provisioning — which necessarily runs *before* any
+ * candidate worktree exists, so no candidate route was ever written: every
+ * candidate iframe 404'd, the click-inspector `sub_filter` (injected only by
+ * the candidate server block) never ran, and with no annotations possible
+ * the Iterate button stayed disabled forever.
+ *
+ * Best-effort by construction. A host with no nginx (local dev, CI, a Docker
+ * Compose deployment) or a transient `sudo`/`nginx -t` failure must never be
+ * the reason a design turn fails or a chat cannot be deleted — the periodic
+ * reconciliation (`lib/preview/reconcile-job.ts`) re-runs the same
+ * derivation on its own schedule and will pick the change up regardless.
+ *
+ * Imported lazily so this module's own tests — and every caller that only
+ * wants the git lifecycle — do not pull a Postgres client and the instance
+ * settings in through `nginx-reload.ts`'s import graph.
+ */
+/**
+ * Free the ports this chat's candidate dev servers are holding.
+ *
+ * A candidate's dev server is started by the candidate's own agent turn and
+ * nothing in Paco has ever held a handle on it, so removing the worktree used
+ * to leave the process alive and the port occupied for the rest of the
+ * container's life — which then stopped the *next* design turn's candidate
+ * from binding it at all. Both mutating paths in this module therefore ask
+ * for the ports back: before the worktrees go away, and before fresh ones
+ * take their place.
+ *
+ * `stopCandidateDevServers` only ever kills a process whose working directory
+ * is inside this workspace's `designs/` tree, which is what keeps it from
+ * touching the chat's own dev server — those candidate ports are ordinary
+ * published ports the chat may legitimately be using. Lazily imported and
+ * fully best-effort for the same reasons as the route sync above.
+ */
+async function stopCandidateDevServersBestEffort(
+  chatId: string,
+  indexes: readonly (1 | 2 | 3)[],
+): Promise<void> {
+  try {
+    const { stopCandidateDevServersForChat } =
+      await import("@/lib/preview/candidate-dev-server");
+    await stopCandidateDevServersForChat({ chatId, indexes });
+  } catch (error) {
+    console.error(
+      `Failed to reclaim design candidate ports for chat ${chatId}:`,
+      error,
+    );
+  }
+}
+
+async function syncPreviewRoutesBestEffort(reason: string): Promise<void> {
+  try {
+    const { syncPreviewRoutes } = await import("@/lib/preview/nginx-reload");
+    await syncPreviewRoutes();
+  } catch (error) {
+    console.error(
+      `Failed to sync preview nginx routes after ${reason}:`,
+      error,
+    );
+  }
+}
+
+/**
  * Remove one candidate's worktree and branch, tolerating every way it could
  * already be gone (or never have been a proper worktree at all).
  *
@@ -149,6 +220,12 @@ export async function createCandidates(params: {
   // told) would otherwise block `worktree add`. A no-op in the healthy case.
   await git(["worktree", "prune"], repo);
 
+  // An earlier turn's dev server still holding candidate n's port would make
+  // this run's candidate n unreachable — the worktree would exist, nginx
+  // would route to the port, and the wrong (or a dead) app would answer.
+  const indexes = ALL_CANDIDATE_INDICES.filter((index) => index <= count);
+  await stopCandidateDevServersBestEffort(chatId, indexes);
+
   const candidates: DesignCandidate[] = [];
   for (let i = 1; i <= count; i++) {
     const index = i as 1 | 2 | 3;
@@ -169,6 +246,11 @@ export async function createCandidates(params: {
 
     candidates.push({ index, branch, worktreeDir });
   }
+
+  // After the loop, never inside it: a route is only written for a candidate
+  // whose directory is already on disk, so one sync at the end covers every
+  // candidate this call created rather than racing each one.
+  await syncPreviewRoutesBestEffort(`creating design candidates for ${chatId}`);
 
   return candidates;
 }
@@ -201,6 +283,10 @@ export async function removeCandidates(params: {
   const { sessionWorkspace, chatId } = params;
   const repo = repoDir(sessionWorkspace);
 
+  // First, while the worktrees are still on disk: a dev server outlives its
+  // worktree otherwise, holding 5173/4321/8000 until the container stops.
+  await stopCandidateDevServersBestEffort(chatId, ALL_CANDIDATE_INDICES);
+
   // Drops the registration for any candidate whose directory has already
   // been deleted out from under git, so a half-removed candidate does not
   // block the loop below.
@@ -215,21 +301,84 @@ export async function removeCandidates(params: {
     ["branch", "--list", `${designBranchPrefix(chatId)}*`],
     repo,
   );
-  if (!branchList.success) {
-    return;
+  if (branchList.success) {
+    const branches = branchList.stdout
+      .split("\n")
+      // `git branch --list` prefixes the checked-out branch with `*` and a
+      // branch checked out in another worktree with `+`; neither is part of
+      // the name.
+      .map((line) => line.replace(/^[*+]?\s*/, "").trim())
+      .filter(Boolean);
+
+    for (const branch of branches) {
+      await git(["branch", "-D", branch], repo);
+    }
   }
 
-  const branches = branchList.stdout
-    .split("\n")
-    // `git branch --list` prefixes the checked-out branch with `*` and a
-    // branch checked out in another worktree with `+`; neither is part of
-    // the name.
-    .map((line) => line.replace(/^[*+]?\s*/, "").trim())
-    .filter(Boolean);
+  // The worktrees are gone, so their `paco-preview-<slug>-d<n>.conf` files
+  // are now stale config pointing at a dead upstream. `syncPreviewRoutes`
+  // removes every `paco-preview-*.conf` it did not regenerate, so this one
+  // call is also the cleanup.
+  await syncPreviewRoutesBestEffort(`removing design candidates for ${chatId}`);
+}
 
-  for (const branch of branches) {
-    await git(["branch", "-D", branch], repo);
+/** One candidate worktree found on disk, with the chat it belongs to. */
+export interface CandidateWorktreeOnDisk {
+  chatId: string;
+  index: 1 | 2 | 3;
+  worktreeDir: string;
+}
+
+/**
+ * Every candidate worktree currently under a workspace's `designs/`, across
+ * all of its chats.
+ *
+ * Nothing used to be able to answer this. A process death inside the design
+ * step leaves candidate worktrees and branches behind, and the reaping
+ * subsystem classifies whole *workspaces* against the `sessions` table — a
+ * granularity at which a stray `designs/<chatId>/2/` inside a perfectly live
+ * workspace is invisible. `cleanupOrphanedCandidates` in the chat workflow
+ * only ever runs when the failure happened in-process, so the one case that
+ * actually loses the handle — the process going away — was the one case
+ * nothing covered.
+ *
+ * Directory presence is the signal, matching `createCandidates` /
+ * `removeCandidates` and `collectActivePreviewRoutes`'s own detection. Reads
+ * only; deciding what an orphan is needs the database and belongs to the
+ * caller (`lib/preview/reconcile-job.ts`).
+ */
+export async function listCandidateWorktrees(
+  sessionWorkspace: string,
+): Promise<CandidateWorktreeOnDisk[]> {
+  const designsRoot = path.posix.join(sessionWorkspace, DESIGNS_DIRNAME);
+
+  let chatDirs: string[];
+  try {
+    const entries = await fs.readdir(designsRoot, { withFileTypes: true });
+    chatDirs = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    // No `designs/` at all: a workspace that has never run a design turn.
+    return [];
   }
+
+  const found: CandidateWorktreeOnDisk[] = [];
+  for (const chatId of chatDirs) {
+    for (const index of ALL_CANDIDATE_INDICES) {
+      const worktreeDir = path.posix.join(designsRoot, chatId, String(index));
+      try {
+        const stats = await fs.stat(worktreeDir);
+        if (stats.isDirectory()) {
+          found.push({ chatId, index, worktreeDir });
+        }
+      } catch {
+        // Not created, or already removed.
+      }
+    }
+  }
+
+  return found;
 }
 
 /**

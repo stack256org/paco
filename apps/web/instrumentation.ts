@@ -17,6 +17,14 @@
  * whichever turn happens to ask first. `ensurePluginsStarted` never throws
  * (see its own doc comment), so a plugin failing to start here can never
  * take server boot down with it.
+ *
+ * And a fourth: the preview reconciliation sweep
+ * (`lib/preview/reconcile-job.ts`), which keeps nginx's generated preview
+ * routing in step with what is actually running and reclaims the ports and
+ * worktrees design candidates leave behind. An in-process timer rather than a
+ * pg-boss job, because everything it reconciles is state on THIS host — see
+ * its own doc comment. Nothing here awaits it: it schedules itself and
+ * swallows its own failures.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") {
@@ -47,4 +55,8 @@ export async function register() {
 
   const { ensurePluginsStarted } = await import("@/lib/plugins/registry");
   await ensurePluginsStarted();
+
+  const { startPreviewReconciliation } =
+    await import("@/lib/preview/reconcile-job");
+  startPreviewReconciliation();
 }

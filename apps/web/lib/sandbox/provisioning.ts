@@ -256,8 +256,17 @@ export async function provisionSessionSandbox(params: {
   // reconciling against it. Never on the critical path — a host with no
   // nginx (local dev, CI, a Docker Compose deployment mid-migration) or a
   // transient `sudo`/`nginx -t` hiccup must not stop a sandbox from coming
-  // up; the next sync (the next provision, or the periodic lifecycle sweep)
-  // will pick this session's preview up regardless.
+  // up.
+  //
+  // This used to claim "the periodic lifecycle sweep will pick this up",
+  // and no such sweep existed anywhere — so this call was the ONLY thing in
+  // production that ever ran `syncPreviewRoutes`, at the one moment no
+  // design candidate can exist yet (`provisioning-kick.ts` skips this
+  // function entirely when the sandbox is already up). Every candidate
+  // preview 404'd as a result. The sweep now exists for real:
+  // `startPreviewReconciliation` (`lib/preview/reconcile-job.ts`), started
+  // from `instrumentation.ts`, re-runs this same derivation every minute, so
+  // a failure here really is picked up later.
   void syncPreviewRoutes().catch((error) => {
     console.error(
       `Failed to sync preview nginx routes after provisioning session ${params.sessionId}:`,

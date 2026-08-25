@@ -13,6 +13,46 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
+/**
+ * The real production seam, mocked at the module boundary rather than
+ * injected: the bug this guards against was that NOTHING called
+ * `syncPreviewRoutes` after candidates appeared on disk, so a test that
+ * passed its own fake in would have kept passing while production stayed
+ * broken. Mocking the module means the assertions below exercise the
+ * default wiring itself.
+ */
+let syncPreviewRoutesCalls = 0;
+let syncPreviewRoutesFails = false;
+mock.module("@/lib/preview/nginx-reload", () => ({
+  syncPreviewRoutes: async () => {
+    syncPreviewRoutesCalls++;
+    if (syncPreviewRoutesFails) {
+      throw new Error("nginx -t failed");
+    }
+  },
+}));
+
+/**
+ * The other half of the same gap: a candidate's dev server outliving its
+ * worktree and holding the port the next design turn's candidate needs.
+ * Mocked at the module boundary for the same reason as the route sync.
+ */
+const stoppedDevServerCalls: Array<{
+  chatId: string;
+  indexes: readonly number[];
+}> = [];
+mock.module("@/lib/preview/candidate-dev-server", () => ({
+  stopCandidateDevServersForChat: async (params: {
+    chatId: string;
+    indexes?: readonly (1 | 2 | 3)[];
+  }) => {
+    stoppedDevServerCalls.push({
+      chatId: params.chatId,
+      indexes: params.indexes ?? [1, 2, 3],
+    });
+  },
+}));
+
 const {
   createCandidates,
   removeCandidates,
@@ -82,6 +122,9 @@ async function makeFixture(chatId: string): Promise<Fixture> {
 
 beforeEach(() => {
   fixtures = [];
+  syncPreviewRoutesCalls = 0;
+  syncPreviewRoutesFails = false;
+  stoppedDevServerCalls.length = 0;
 });
 
 afterEach(async () => {
@@ -436,5 +479,172 @@ describe("acceptCandidate", () => {
       `design/${chatId}/*`,
     ]);
     expect(branchList.trim()).not.toBe("");
+  });
+});
+
+/**
+ * The regression this whole file's newest assertions exist for.
+ *
+ * Every piece of candidate previewing shipped — the `-d<n>` hostname, the
+ * nginx candidate server block with its inspector `sub_filter`, the
+ * forward-auth branch — and none of it ever reached nginx, because
+ * `syncPreviewRoutes` had exactly one production call site: cold sandbox
+ * provisioning, which by definition runs before any `designs/<chatId>/<n>/`
+ * exists. Every candidate iframe 404'd, the inspector was never injected, so
+ * no annotation could ever be taken, so Iterate was permanently disabled.
+ *
+ * nginx's preview config is derived state whose only inputs are "which
+ * candidate worktrees exist" and "which candidate ports are published". The
+ * first input changes exactly here, so this is where the derivation has to be
+ * re-run.
+ */
+describe("preview route syncing", () => {
+  test("creating candidates syncs their preview routes", async () => {
+    const { root, chatId, chatBranch } = await makeFixture("sync1");
+
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 3,
+    });
+
+    expect(syncPreviewRoutesCalls).toBe(1);
+  });
+
+  test("the sync happens after the worktrees are on disk, not before", async () => {
+    const { root, chatId, chatBranch } = await makeFixture("sync2");
+    const seenAtSyncTime: boolean[] = [];
+
+    mock.module("@/lib/preview/nginx-reload", () => ({
+      syncPreviewRoutes: async () => {
+        syncPreviewRoutesCalls++;
+        seenAtSyncTime.push(
+          await exists(path.join(root, "designs", chatId, "2")),
+        );
+      },
+    }));
+
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+
+    // `collectActivePreviewRoutes` detects a candidate by its worktree
+    // directory existing, so a sync fired before `worktree add` would find
+    // nothing and write no route — the exact shape of the original bug.
+    expect(seenAtSyncTime).toEqual([true]);
+  });
+
+  test("removing candidates syncs, so the stale conf pointing at a dead upstream goes away", async () => {
+    const { root, chatId, chatBranch } = await makeFixture("sync3");
+
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+    syncPreviewRoutesCalls = 0;
+
+    await removeCandidates({ sessionWorkspace: root, chatId });
+
+    expect(syncPreviewRoutesCalls).toBe(1);
+  });
+
+  test("a failing sync never fails candidate creation", async () => {
+    const { root, chatId, chatBranch } = await makeFixture("sync4");
+    syncPreviewRoutesFails = true;
+
+    const candidates = await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+
+    expect(candidates).toHaveLength(2);
+    expect(await exists(candidates[0].worktreeDir)).toBe(true);
+  });
+
+  test("accepting a candidate syncs once the candidates are gone", async () => {
+    const { root, chatId, chatBranch, chatWorktree } =
+      await makeFixture("sync5");
+
+    const candidates = await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+    await fs.writeFile(
+      path.join(candidates[0].worktreeDir, "one.txt"),
+      "one\n",
+    );
+    await git(candidates[0].worktreeDir, ["add", "."]);
+    await git(candidates[0].worktreeDir, [
+      "-c",
+      "user.email=test@example.com",
+      "-c",
+      "user.name=Test",
+      "commit",
+      "-q",
+      "-m",
+      "Candidate 1",
+    ]);
+    syncPreviewRoutesCalls = 0;
+
+    const result = await acceptCandidate({
+      sessionWorkspace: root,
+      chatId,
+      index: 1,
+      chatBranch,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(await exists(path.join(chatWorktree, "one.txt"))).toBe(true);
+    // Through `removeCandidates`, which accept ends with — one sync, not two.
+    expect(syncPreviewRoutesCalls).toBe(1);
+  });
+});
+
+/**
+ * Nothing ever stopped a candidate's dev server. It is started by the
+ * candidate's own agent turn on the strength of a prompt sentence, so Paco
+ * never held a pid for it — and `rm -rf`'ing the worktree left the process
+ * alive, still holding 5173/4321/8000, for the rest of the container's life.
+ * The next design turn's candidate then could not bind its port and showed as
+ * unreachable with no error anywhere.
+ */
+describe("candidate dev server ports", () => {
+  test("removing candidates reclaims all three candidate ports first", async () => {
+    const { root, chatId, chatBranch } = await makeFixture("ports1");
+
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+    stoppedDevServerCalls.length = 0;
+
+    await removeCandidates({ sessionWorkspace: root, chatId });
+
+    expect(stoppedDevServerCalls).toEqual([{ chatId, indexes: [1, 2, 3] }]);
+  });
+
+  test("creating candidates reclaims the ports the new candidates need", async () => {
+    const { root, chatId, chatBranch } = await makeFixture("ports2");
+
+    await createCandidates({
+      sessionWorkspace: root,
+      chatId,
+      baseBranch: chatBranch,
+      count: 2,
+    });
+
+    expect(stoppedDevServerCalls).toEqual([{ chatId, indexes: [1, 2] }]);
   });
 });
