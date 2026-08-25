@@ -8,6 +8,14 @@ import { canTransition, nextOnReviewerVerdict } from "./state";
  * the Global Constraints machine verbatim, plus the two Task 8 edges this
  * task ships: `failed → todo` (retry) and `blocked → running` (human
  * unblock).
+ *
+ * `review → blocked` is part of that machine, not an extra: it is the
+ * terminating edge of the bounded rejection loop — `nextOnReviewerVerdict`
+ * returns `blocked` once the rejection cap is reached, and the reviewer gate
+ * performs exactly that transition. Without it the safety valve is an
+ * illegal edge, the gate's transition throws, and the task is stranded in
+ * `review` forever (no later turn can move it — `getTaskByChatId` only
+ * matches `running` — and the board renders no action for `review`).
  */
 const LEGAL_EDGES: ReadonlyArray<readonly [TaskStatus, TaskStatus]> = [
   ["todo", "running"],
@@ -17,6 +25,7 @@ const LEGAL_EDGES: ReadonlyArray<readonly [TaskStatus, TaskStatus]> = [
   ["running", "failed"],
   ["review", "failed"],
   ["review", "running"],
+  ["review", "blocked"],
   ["failed", "todo"],
   ["blocked", "running"],
 ];

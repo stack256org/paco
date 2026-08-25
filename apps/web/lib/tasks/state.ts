@@ -13,11 +13,20 @@ const MAX_REVIEWER_REJECTIONS = 2;
  * edges Task 8's UI needs and this task ships: `failed → todo` (a human
  * retry) and `blocked → running` (a human unblock). No other transitions
  * exist — a status never transitions to itself, and `done` is terminal.
+ *
+ * `review → blocked` is the other half of "`review → running` on reviewer
+ * rejection": that loop is BOUNDED (`nextOnReviewerVerdict`, capped at
+ * `MAX_REVIEWER_REJECTIONS`), and `blocked` is where it terminates — the one
+ * status a human can act on from the board. Leaving it out did not make the
+ * cap safer, it made it unreachable: the reviewer gate's transition threw
+ * `TaskTransitionError`, the gate logged it as a race, and the task sat in
+ * `review` forever with no later turn able to move it (`getTaskByChatId`
+ * only matches `running`) and no button to press.
  */
 const LEGAL_TRANSITIONS: Record<TaskStatus, ReadonlySet<TaskStatus>> = {
   todo: new Set(["running"]),
   running: new Set(["review", "blocked", "failed"]),
-  review: new Set(["done", "running", "failed"]),
+  review: new Set(["done", "running", "blocked", "failed"]),
   blocked: new Set(["running"]),
   failed: new Set(["todo"]),
   done: new Set(),

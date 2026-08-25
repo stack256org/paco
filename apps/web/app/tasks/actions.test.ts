@@ -91,7 +91,7 @@ let transitionCalls: Array<{
 const LEGAL: Record<string, string[]> = {
   todo: ["running"],
   running: ["review", "blocked", "failed"],
-  review: ["done", "running", "failed"],
+  review: ["done", "running", "blocked", "failed"],
   blocked: ["running"],
   failed: ["todo"],
   done: [],
