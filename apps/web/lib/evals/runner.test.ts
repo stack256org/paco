@@ -469,6 +469,40 @@ describe("runEvalScenario", () => {
     expect(deleteChatMock).not.toHaveBeenCalled();
   });
 
+  test("session has no sandbox after the turn completes: yields error and still appends eval/finished", async () => {
+    // The chat was created and the turn ran, but by the time it finished
+    // the session carries no sandbox state to check assertions against —
+    // the chat still exists, so eval/finished must still be recorded on it.
+    sessionRow = {
+      userId: "user-1",
+      status: "running",
+      sandboxState: null,
+    };
+
+    const result = await runEvalScenario({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      scenario: makeScenario(),
+    });
+
+    expect(result.status).toBe("error");
+    expect(finishCalls[0]?.details.harnessError).toContain("no sandbox");
+    expect(appendedEvents).toEqual([
+      {
+        chatId: "eval-chat-1",
+        events: [
+          {
+            type: "eval/finished",
+            evalRunId: "eval-run-1",
+            scenarioName: "smoke",
+            status: "error",
+          },
+        ],
+      },
+    ]);
+    expect(deleteChatMock).toHaveBeenCalledTimes(1);
+  });
+
   test("an unexpected exception still cleans up the throwaway chat and yields error", async () => {
     sessionEventsThrows = new Error("event log unavailable");
 

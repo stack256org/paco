@@ -114,6 +114,12 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
   if (!row) {
     throw new Error("createTask: insert returned no row");
   }
+  // A no-op today, deliberately: `CreateTaskInput` has no `chatId` field,
+  // so `row.chatId` is always null right here — a task only ever gets a
+  // chat later, via `transitionTaskStatus`'s `patch.chatId` (see
+  // `startTask` in `lib/tasks/start.ts`). This call exists anyway so the
+  // event fires automatically the moment (if ever) a caller creates a task
+  // with a chat already attached — do not "clean this up" as dead code.
   await appendTaskLifecycleEvent(row.chatId, {
     type: "task/created",
     taskId: row.id,

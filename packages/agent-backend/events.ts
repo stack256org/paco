@@ -52,7 +52,10 @@ export type TurnPolicy = z.infer<typeof turnPolicySchema>;
 /**
  * Mirrors apps/web's `TASK_STATUSES` (`lib/db/schema.ts`). This package has
  * no dependency on the web app, so the values are duplicated here rather
- * than imported — keep the two lists in sync by hand.
+ * than imported. A compile-time guard on the app side
+ * (`apps/web/lib/db/session-event-enum-guards.ts`) fails the app's
+ * typecheck if this list and `TASK_STATUSES` ever disagree — update both
+ * together.
  */
 const taskStatusSchema = z.enum([
   "todo",
@@ -63,7 +66,12 @@ const taskStatusSchema = z.enum([
   "failed",
 ]);
 
-/** Mirrors apps/web's `TASK_ORIGINS` (`lib/db/schema.ts`) — see above. */
+/**
+ * Mirrors apps/web's `TASK_ORIGINS` (`lib/db/schema.ts`) — see the
+ * `taskStatusSchema` comment above; the same
+ * `apps/web/lib/db/session-event-enum-guards.ts` guard covers this pair
+ * too.
+ */
 const taskOriginSchema = z.enum([
   "user",
   "planner",
@@ -72,9 +80,13 @@ const taskOriginSchema = z.enum([
   "reflection",
 ]);
 
-/** An eval run's terminal statuses — mirrors `Exclude<EvalRunStatus, "running">`
+/**
+ * An eval run's terminal statuses — mirrors `Exclude<EvalRunStatus, "running">`
  * from apps/web's `lib/db/schema.ts` (excluding `"running"`: only a
- * finished run is ever logged). */
+ * finished run is ever logged). Also guarded against drift by
+ * `apps/web/lib/db/session-event-enum-guards.ts` — see the
+ * `taskStatusSchema` comment above.
+ */
 const evalRunFinishedStatusSchema = z.enum(["passed", "failed", "error"]);
 
 /**
