@@ -67,6 +67,12 @@ export function buildChatEnvironmentDetails(params: {
  * enabled/valid filtering (a disabled or invalid row never reaches the
  * returned record), so nothing further is filtered here.
  *
+ * `organizationId` is optional: plugin agents don't need one (they come from
+ * disk, keyed by filename), only the roster half does. A caller that hasn't
+ * resolved an organisation yet (a fresh self-hosted install, or a failed
+ * lookup) still gets plugin contributions rather than losing agents entirely
+ * — only the roster half is skipped, not the whole merge.
+ *
  * `DEFAULT_AGENTS` (`@paco/claude-code`) is not merged in here — it stays the
  * package-level fallback `resolveAgents` (`lib/agent/run-step.ts`) reaches
  * for when a caller passes no `agents` at all, and the seed source
@@ -75,11 +81,11 @@ export function buildChatEnvironmentDetails(params: {
  * that fallback is reached only when this call itself fails upstream.
  */
 export async function resolveChatAgents(
-  organizationId: string,
+  organizationId: string | undefined,
 ): Promise<Record<string, ClaudeAgentDefinition>> {
   const [pluginAgents, roster] = await Promise.all([
     pluginAgentContributions(),
-    getRoster(organizationId),
+    organizationId ? getRoster(organizationId) : Promise.resolve({}),
   ]);
   return { ...pluginAgents, ...roster };
 }

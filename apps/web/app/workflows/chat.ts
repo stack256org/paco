@@ -1315,9 +1315,10 @@ const runAgentStep = async (
         organizationId: organization?.id,
         prompt,
       });
-      if (organization) {
-        resolvedAgents = await resolveChatAgents(organization.id);
-      }
+      // `resolveChatAgents` treats `organizationId` as optional — plugin
+      // agent contributions don't need one, only the roster half does — so
+      // this always runs rather than being gated on `organization` existing.
+      resolvedAgents = await resolveChatAgents(organization?.id);
       resolvedSkills = await resolveChatSkills(agentOptions.skills ?? []);
     } catch (error) {
       console.error(
@@ -1340,6 +1341,10 @@ const runAgentStep = async (
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(githubToken ? { githubToken } : {}),
       chatId,
+      // `chat` was already read above (for `turnPolicy`); reusing it here
+      // means this turn runs on whichever backend the chat is actually set
+      // to, resolved via `resolveBackend` (`backend-factory.ts`).
+      chatBackend: chat?.backend,
       approval: { url: approvalUrl, token: approvalToken() },
       abortSignal: abortController.signal,
       ...(steerController ? { steerController } : {}),

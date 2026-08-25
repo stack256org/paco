@@ -723,6 +723,18 @@ describe("runAgentWorkflow", () => {
     expect(call.sessionRepoDir).toBeUndefined();
   });
 
+  test("still resolves plugin/roster agents when there is no organisation", async () => {
+    // `resolveChatAgents` treats the organisation id as optional (plugin
+    // agents don't need one); this turn step must call it either way rather
+    // than skipping agent resolution entirely when `getOrganization()` comes
+    // back empty.
+    organizationRecord = null;
+
+    await runAgentWorkflow(makeOptions());
+
+    expect(resolveChatAgentsSpy).toHaveBeenCalledWith(undefined);
+  });
+
   test("gates task completion after auto-PR and before memory distillation", async () => {
     await runAgentWorkflow(makeOptions());
 

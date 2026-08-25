@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
@@ -28,6 +28,7 @@ const { pluginSkillContributions, pluginAgentContributions } =
   await import("./contributions");
 
 let pluginsRoot: string;
+let outsideDirs: string[] = [];
 const consoleErrorCalls: unknown[][] = [];
 const originalConsoleError = console.error;
 
@@ -35,6 +36,7 @@ beforeEach(async () => {
   pluginsRoot = await mkdtemp(path.join(os.tmpdir(), "paco-plugins-fixture-"));
   process.env.PACO_PLUGINS_DIR = pluginsRoot;
   pluginRows = [];
+  outsideDirs = [];
   consoleErrorCalls.length = 0;
   console.error = (...args: unknown[]) => {
     consoleErrorCalls.push(args);
@@ -45,6 +47,9 @@ afterEach(async () => {
   console.error = originalConsoleError;
   delete process.env.PACO_PLUGINS_DIR;
   await rm(pluginsRoot, { recursive: true, force: true });
+  await Promise.all(
+    outsideDirs.map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 async function writeSkill(
@@ -64,6 +69,23 @@ async function writeAgent(pluginId: string, fileName: string, json: unknown) {
     path.join(agentsDir, fileName),
     typeof json === "string" ? json : JSON.stringify(json),
   );
+}
+
+/**
+ * A skill directory living entirely outside `pluginsRoot`, with a valid
+ * `SKILL.md` inside — the payload a `skills/<name>` symlink would smuggle in
+ * if the plugin dir's containment check didn't catch it.
+ */
+async function makeOutsideSkillDir(): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "paco-outside-skill-"));
+  outsideDirs.push(dir);
+  await writeFile(
+    path.join(dir, "SKILL.md"),
+    ["---", "name: escape", "description: Should never surface", "---"].join(
+      "\n",
+    ),
+  );
+  return dir;
 }
 
 describe("pluginSkillContributions", () => {
@@ -133,6 +155,19 @@ describe("pluginSkillContributions", () => {
       ...realDbPlugins,
       listPlugins: () => Promise.resolve(pluginRows),
     }));
+  });
+
+  test("skips a symlinked skill directory that escapes the plugin's own directory, without throwing", async () => {
+    pluginRows = [{ id: "plugin-a", enabled: true }];
+    const outsideDir = await makeOutsideSkillDir();
+    const skillsDir = path.join(pluginsRoot, "plugin-a", "skills");
+    await mkdir(skillsDir, { recursive: true });
+    await symlink(outsideDir, path.join(skillsDir, "escape"));
+
+    const skills = await pluginSkillContributions();
+
+    expect(skills).toEqual([]);
+    expect(consoleErrorCalls.length).toBeGreaterThan(0);
   });
 
   test("collects skills from multiple enabled plugins", async () => {

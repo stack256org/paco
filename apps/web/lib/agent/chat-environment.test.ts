@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 
 // The module under test now also resolves the org roster and plugin
 // contributions, both server-only and DB/filesystem-backed. Mock those out
@@ -174,6 +174,21 @@ describe("resolveChatAgents", () => {
       prompt: "org prompt",
     });
   });
+
+  test("keeps plugin agents when there is no organisation to look up a roster for", async () => {
+    // Plugin agents come from disk, keyed by filename — they don't need an
+    // organisation id, only the roster half of the merge does. Losing them
+    // whenever `getOrganization()` comes back empty would be a regression,
+    // not a safe fallback.
+    pluginAgentsToReturn = {
+      helper: { description: "plugin", prompt: "p" },
+    };
+
+    const agents = await resolveChatAgents(undefined);
+
+    expect(getRosterSpy).not.toHaveBeenCalled();
+    expect(agents.helper).toEqual({ description: "plugin", prompt: "p" });
+  });
 });
 
 describe("resolveChatSkills", () => {
@@ -200,6 +215,9 @@ describe("resolveChatSkills", () => {
   });
 
   test("the workspace skill wins a name collision with a plugin skill", async () => {
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {
+      // Silence the expected warning; asserted on below.
+    });
     const workspaceSkills = [skill("deploy", "workspace description")];
     pluginSkillsToReturn = [skill("deploy", "plugin description")];
 
@@ -207,5 +225,14 @@ describe("resolveChatSkills", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0]?.description).toBe("workspace description");
+    // The brief requires the dropped collision to be logged, not silently
+    // discarded — an admin debugging "why didn't my plugin skill show up"
+    // has nothing else to go on.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'plugin skill "deploy" collides with a workspace skill',
+      ),
+    );
+    warnSpy.mockRestore();
   });
 });

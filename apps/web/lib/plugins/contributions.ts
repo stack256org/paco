@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { Dirent } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import type { ClaudeAgentDefinition } from "@paco/claude-code";
 import {
@@ -38,16 +38,73 @@ async function enabledPluginIds(): Promise<string[]> {
   return rows.filter((row) => row.enabled).map((row) => row.id);
 }
 
+/**
+ * Whether `candidate` resolves (after symlinks) to somewhere under `root`.
+ *
+ * A plugin's `skills/<name>` entry can be a symlink — nothing stops one from
+ * pointing outside the plugin's own installed directory, at an arbitrary path
+ * on the host. Reading through it would let an installed-but-unprivileged
+ * plugin surface a skill sourced from anywhere the process can read, so every
+ * skill directory is realpath-resolved and checked against the plugin's own
+ * (also realpath-resolved) root before its `SKILL.md` is read.
+ *
+ * Note: `packages/sandbox/skills/discovery.ts`'s `discoverSkills` (workspace
+ * skills) has the same gap and does not get this check here — tracked
+ * separately.
+ */
+function isContainedIn(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
 /** One plugin's `skills/<name>/SKILL.md` entries, parsed with the same frontmatter parser the sandbox workspace uses. */
 async function skillsForPlugin(pluginId: string): Promise<SkillMetadata[]> {
-  const skillsRoot = path.join(pluginDir(pluginId), "skills");
+  const root = pluginDir(pluginId);
+  const skillsRoot = path.join(root, "skills");
+  // A symlinked entry reports `isDirectory() === false` (Dirent reflects the
+  // link itself, not its target), so `isSymbolicLink()` entries are kept
+  // here too — otherwise a symlink escaping the plugin's directory would be
+  // silently dropped before the containment check below ever saw it.
   const entries = (await readDirSafe(skillsRoot))
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
     .sort((a, b) => a.name.localeCompare(b.name));
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    // The plugin directory itself doesn't exist or isn't readable: nothing
+    // to contribute, and nothing to have escaped through either.
+    return [];
+  }
 
   const skills: SkillMetadata[] = [];
   for (const entry of entries) {
     const skillDir = path.join(skillsRoot, entry.name);
+
+    let realSkillDir: string;
+    try {
+      realSkillDir = await realpath(skillDir);
+    } catch {
+      // Vanished between the readdir above and here: not a skill slot entry.
+      continue;
+    }
+
+    if (!isContainedIn(realRoot, realSkillDir)) {
+      console.error(
+        "pluginSkillContributions: skill directory escapes the plugin's own directory (symlink?), skipping",
+        { pluginId, skillDir, resolved: realSkillDir },
+      );
+      continue;
+    }
+
     const skillFile = path.join(skillDir, "SKILL.md");
 
     let content: string;
