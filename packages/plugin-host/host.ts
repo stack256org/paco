@@ -1,9 +1,14 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import {
+  type ChildProcessWithoutNullStreams,
+  execFile,
+  spawn,
+} from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
 import { checkFetchAllowed } from "./net-allowlist.ts";
 import {
@@ -37,6 +42,17 @@ const MAX_LOGS_PER_SECOND = 50;
 
 /** Plugin ids, per the plan. Mirrors the plugin-kit manifest rule. */
 const PLUGIN_ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
+
+/**
+ * The oldest Node that may run a hardened plugin worker.
+ *
+ * Node >= 24 gates network sockets inside the permission model, so it is the
+ * backstop behind `worker-preload.ts`. On 22.x there is no such gate and the
+ * in-process allowlist is the ONLY barrier between a plugin and the network —
+ * a position three adversarial reviews have now shown to be one missed name
+ * away from failing. 22.x is out of support for hardened plugins.
+ */
+const MIN_HARDENED_NODE_MAJOR = 24;
 
 /** Bounds on the pre-flight scan of a plugin directory. */
 const MAX_PLUGIN_ENTRIES = 20_000;
@@ -149,12 +165,16 @@ interface PendingToolCall {
  *   `assertPluginTreeIsContained`. This runs in BOTH modes.
  * - **No subprocesses, workers or native addons.** `--allow-child-process`,
  *   `--allow-worker` and `--allow-addons` are deliberately not passed.
- * - **No network.** On Node >= 24 the permission model gates sockets; on
- *   22.x it does not, and `worker-preload.ts` is then the only barrier. It
- *   deletes the network globals, refuses to resolve `node:net` and friends,
- *   AND guards `process.getBuiltinModule` / `process.binding`, which reach
- *   builtins without going through module resolution at all. The only
- *   sanctioned way out is the `net:fetch` capability, allowlisted here.
+ * - **No network.** The permission model on Node >= 24 gates sockets, and
+ *   `start()` refuses to run hardened on anything older. Behind that,
+ *   `worker-preload.ts` deletes the network globals and confines plugin code
+ *   to a small ALLOWLIST of builtins — `fs`, `path`, `crypto` and a dozen
+ *   more — closing both routes to a builtin: module resolution, and
+ *   `process.getBuiltinModule` / `process.binding`, which skip resolution
+ *   entirely. Nothing is denied by name, so unknown, underscore-prefixed and
+ *   future builtins are refused by default; a denylist here leaked
+ *   `_tls_wrap` and `_http_client`. The only sanctioned way out is the
+ *   `net:fetch` capability, allowlisted here.
  * - **No unbounded anything.** Line length, stderr, in-flight capability
  *   requests, log rate, tool count and tool-call duration are all capped.
  *
@@ -282,6 +302,7 @@ export class PluginHost {
 
     await mkdir(this.stateDir, { recursive: true });
     try {
+      await this.assertRuntimeIsSupported();
       await this.resolveRealPaths();
       await this.assertPluginTreeIsContained();
     } catch (error) {
@@ -486,6 +507,33 @@ export class PluginHost {
   }
 
   /**
+   * Refuses to run a hardened worker on a runtime whose permission model does
+   * not gate sockets.
+   *
+   * The check is on the binary that will actually be spawned, not on the
+   * host's own runtime, because `nodeExecutable` is exactly the thing an
+   * embedder gets wrong. Anything whose version cannot be read is refused too:
+   * an unrecognized runtime is not evidence of a supported one.
+   */
+  private async assertRuntimeIsSupported(): Promise<void> {
+    if (!this.hardened) {
+      return;
+    }
+    const major = await detectRuntimeMajorVersion(this.nodeExecutable);
+    if (major === undefined) {
+      throw new Error(
+        `plugin ${this.pluginId} cannot start: the version of ${this.nodeExecutable} could not be determined, and a hardened plugin worker requires Node >= ${MIN_HARDENED_NODE_MAJOR}`,
+      );
+    }
+    if (major < MIN_HARDENED_NODE_MAJOR) {
+      throw new Error(
+        `plugin ${this.pluginId} cannot start: ${this.nodeExecutable} is Node ${major}, and a hardened plugin worker requires Node >= ${MIN_HARDENED_NODE_MAJOR} — older releases do not gate network sockets in the permission model, which would leave the in-process module allowlist as the only barrier`,
+      );
+    }
+  }
+
+  /**
+   * Refuses to start a plugin whose directory can reach outside itself.  /**
    * Refuses to start a plugin whose directory can reach outside itself.
    *
    * Node's permission model allows a path prefix, and it FOLLOWS symlinks
@@ -972,6 +1020,39 @@ async function realpathOrSelf(target: string): Promise<string> {
   } catch {
     return target;
   }
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Major version of a runtime binary, or `undefined` if it cannot be read.
+ *
+ * Cached per executable: a host that restarts plugins repeatedly should not
+ * spawn a probe every time. Note that a non-Node runtime answers with its own
+ * version — bun reports `1.x` — which fails the floor check, as it should.
+ */
+const runtimeMajorCache = new Map<string, number | undefined>();
+
+async function detectRuntimeMajorVersion(
+  executable: string,
+): Promise<number | undefined> {
+  const cached = runtimeMajorCache.get(executable);
+  if (cached !== undefined || runtimeMajorCache.has(executable)) {
+    return cached;
+  }
+
+  let major: number | undefined;
+  try {
+    const { stdout } = await execFileAsync(executable, ["-v"], {
+      timeout: 10_000,
+    });
+    const match = /^v?(\d+)\./.exec(stdout.trim());
+    major = match?.[1] === undefined ? undefined : Number(match[1]);
+  } catch {
+    major = undefined;
+  }
+  runtimeMajorCache.set(executable, major);
+  return major;
 }
 
 /** Real path of `target`, or `target` itself when it cannot be resolved. */

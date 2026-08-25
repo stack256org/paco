@@ -8,27 +8,44 @@ claim here that no test proves.
 Plugin code runs in a separate OS process — never in the Next.js process, never
 in a request handler. What follows describes that process.
 
-Two adversarial reviews have found real escapes from earlier versions of this
-design. Both are fixed and regression-tested; both are described below, because
-the shape of a past escape is the best guide to what this boundary is worth.
+Three adversarial reviews have found real escapes from earlier versions of this
+design. All three are fixed and regression-tested. They are listed here rather
+than buried, because the shape of a past escape is the best guide to what this
+boundary is worth — and all three had the same shape.
+
+| Escape | What it did | What it changed |
+| --- | --- | --- |
+| **Symlink read** | A plugin shipping `escape -> /` read `/etc/hosts`, Paco's source, and the operator's home directory — the permission model follows links that live under an allowed prefix. Reproduced on Node 26.7.0 with the allowlist correctly applied. | `start()` now refuses any plugin tree containing a symbolic link. |
+| **`getBuiltinModule`** | `process.getBuiltinModule("node:net")` returned a working `net` on both 22.21.1 and 26.7.0, bypassing the module resolve hook entirely — it never goes through resolution. On 22.21.1 it opened a real TCP connection to the internet. | The accessor is now guarded, alongside `process.binding`. |
+| **Socket-capable internals** | `_tls_wrap.connect(...)` and `import("_http_client")` gave a plugin holding **no network grant** a real TLS connection returning `HTTP/1.1 200 OK` on 22.21.1. `_tls_wrap`, `_http_client`, `_http_agent`, `_http_server`, `_http_outgoing`, `_http_common` and `_stream_wrap` were all reachable by both routes in both forms, and none were on the denylist. | Both gates became **allowlists**, and Node >= 24 became a hard floor. |
+
+The common shape: containment expressed as a denylist of named things, against
+a surface larger than any hand-maintained list. That is why the module gates
+are allowlists now.
 
 ## Required runtime
 
-| | |
-| --- | --- |
-| **Minimum** | Node 22.15 — the release with synchronous `module.registerHooks` |
-| **Recommended, and what production must pin** | **Node >= 24** |
+**Hardened plugin workers require Node >= 24. The host refuses to start on
+anything older** — `PluginHost.start()` reads the version of the binary you
+pass as `nodeExecutable` and rejects with a clear error below 24, or when the
+version cannot be read at all.
 
-The difference is not cosmetic. Node >= 24 gates network sockets inside the
-permission model, so a plugin that somehow obtained a socket API still cannot
-connect. **On Node 22.x there is no socket gate**, and the JavaScript-level
-denial described below is the *only* barrier between a plugin and the network.
-It is a good barrier — it is tested, and it holds against every route the
-reviews found — but it lives in the same VM as the plugin, and that is a weaker
-position than a runtime gate. No `--allow-net` is ever passed.
+This is a hard floor, not a recommendation. Node >= 24 gates network sockets
+inside the permission model, and that gate is the backstop behind everything in
+this file. On Node 22.x there is no socket gate, so the in-process module
+allowlist would be the *only* barrier between a plugin and the network — a
+position three adversarial reviews have now shown to be one missed name away
+from failing. **Node 22.x is out of support for hardened plugins.**
 
-The containment test suite runs against both tiers when both are installed, and
-says loudly which tiers it could not verify.
+Node 22.15 remains the floor for the *preload itself* (the release with
+synchronous `module.registerHooks`), and the test suite still exercises the
+allowlist on a 22.x binary when one is installed, precisely because that is the
+tier where it would have to stand alone. But the host will not run a plugin
+there.
+
+No `--allow-net` is ever passed, on any version.
+
+The test suite says loudly which tiers it could not verify.
 
 ## What IS enforced
 
@@ -85,29 +102,55 @@ everything else here.
 
 ### No network except through a consented allowlist
 
-On Node 22.x the permission model does not cover sockets, so the worker closes
-that gap itself, in `worker-preload.ts`, before any plugin code loads. Four
-layers, because the first two alone had a hole:
+The runtime's socket gate (Node >= 24) is the outer barrier. Inside it,
+`worker-preload.ts` runs before any plugin code and confines what plugin code
+can even reach:
 
 1. `fetch`, `WebSocket`, `XMLHttpRequest` and `EventSource` are deleted from
    `globalThis`.
-2. A synchronous resolve hook refuses `net`, `http`, `https`, `http2`, `tls`,
-   `dns`, `dgram`, `child_process`, `worker_threads`, `cluster`, `vm`,
-   `inspector`, `repl`, `wasi` and `module` — in both prefixed and unprefixed
-   forms — for any importer outside this package. `module` is on the list
-   because without it a plugin could unregister the hook or build its own
-   resolver.
-3. **`process.getBuiltinModule` is replaced by a guarded version.** This one is
-   not defence in depth — it is load-bearing. `getBuiltinModule` hands back a
-   builtin *without going through module resolution*, so the resolve hook never
-   sees it. On Node 22.21.1, under a correct `--permission` allowlist, a plugin
-   used it to obtain a working `net` and **open a real TCP connection to the
-   internet**. The replacement throws for the same denied list.
-4. `process.binding` and `process._linkedBinding` — the deprecated back doors to
-   the same native bindings — are neutralized.
+2. **Plugin code may load only an allowlist of builtins**: `assert`, `buffer`,
+   `crypto`, `events`, `fs`, `fs/promises`, `os`, `path`, `querystring`,
+   `stream`, `stream/promises`, `string_decoder`, `timers`, `timers/promises`,
+   `url`, `util`, `zlib` — and their `node:` forms. **Nothing is denied by
+   name.** Every other builtin is refused by default: `net` and `http`, the
+   underscore-prefixed internals, modules nobody here has heard of, and
+   builtins that future Node releases will add. `fs` is on the list and is
+   harmless there, because Node's permission model confines it independently to
+   the plugin's own directory and state directory.
+3. Both routes to a builtin are gated, because there are two and they are
+   independent:
+   - **Module resolution** — a synchronous resolve hook. It asks Node to
+     resolve first and then checks the *resolved* url, so Node itself
+     identifies what is a builtin; this file keeps no list of them.
+   - **`process.getBuiltinModule(id)`** — which does *not* go through
+     resolution and so is invisible to the hook. This is not defence in depth,
+     it is load-bearing: on Node 22.21.1 a plugin used it to obtain a working
+     `net` and open a real TCP connection to the internet.
+   `process.binding` and `process._linkedBinding`, the deprecated back doors to
+   the same native bindings, are neutralized too.
+4. Specifiers are normalized before the check, and normalization fails
+   **closed**: non-strings, anything containing whitespace or a control
+   character, and malformed paths are refused rather than repaired. The input
+   is never trimmed — `"node:fs "` is refused, not read as `"fs"`.
 
-Layers 3 and 4 install non-configurable, non-writable properties; plugin code
-cannot `defineProperty` or assign the originals back. Both facts are tested.
+The guards install non-configurable, non-writable properties; plugin code can
+neither reassign them nor `defineProperty` the originals back. Every claim in
+this section is covered by a test, on each Node tier that is installed.
+
+### Why an allowlist
+
+Three adversarial reviews found three escapes here, and all three were the same
+mistake: containment expressed as a denylist of named modules. Node's builtin
+surface is larger than any hand-maintained list and grows every release. The
+third review settled it — `_tls_wrap`, `_http_client`, `_http_agent`,
+`_http_server`, `_http_outgoing`, `_http_common` and `_stream_wrap` are all
+socket-capable, all were reachable by both routes in both forms, and none of
+them were on the list. A plugin holding no network grant opened a TLS connection
+and got back `HTTP/1.1 200 OK`.
+
+Adding to the allowlist is a security decision. Justify it in a comment next to
+the entry, and check the module cannot reach the network — directly, or by
+handing out a handle that can.
 
 The only sanctioned way out is the `net:fetch` capability. The host checks every
 request against the **operator's consented domain list** (from the database,
@@ -162,11 +205,17 @@ Be precise about this. The consent screen must not imply otherwise.
   host OOMs. The timeouts above bound how long the *host waits*, not how long the
   worker runs; a hung worker is only actually killed at `stop()`. There is no
   disk quota on the state directory either.
-- **The network denial is in-process on Node 22.x.** Two reviews have now found
-  routes around parts of it, and both were fixed after the fact. On Node >= 24
-  the runtime's socket gate stands behind it; on 22.x nothing does. Run >= 24,
-  and do not run a plugin you believe to be actively malicious and expect the
-  network to hold on 22.x.
+- **The in-process allowlist is not the last line of defence, and must not be
+  treated as one.** Three reviews found three routes around earlier denylist
+  versions of it. It is now an allowlist, which closes that whole class rather
+  than one instance — but it still lives in the same VM as the plugin, which is
+  why the host refuses to run below Node 24, where the runtime's socket gate
+  stands behind it.
+- **Allowed builtins still leak host metadata.** `os` is on the allowlist, so a
+  plugin can read the hostname, the CPU list, the user's name and
+  `os.networkInterfaces()` — including internal IP addresses. None of that
+  reaches the network by itself, but it is reconnaissance a plugin can perform
+  and later exfiltrate through a granted `net:fetch` domain.
 - **SSRF is only half-prevented here.** The host checks the URL string. It cannot
   see where DNS resolves or where a redirect goes. The `net:fetch` handler is
   *required* to fetch with `redirect: "manual"`, re-check every hop with
@@ -184,14 +233,14 @@ Be precise about this. The consent screen must not imply otherwise.
 ## The non-hardened mode
 
 `PluginHostOptions.hardened` defaults to `true` and must stay true wherever real
-plugin code runs. Setting it to `false` drops `--permission` and the network
-preload entirely, leaving an ordinary process with full filesystem and network
-access. It exists for one reason: this package's own tests run under bun, which
-has no permission model.
+plugin code runs. Setting it to `false` drops `--permission`, the network
+preload, and the Node >= 24 floor check, leaving an ordinary process with full
+filesystem and network access. It exists for one reason: this package's own
+tests run under bun, which has no permission model.
 
 The symlink refusal is **not** part of hardened mode — it runs in the host on
 every start, in both modes.
 
-Production must also pass `nodeExecutable` pointing at a real Node (see
-"Required runtime"). Under bun, `process.execPath` is bun, which would reject
-`--permission` outright.
+Production must also pass `nodeExecutable` pointing at a real Node >= 24 (see
+"Required runtime"). Under bun, `process.execPath` is bun, which reports major
+version 1 and is refused by the floor check before any spawn happens.

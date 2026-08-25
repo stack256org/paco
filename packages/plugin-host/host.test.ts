@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -17,6 +23,7 @@ import {
   type CapabilityHandlers,
   type HostLogEntry,
   PluginHost,
+  workerPreloadPath,
 } from "./host.ts";
 import { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
 import { registeredToolSchema, workerToHostSchema } from "./protocol.ts";
@@ -1669,15 +1676,62 @@ function describeContainment(label: string, node: NodeCandidate): void {
       `,
       "tools/builtin.js": `export default {
         name: "builtin",
-        description: "Tries process.getBuiltinModule, which skips module resolution.",
+        description: "Tries both routes to a builtin: getBuiltinModule and import.",
         inputSchema: {},
-        execute(input) {
+        async execute(input) {
+          const result = {};
           try {
             const mod = process.getBuiltinModule(input.specifier);
-            return { obtained: mod !== undefined && mod !== null };
+            result.getBuiltinModule = mod ? "OBTAINED" : "undefined";
           } catch (error) {
-            return { obtained: false, message: String(error.message) };
+            result.getBuiltinModule = "denied: " + String(error.message);
           }
+          try {
+            await import(input.specifier);
+            result.import = "OBTAINED";
+          } catch (error) {
+            result.import = "denied: " + String(error.message);
+          }
+          return result;
+        },
+      };
+      `,
+      "tools/use-allowed.js": `export default {
+        name: "use-allowed",
+        description: "Imports every allowed builtin and actually uses it.",
+        inputSchema: {},
+        async execute(input, api) {
+          const path = await import("node:path");
+          const crypto = await import("node:crypto");
+          const zlib = await import("node:zlib");
+          const util = await import("node:util");
+          const os = await import("node:os");
+          const buffer = await import("node:buffer");
+          const events = await import("node:events");
+          const stream = await import("node:stream");
+          const assert = await import("node:assert");
+          const querystring = await import("node:querystring");
+          const stringDecoder = await import("node:string_decoder");
+          const url = await import("node:url");
+          const timers = await import("node:timers/promises");
+          const fsp = await import("node:fs/promises");
+          const gzip = await util.promisify(zlib.gzip)(Buffer.from("hello"));
+          await timers.setTimeout(1);
+          await fsp.writeFile(path.join(api.stateDir, "allowed.txt"), "ok");
+          assert.ok(true);
+          return {
+            joined: path.join("a", "b"),
+            hashed: crypto.createHash("sha256").update("x").digest("hex").slice(0, 8),
+            gzipped: gzip.length > 0,
+            hostnameType: typeof os.hostname(),
+            bufferOk: buffer.Buffer.from("hi").toString() === "hi",
+            emitterOk: typeof events.EventEmitter === "function",
+            streamOk: typeof stream.Readable === "function",
+            queryOk: querystring.stringify({ a: 1 }) === "a=1",
+            decoderOk: typeof stringDecoder.StringDecoder === "function",
+            urlOk: new url.URL("https://example.com/").hostname === "example.com",
+            wroteState: await fsp.readFile(path.join(api.stateDir, "allowed.txt"), "utf-8"),
+          };
         },
       };
       `,
@@ -1729,17 +1783,23 @@ function describeContainment(label: string, node: NodeCandidate): void {
         inputSchema: {},
         async execute() {
           let net;
-          try {
-            net = process.getBuiltinModule("node:net");
-          } catch (error) {
+          const tried = [];
+          // Every route the three adversarial reviews used, in order.
+          for (const id of ["node:net", "net", "_tls_wrap", "_http_client", "node:_http_client"]) {
             try {
-              net = await import("node:net");
-            } catch (importError) {
-              return { connected: false, stage: "module", message: String(error.message) };
-            }
+              const mod = process.getBuiltinModule(id);
+              if (mod) { net = mod; tried.push(id + ":getBuiltinModule"); break; }
+            } catch (error) { tried.push(id + ":gbm-denied"); }
+            try {
+              const mod = await import(id);
+              if (mod) { net = mod.default ?? mod; tried.push(id + ":import"); break; }
+            } catch (error) { tried.push(id + ":import-denied"); }
           }
-          if (!net || typeof net.connect !== "function") {
-            return { connected: false, stage: "module", message: "no net module" };
+          if (!net) {
+            return { connected: false, stage: "module", tried, message: "plugin module denied" };
+          }
+          if (typeof net.connect !== "function") {
+            return { connected: false, stage: "module", tried, message: "plugin module denied: no connect" };
           }
           return await new Promise((resolve) => {
             try {
@@ -1871,13 +1931,11 @@ function describeContainment(label: string, node: NodeCandidate): void {
       }
     });
 
-    test("cannot reach a denied builtin through process.getBuiltinModule", async () => {
+    test("refuses every non-allowlisted builtin by BOTH routes and BOTH forms", async () => {
       const host = await hardenedHost();
 
-      // This is the bypass the adversarial review used: getBuiltinModule
-      // never goes through module resolution, so the resolve hook is blind
-      // to it. On Node 22.21.1 it returned a working `net`.
       for (const specifier of [
+        // Named network and process modules.
         "node:net",
         "net",
         "node:http",
@@ -1891,22 +1949,118 @@ function describeContainment(label: string, node: NodeCandidate): void {
         "node:module",
         "node:vm",
         "node:worker_threads",
+        // The socket-capable INTERNALS the third review used. None were on
+        // any denylist; a plugin with no net grant reached `_tls_wrap`
+        // .connect and got back HTTP/1.1 200 OK.
+        "_tls_wrap",
+        "node:_tls_wrap",
+        "_http_client",
+        "node:_http_client",
+        "_http_agent",
+        "node:_http_agent",
+        "_http_server",
+        "node:_http_server",
+        "_http_outgoing",
+        "node:_http_outgoing",
+        "_http_common",
+        "node:_http_common",
+        "_stream_wrap",
       ]) {
         const result = output(await host.invokeTool("builtin", { specifier }));
-        expect(result.obtained).toBe(false);
-        expect(String(result.message)).toContain("plugin module denied");
+        expect(String(result.getBuiltinModule)).toContain(
+          "plugin module denied",
+        );
+        expect(String(result.import)).toContain("denied");
+      }
+    });
+
+    test("refuses builtins nobody has heard of, including future ones", async () => {
+      const host = await hardenedHost();
+
+      // The whole point of an allowlist: a name this code has never seen is
+      // refused without anyone having to add it to a list first.
+      for (const specifier of [
+        "node:some_future_builtin_2030",
+        "_secret_internal",
+        "node:quic",
+        "node:sqlite",
+        "node:test",
+        "node:inspector/promises",
+      ]) {
+        const result = output(await host.invokeTool("builtin", { specifier }));
+        expect(String(result.getBuiltinModule)).toContain(
+          "plugin module denied",
+        );
+        expect(String(result.import)).toContain("denied");
+      }
+    });
+
+    test("refuses specifiers that only look allowlisted", async () => {
+      const host = await hardenedHost();
+
+      // Normalization must fail CLOSED: no trimming, no path games.
+      for (const specifier of [
+        "node:fs ",
+        " node:fs",
+        "node:/fs",
+        "node:node:fs",
+        "fs/",
+        "node:fs/../net",
+      ]) {
+        const result = output(await host.invokeTool("builtin", { specifier }));
+        expect(String(result.getBuiltinModule)).toContain(
+          "plugin module denied",
+        );
       }
     });
 
     test("still allows the builtins a plugin is meant to have", async () => {
       const host = await hardenedHost();
 
-      // fs stays reachable: it is gated by the permission model, not by us.
-      const result = output(
-        await host.invokeTool("builtin", { specifier: "node:fs" }),
-      );
+      for (const specifier of [
+        "node:fs",
+        "fs",
+        "node:fs/promises",
+        "node:path",
+        "node:crypto",
+        "node:util",
+        "node:zlib",
+        "node:os",
+        "node:buffer",
+        "node:events",
+        "node:stream",
+        "node:stream/promises",
+        "node:timers",
+        "node:timers/promises",
+        "node:assert",
+        "node:querystring",
+        "node:string_decoder",
+        "node:url",
+      ]) {
+        const result = output(await host.invokeTool("builtin", { specifier }));
+        expect(result.getBuiltinModule).toBe("OBTAINED");
+        expect(result.import).toBe("OBTAINED");
+      }
+    });
 
-      expect(result.obtained).toBe(true);
+    test("allowed builtins actually work, not just resolve", async () => {
+      const host = await hardenedHost();
+
+      const result = output(await host.invokeTool("use-allowed", {}, 15_000));
+
+      expect(result).toEqual({
+        joined: path.join("a", "b"),
+        hashed: "2d711642",
+        gzipped: true,
+        hostnameType: "string",
+        bufferOk: true,
+        emitterOk: true,
+        streamOk: true,
+        queryOk: true,
+        decoderOk: true,
+        urlOk: true,
+        wroteState: "ok",
+      });
     });
 
     test("cannot reach native bindings through process.binding", async () => {
@@ -1932,9 +2086,11 @@ function describeContainment(label: string, node: NodeCandidate): void {
       const result = output(await host.invokeTool("connect", {}, 10_000));
 
       expect(result.connected).toBe(false);
-      // It never even got a module to call connect on.
+      // It never even got a module to call connect on — via any of the five
+      // routes, including the `_tls_wrap` one that worked on Node 22.21.1.
       expect(result.stage).toBe("module");
       expect(String(result.message)).toContain("plugin module denied");
+      expect(String(result.tried)).toContain("_tls_wrap:gbm-denied");
     });
 
     test("has no network globals at all", async () => {
@@ -1975,17 +2131,214 @@ function describeContainment(label: string, node: NodeCandidate): void {
   });
 }
 
+/**
+ * Drives `worker-preload.ts` directly, without a PluginHost.
+ *
+ * The host now REFUSES to run a hardened worker on Node < 24, so the full
+ * containment suite cannot run on the 22.x tier. That must not mean the
+ * in-process allowlist goes untested there: 22.x is precisely where it would
+ * be the only barrier if the floor were ever lowered or bypassed. So the
+ * preload is exercised directly on every tier, with the same probes.
+ */
+function runPreloadProbe(
+  node: NodeCandidate,
+  script: string,
+): Record<string, string> {
+  const probeDir = realpathSync(mkdtempSync(path.join(tmpdir(), "preload-")));
+  try {
+    const probeFile = path.join(probeDir, "probe.mjs");
+    writeFileSync(probeFile, script);
+    const stdout = execFileSync(
+      node.path,
+      [
+        "--permission",
+        `--allow-fs-read=${path.join(probeDir, "*")}`,
+        `--allow-fs-read=${path.join(realpathSync(import.meta.dirname), "*")}`,
+        "--import",
+        workerPreloadPath,
+        probeFile,
+      ],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const lastLine = stdout.trim().split("\n").at(-1) ?? "{}";
+    return JSON.parse(lastLine) as Record<string, string>;
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+const PROBE_SCRIPT = `
+const out = {};
+const denied = ${JSON.stringify([
+  "net",
+  "node:net",
+  "child_process",
+  "node:child_process",
+  "node:module",
+  "node:worker_threads",
+  "node:vm",
+  "_tls_wrap",
+  "node:_tls_wrap",
+  "_http_client",
+  "node:_http_client",
+  "_http_agent",
+  "node:_http_agent",
+  "_http_server",
+  "node:_http_server",
+  "_http_outgoing",
+  "node:_http_outgoing",
+  "_http_common",
+  "node:_http_common",
+  "_stream_wrap",
+  "node:some_future_builtin_2030",
+  "node:fs ",
+  "node:/fs",
+  "node:node:fs",
+])};
+const allowed = ${JSON.stringify([
+  "node:fs",
+  "node:fs/promises",
+  "node:path",
+  "node:crypto",
+  "node:util",
+  "node:zlib",
+  "node:os",
+  "node:buffer",
+  "node:events",
+  "node:stream",
+  "node:timers/promises",
+  "node:assert",
+  "node:querystring",
+  "node:string_decoder",
+  "node:url",
+])};
+for (const id of denied) {
+  let viaGet = "denied";
+  try { if (process.getBuiltinModule(id)) viaGet = "OBTAINED"; } catch {}
+  let viaImport = "denied";
+  try { if (await import(id)) viaImport = "OBTAINED"; } catch {}
+  out["denied:" + id] = viaGet + "/" + viaImport;
+}
+for (const id of allowed) {
+  let viaGet = "denied";
+  try { if (process.getBuiltinModule(id)) viaGet = "OBTAINED"; } catch {}
+  let viaImport = "denied";
+  try { if (await import(id)) viaImport = "OBTAINED"; } catch {}
+  out["allowed:" + id] = viaGet + "/" + viaImport;
+}
+out.fetch = typeof globalThis.fetch;
+try { process.binding("tcp_wrap"); out.binding = "OBTAINED"; } catch { out.binding = "denied"; }
+console.log(JSON.stringify(out));
+`;
+
+function describePreloadDirectly(label: string, node: NodeCandidate): void {
+  describe(`worker preload allowlist (${label}, Node ${node.version})`, () => {
+    test("denies every non-allowlisted builtin by both routes", () => {
+      const result = runPreloadProbe(node, PROBE_SCRIPT);
+
+      for (const [key, value] of Object.entries(result)) {
+        if (key.startsWith("denied:")) {
+          expect(`${key} => ${value}`).toBe(`${key} => denied/denied`);
+        }
+      }
+      expect(result.binding).toBe("denied");
+      expect(result.fetch).toBe("undefined");
+    });
+
+    test("allows every allowlisted builtin by both routes", () => {
+      const result = runPreloadProbe(node, PROBE_SCRIPT);
+
+      for (const [key, value] of Object.entries(result)) {
+        if (key.startsWith("allowed:")) {
+          expect(`${key} => ${value}`).toBe(`${key} => OBTAINED/OBTAINED`);
+        }
+      }
+    });
+  });
+}
+
+// The in-process allowlist is verified on EVERY tier, including the 22.x one
+// the host will not run hardened.
 if (legacyNode) {
-  describeContainment("Node 22.x, no socket gate", legacyNode);
+  describePreloadDirectly("Node 22.x, no socket gate", legacyNode);
 } else {
-  warnMissingTier("Node 22.x");
+  warnMissingTier("Node 22.x (preload allowlist)");
 }
 
 if (modernNode) {
+  describePreloadDirectly("Node >= 24, socket gate", modernNode);
+  // The full containment suite needs a runtime the host will actually run.
   describeContainment("Node >= 24, socket gate", modernNode);
 } else {
-  warnMissingTier("Node >= 24");
+  warnMissingTier("Node >= 24 (full containment suite)");
 }
+
+const describeFloor = legacyNode ? describe : describe.skip;
+
+describeFloor("hardened Node floor", () => {
+  test("refuses to start a hardened worker on Node 22.x", async () => {
+    const descriptor = await writePlugin("floor-plugin", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+    });
+    const host = new PluginHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      netDomains: [],
+      handlers: {},
+      hardened: true,
+      nodeExecutable: legacyNode?.path,
+    });
+    running.push(host);
+
+    await expect(host.start()).rejects.toThrow(
+      /requires Node >= 24|could not be determined/,
+    );
+    expect(host.state).toBe("crashed");
+  });
+});
+
+describe("hardened Node floor, unusable runtimes", () => {
+  test("refuses a runtime whose version cannot be read", async () => {
+    const descriptor = await writePlugin(
+      "unknown-runtime",
+      ["tools:register"],
+      {
+        "tools/echo.js": ECHO_TOOL,
+      },
+    );
+    const host = new PluginHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      netDomains: [],
+      handlers: {},
+      hardened: true,
+      nodeExecutable: "/nonexistent/not-a-runtime",
+    });
+    running.push(host);
+
+    await expect(host.start()).rejects.toThrow(/could not be determined/);
+    expect(host.state).toBe("crashed");
+  });
+
+  test("refuses bun, which reports its own major version", async () => {
+    const descriptor = await writePlugin("bun-runtime", ["tools:register"], {
+      "tools/echo.js": ECHO_TOOL,
+    });
+    const host = new PluginHost({
+      descriptor,
+      grantedCapabilities: ["tools:register"],
+      netDomains: [],
+      handlers: {},
+      hardened: true,
+      // process.execPath under `bun test` is bun itself.
+      nodeExecutable: process.execPath,
+    });
+    running.push(host);
+
+    await expect(host.start()).rejects.toThrow(/requires Node >= 24/);
+    expect(host.state).toBe("crashed");
+  });
+});
 
 if (!(legacyNode || modernNode)) {
   warnMissingTier("any Node with --permission");
