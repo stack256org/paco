@@ -7,6 +7,13 @@ export interface MemoryEntry {
   updatedAt: string;
   source: "distilled" | "manual" | "promoted";
   body: string;
+  /**
+   * Who requested the promotion — set only on `source: "promoted"` entries
+   * written via `promoteToOrgMemory` (`lib/memory/promote.ts`). Absent for
+   * every other source, and absent on older files written before this field
+   * existed; both parse the same way, as `undefined`.
+   */
+  promotedBy?: string;
 }
 
 const SLUG_PATTERN = /^[a-z0-9-]+$/;
@@ -43,18 +50,28 @@ function unquoteYamlString(value: string): string {
  * Format (binding, see the plan's Global Constraints): YAML frontmatter with
  * `title`, `updatedAt` (ISO date), `source`, followed by a blank line and the
  * body. `slug` is not stored in the file — it is the filename.
+ *
+ * `promotedBy` is an addition on top of that binding shape, not part of it:
+ * an optional trailing frontmatter line, present only when the entry carries
+ * one. Its absence changes nothing about how the rest of the file parses.
  */
 export function renderMemoryFile(
-  entry: Pick<MemoryEntry, "title" | "updatedAt" | "source" | "body">,
+  entry: Pick<
+    MemoryEntry,
+    "title" | "updatedAt" | "source" | "body" | "promotedBy"
+  >,
 ): string {
-  const frontmatter = [
+  const frontmatterLines = [
     "---",
     `title: ${quoteYamlString(entry.title)}`,
     `updatedAt: ${quoteYamlString(entry.updatedAt)}`,
     `source: ${entry.source}`,
-    "---",
-  ].join("\n");
-  return `${frontmatter}\n\n${entry.body}`;
+  ];
+  if (entry.promotedBy) {
+    frontmatterLines.push(`promotedBy: ${quoteYamlString(entry.promotedBy)}`);
+  }
+  frontmatterLines.push("---");
+  return `${frontmatterLines.join("\n")}\n\n${entry.body}`;
 }
 
 const FRONTMATTER_PATTERN = /^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/;
@@ -85,7 +102,7 @@ export function parseMemoryFile(
     fields[key] = unquoteYamlString(rawValue);
   }
 
-  const { title, updatedAt, source } = fields;
+  const { title, updatedAt, source, promotedBy } = fields;
   if (!(title && updatedAt && source && VALID_SOURCES.has(source))) {
     return;
   }
@@ -96,6 +113,9 @@ export function parseMemoryFile(
     updatedAt,
     source: source as MemoryEntry["source"],
     body: body ?? "",
+    // Omitted entirely rather than set to `undefined` when absent — older
+    // files (and every non-promoted entry) have no `promotedBy` line at all.
+    ...(promotedBy ? { promotedBy } : {}),
   };
 }
 
@@ -155,7 +175,12 @@ export async function listMemory(dir: string): Promise<MemoryEntry[]> {
  */
 export async function writeMemory(
   dir: string,
-  entry: { title: string; body: string; source: MemoryEntry["source"] },
+  entry: {
+    title: string;
+    body: string;
+    source: MemoryEntry["source"];
+    promotedBy?: string;
+  },
 ): Promise<{ slug: string }> {
   await fs.mkdir(dir, { recursive: true });
   // The title becomes a single frontmatter line (`title: "..."`); an
@@ -168,6 +193,7 @@ export async function writeMemory(
     updatedAt: new Date().toISOString(),
     source: entry.source,
     body: entry.body,
+    promotedBy: entry.promotedBy,
   });
   await fs.writeFile(path.join(dir, `${slug}.md`), content, "utf8");
   return { slug };

@@ -34,6 +34,12 @@ export class TaskTransitionError extends Error {
   }
 }
 
+/** The only statuses a task may be born in — see `initialStatus` below. */
+const CREATABLE_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "todo",
+  "blocked",
+]);
+
 export type CreateTaskInput = {
   organizationId: string;
   sessionId: string;
@@ -43,10 +49,28 @@ export type CreateTaskInput = {
   assignedAgent?: string | null;
   origin?: TaskOrigin;
   createdBy?: string | null;
+  /**
+   * The status the task is created in. Defaults to `"todo"`, the normal
+   * case. `"blocked"` is for a task that needs a human before any executor
+   * should touch it from the moment it exists — e.g. an org memory
+   * promotion proposal filed by a non-admin (`lib/memory/promote.ts`) —
+   * without faking a `todo -> running -> blocked` status history that never
+   * happened. No other value is legal: this is task *creation*, not a
+   * transition, so `canTransition` (`lib/tasks/state.ts`) does not apply
+   * here and this is validated on its own.
+   */
+  initialStatus?: "todo" | "blocked";
 };
 
-/** Creates a new task in `todo`, with no chat attached yet. */
+/** Creates a new task, in `todo` unless `initialStatus` says otherwise. */
 export async function createTask(input: CreateTaskInput): Promise<Task> {
+  const initialStatus = input.initialStatus ?? "todo";
+  if (!CREATABLE_STATUSES.has(initialStatus)) {
+    throw new Error(
+      `createTask: invalid initialStatus "${initialStatus}" — must be "todo" or "blocked"`,
+    );
+  }
+
   const [row] = await db
     .insert(tasks)
     .values({
@@ -56,6 +80,7 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
       parentTaskId: input.parentTaskId ?? null,
       title: input.title,
       goal: input.goal,
+      status: initialStatus,
       assignedAgent: input.assignedAgent ?? null,
       origin: input.origin ?? "user",
       createdBy: input.createdBy ?? null,

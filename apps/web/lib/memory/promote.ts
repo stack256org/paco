@@ -1,9 +1,10 @@
 "use server";
 
 import { desc, eq } from "drizzle-orm";
+import { isAdmin } from "@/lib/admin/require-admin";
 import { db } from "@/lib/db/client";
-import { createTask, transitionTaskStatus } from "@/lib/db/tasks";
 import { sessions } from "@/lib/db/schema";
+import { createTask } from "@/lib/db/tasks";
 import { SIGNED_OUT } from "@/lib/error-copy";
 import { getMemberRole } from "@/lib/org/membership";
 import { getOrganization } from "@/lib/org/organization";
@@ -18,12 +19,9 @@ import { writeMemory } from "./store";
  * (org memory is written ONLY by explicit promotion, never by automatic
  * distillation) — always tagged `source: "promoted"`, never `"distilled"`
  * or `"manual"`, so the settings page can tell a promoted entry apart from
- * one an admin typed by hand.
- *
- * `promotedBy` is accepted for provenance at the call site (and so a future
- * audit trail has somewhere to start), but nothing here persists it: the
- * memory file format (frontmatter `title`/`updatedAt`/`source` plus a body)
- * has no column for who requested a write, only what scope wrote it.
+ * one an admin typed by hand. `promotedBy` is carried into the written file
+ * (`store.ts`'s optional `MemoryEntry.promotedBy`) as the promotion's
+ * provenance.
  */
 export async function promoteToOrgMemory(params: {
   organizationId: string;
@@ -35,6 +33,7 @@ export async function promoteToOrgMemory(params: {
     title: params.title,
     body: params.body,
     source: "promoted",
+    promotedBy: params.promotedBy,
   });
 }
 
@@ -46,29 +45,36 @@ export type PromoteMemoryResult =
 /**
  * The server action a memory entry's "propose for org memory" button calls.
  *
- * Org membership, not admin, is the entry bar — anyone in the organisation
- * may propose a promotion — but only an admin's call actually writes:
+ * The admin check comes first and is `isAdmin(userId)` — the same helper
+ * every other admin gate on this page uses (`lib/admin/require-admin.ts`),
+ * which is an OR of the `users.is_admin` flag and the organisation
+ * `admin`/`owner` role. Checking it ahead of, and independently of, org
+ * membership matters: a flag-promoted account can legitimately have no
+ * membership row at all (see that helper's own docstring), and gating on
+ * membership first would wrongly turn such an admin into a proposer.
  *
- * - admin/owner: writes immediately via `promoteToOrgMemory` and reports
- *   the resulting slug.
- * - anyone else: nothing is written. Instead a `blocked` task titled
- *   "Org memory proposal: <title>" is filed (goal = the proposed body) for
- *   an admin to review from the task board and unblock or reject by hand.
- *   This is the Section 3 tasks table branch of this action; there is no
- *   "Section 3 absent" branch to implement because the tasks table already
- *   exists on this branch (see `lib/db/schema.ts`'s `tasks` export).
- *
- * `createTask` only ever starts a task in `todo` (see `lib/db/tasks.ts`),
- * and there is no helper to create one already `blocked` — so getting there
- * means walking the state machine's two legal edges, `todo -> running`
- * then `running -> blocked`, both defined in `lib/tasks/state.ts`, rather
- * than reaching into the table directly.
+ * - admin (by flag or by role): writes immediately via `promoteToOrgMemory`
+ *   and reports the resulting slug.
+ * - a member who isn't an admin: nothing is written. Instead a task is
+ *   filed *already* `blocked` — titled "Org memory proposal: <title>", goal
+ *   = the proposed body — for an admin to review from the task board and
+ *   unblock or reject by hand. `createTask`'s `initialStatus: "blocked"`
+ *   (`lib/db/tasks.ts`) creates it there directly; this deliberately does
+ *   not walk `todo -> running -> blocked` through `transitionTaskStatus`,
+ *   which would fabricate a status history the task never actually had.
+ * - anyone who is neither an admin nor a member: rejected before any task
+ *   or write is attempted.
  *
  * Every task also needs a `sessionId` (a task always runs in some session's
  * repo), which this settings-page action has no session to offer — the
  * proposer's own most recently created session stands in for one. A member
  * with no session at all cannot file a proposal; that is reported back as
  * an error rather than attempted with a fabricated id.
+ *
+ * TODO(section-4-task-5-fix-2): sessionId becomes nullable for proposal
+ * tasks — a schema change blocked on another agent's migration slot at the
+ * time this fallback was written. Once it lands, a proposal task should not
+ * need to borrow a session at all.
  */
 export async function promoteMemoryAction(params: {
   title: string;
@@ -85,12 +91,7 @@ export async function promoteMemoryAction(params: {
     return { ok: false, error: "There is no organisation yet." };
   }
 
-  const role = await getMemberRole(userId);
-  if (!role) {
-    return { ok: false, error: "You must be a member of this organisation." };
-  }
-
-  if (role === "owner" || role === "admin") {
+  if (await isAdmin(userId)) {
     const { slug } = await promoteToOrgMemory({
       organizationId: organization.id,
       title: params.title,
@@ -98,6 +99,11 @@ export async function promoteMemoryAction(params: {
       promotedBy: userId,
     });
     return { ok: true, promoted: true, slug };
+  }
+
+  const role = await getMemberRole(userId);
+  if (!role) {
+    return { ok: false, error: "You must be a member of this organisation." };
   }
 
   const [recentSession] = await db
@@ -125,13 +131,8 @@ export async function promoteMemoryAction(params: {
     goal: params.body,
     origin: "user",
     createdBy: userId,
+    initialStatus: "blocked",
   });
-  await transitionTaskStatus(organization.id, created.id, "running");
-  const blocked = await transitionTaskStatus(
-    organization.id,
-    created.id,
-    "blocked",
-  );
 
-  return { ok: true, promoted: false, taskId: blocked.id };
+  return { ok: true, promoted: false, taskId: created.id };
 }

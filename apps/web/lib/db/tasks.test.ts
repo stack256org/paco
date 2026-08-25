@@ -183,6 +183,38 @@ describe("createTask", () => {
     expect(child.parentTaskId).toBe(parent.id);
     expect(child.origin).toBe("planner");
   });
+
+  test("creates a task directly in 'blocked' when initialStatus says so", async () => {
+    store = [];
+    const task = await createTask({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Org memory proposal",
+      goal: "Deploy from main.",
+      initialStatus: "blocked",
+    });
+
+    expect(task.status).toBe("blocked");
+    const reread = await getTask("org-1", task.id);
+    expect(reread?.status).toBe("blocked");
+  });
+
+  test("rejects an invalid initialStatus without inserting a row", async () => {
+    store = [];
+
+    await expect(
+      createTask({
+        organizationId: "org-1",
+        sessionId: "session-1",
+        title: "Title",
+        goal: "Goal",
+        // Bypasses the type system the way an untyped JS caller would —
+        // `createTask` must still refuse this at runtime.
+        initialStatus: "review" as unknown as "todo" | "blocked",
+      }),
+    ).rejects.toThrow();
+    expect(store).toHaveLength(0);
+  });
 });
 
 describe("getTask", () => {

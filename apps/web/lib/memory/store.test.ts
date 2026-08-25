@@ -124,6 +124,55 @@ describe("renderMemoryFile / parseMemoryFile round-trip", () => {
 
     expect(parsed).toEqual({ slug: "has-a-blank-padded-divider", ...entry });
   });
+
+  test("round-trips an entry carrying promotedBy", () => {
+    const entry: Omit<MemoryEntry, "slug"> = {
+      title: "Deploy convention",
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      source: "promoted",
+      body: "Always deploy from main.",
+      promotedBy: "user-1",
+    };
+
+    const rendered = renderMemoryFile(entry);
+    expect(rendered).toContain('promotedBy: "user-1"');
+    const parsed = parseMemoryFile(rendered, "deploy-convention");
+
+    expect(parsed).toEqual({ slug: "deploy-convention", ...entry });
+  });
+
+  test("omits the promotedBy line entirely when the entry has none", () => {
+    const entry: Omit<MemoryEntry, "slug"> = {
+      title: "Deploy convention",
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      source: "promoted",
+      body: "Always deploy from main.",
+    };
+
+    const rendered = renderMemoryFile(entry);
+    expect(rendered).not.toContain("promotedBy");
+    const parsed = parseMemoryFile(rendered, "deploy-convention");
+
+    expect(parsed?.promotedBy).toBeUndefined();
+    expect(parsed).toEqual({ slug: "deploy-convention", ...entry });
+  });
+
+  test("parses an older file written before promotedBy existed", () => {
+    const legacy = [
+      "---",
+      'title: "Old promotion"',
+      'updatedAt: "2026-08-20T10:00:00.000Z"',
+      "source: promoted",
+      "---",
+      "",
+      "Deploy from main.",
+    ].join("\n");
+
+    const parsed = parseMemoryFile(legacy, "old-promotion");
+
+    expect(parsed?.title).toBe("Old promotion");
+    expect(parsed?.promotedBy).toBeUndefined();
+  });
 });
 
 describe("listMemory", () => {

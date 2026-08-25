@@ -24,6 +24,13 @@ mock.module("@/lib/admin/require-admin", () => ({
     }
     return Promise.resolve("admin-1");
   },
+  // `actions.ts` never calls `isAdmin` directly, but `mock.module` replaces
+  // this specifier for the whole test run, not just this file —
+  // `lib/memory/promote.test.ts` also mocks it (for its own `isAdmin`
+  // check) with a factory that has no `requireAdmin`. Exporting both here
+  // keeps whichever mock happens to load first from breaking the other
+  // file's static import of the export it actually needs.
+  isAdmin: () => Promise.resolve(adminOk),
 }));
 
 let organization: { id: string } | null = { id: "org-1" };
