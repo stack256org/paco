@@ -64,6 +64,13 @@
       "when": 1787671153168,
       "tag": "0008_wandering_mindworm",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787671741286,
+      "tag": "0009_pretty_sentinel",
+      "breakpoints": true
     }
   ]
 }

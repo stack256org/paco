@@ -594,6 +594,23 @@ export const instanceSettings = pgTable("instance_settings", {
    */
   smtpPasswordSealed: text("smtp_password_sealed"),
   smtpFrom: text("smtp_from"),
+
+  /**
+   * Bring-your-own OpenFX provider config (Section 7 Task 5): a chat whose
+   * `backend` is `"openfx"` runs its turns through this endpoint instead of
+   * the Claude Code CLI. All three are null until an operator configures
+   * OpenFX — there is no default provider, unlike `chats.backend`'s default
+   * of `"claude-code"`.
+   */
+  openfxEndpoint: text("openfx_endpoint"),
+  /**
+   * Sealed with `lib/crypto/secret-box`, never hashed — same rationale and
+   * mechanism as `smtpPasswordSealed`: the original value is needed on every
+   * call, so there is nothing to compare a hash against.
+   */
+  openfxApiKeySealed: text("openfx_api_key_sealed"),
+  /** Path to the OpenFX binary on this instance, when it runs locally rather than as a remote endpoint. */
+  openfxBinaryPath: text("openfx_binary_path"),
   /**
    * When the guided first-run flow (account, platform, mail) was finished.
    *
