@@ -134,7 +134,6 @@ function makeFakeApi(options: FakeApiOptions = {}): FakeApi {
         // No subscribers in the default fake; hook tests replace this.
       },
     },
-    panel: () => Promise.resolve(undefined),
     tasks: {
       create: async (input) => {
         if (options.tasksCreateImpl) {
@@ -1090,7 +1089,8 @@ describe("integration: real PluginHost", () => {
       netDomains: ["slack.com"],
       hardened: false,
       handlers: {
-        "storage:kv": (_pluginId, payload) => handleFakeKv(kvStore, payload),
+        "storage:kv": (_pluginId, payload) =>
+          Promise.resolve(handleFakeKv(kvStore, payload)),
         "net:fetch": (_pluginId, payload) => {
           const request = payload as PluginFetchRequest;
           netFetchLog.push(request);
@@ -1172,7 +1172,8 @@ describe("integration: real PluginHost", () => {
       netDomains: ["slack.com"],
       hardened: false,
       handlers: {
-        "storage:kv": (_pluginId, payload) => handleFakeKv(kvStore, payload),
+        "storage:kv": (_pluginId, payload) =>
+          Promise.resolve(handleFakeKv(kvStore, payload)),
         "net:fetch": () =>
           Promise.resolve({ status: 200, headers: {}, body: "{}" }),
         "tasks:create": () => {
