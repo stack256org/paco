@@ -215,8 +215,15 @@ export type PlanGoalResult =
  * `getMemberRole`/`isAdmin` only ever check membership in the one
  * organisation this installation has — without it, a caller could pass any
  * `organizationId` string and a session owned by any member would pass.
+ *
+ * Exported so the `tasks:create` plugin capability
+ * (`lib/plugins/capability-handlers.ts`) can run the identical check before
+ * letting a channel plugin create a task against a session — that handler
+ * has the same "session is user-scoped, caller has only an id" problem
+ * `planGoal` does, and must not grow a second, independently-drifting
+ * membership check for it.
  */
-async function sessionBelongsToOrganization(
+export async function sessionBelongsToOrganization(
   sessionUserId: string,
   organizationId: string,
 ): Promise<boolean> {

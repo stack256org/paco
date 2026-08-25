@@ -136,6 +136,49 @@ mock.module("@/lib/db/sessions", () => ({
   getSessionById: getSessionByIdSpy,
 }));
 
+/**
+ * `tasks:create` resolves "the instance's organization" via `getOrganization`
+ * (self-hosted Paco serves exactly one) and checks the session belongs to it
+ * via the exact same helper `planGoal` uses, imported from `lib/tasks/planner`
+ * rather than re-derived — mocking that module (not `@/lib/org/membership`)
+ * matches what `capability-handlers.ts` actually imports.
+ */
+let organizationRow: { id: string } | null = { id: "org-1" };
+const getOrganizationSpy = mock(async () => organizationRow);
+
+mock.module("@/lib/org/organization", () => ({
+  getOrganization: getOrganizationSpy,
+}));
+
+let sessionBelongsToOrganizationResult = true;
+const sessionBelongsToOrganizationSpy = mock(
+  async (_sessionUserId: string, _organizationId: string) =>
+    sessionBelongsToOrganizationResult,
+);
+
+mock.module("@/lib/tasks/planner", () => ({
+  sessionBelongsToOrganization: sessionBelongsToOrganizationSpy,
+}));
+
+let createdTask: { id: string } = { id: "task-1" };
+const createTaskSpy = mock(async (_input: unknown) => createdTask);
+
+mock.module("@/lib/db/tasks", () => ({
+  createTask: createTaskSpy,
+}));
+
+type StartTaskResult =
+  | { ok: true; chatId: string }
+  | { ok: false; error: string };
+let startTaskResult: StartTaskResult = { ok: true, chatId: "chat-99" };
+const startTaskSpy = mock(
+  async (_organizationId: string, _taskId: string) => startTaskResult,
+);
+
+mock.module("@/lib/tasks/start", () => ({
+  startTask: startTaskSpy,
+}));
+
 type SubmitOutcome =
   | { kind: "archived" }
   | { kind: "buffer-failed" }
@@ -977,5 +1020,178 @@ describe("messages:post", () => {
     await expect(
       messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
     ).rejects.toThrow(/conflicting active stream/);
+  });
+});
+
+describe("tasks:create", () => {
+  function resetTasksCreateMocks(): void {
+    organizationRow = { id: "org-1" };
+    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionBelongsToOrganizationResult = true;
+    createdTask = { id: "task-1" };
+    startTaskResult = { ok: true, chatId: "chat-99" };
+    getOrganizationSpy.mockClear();
+    sessionBelongsToOrganizationSpy.mockClear();
+    createTaskSpy.mockClear();
+    startTaskSpy.mockClear();
+  }
+
+  test("rejects an invalid payload", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    await expect(
+      tasksCreate("my-plugin", { sessionId: "session-1", goal: "do it" }),
+    ).rejects.toThrow(/invalid payload/);
+    expect(createTaskSpy).not.toHaveBeenCalled();
+  });
+
+  test("rejects an unknown session", async () => {
+    resetTasksCreateMocks();
+    sessionRow = undefined;
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    await expect(
+      tasksCreate("my-plugin", {
+        sessionId: "does-not-exist",
+        title: "Investigate",
+        goal: "Investigate the thing",
+      }),
+    ).rejects.toThrow(/not found/);
+    expect(createTaskSpy).not.toHaveBeenCalled();
+  });
+
+  test("rejects a session belonging to a different organization, identically to an unknown session", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+    const payload = {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+    };
+
+    // Same sessionId in both calls, so the two error messages are only
+    // identical if "no such session" and "not your organization's session"
+    // are genuinely indistinguishable to the caller.
+    sessionRow = undefined;
+    const unknownSessionError = await tasksCreate("my-plugin", payload).catch(
+      (error: unknown) => error,
+    );
+
+    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionBelongsToOrganizationResult = false;
+    const foreignOrgError = await tasksCreate("my-plugin", payload).catch(
+      (error: unknown) => error,
+    );
+
+    expect(foreignOrgError).toBeInstanceOf(Error);
+    expect((foreignOrgError as Error).message).toBe(
+      (unknownSessionError as Error).message,
+    );
+    expect(createTaskSpy).not.toHaveBeenCalled();
+    expect(sessionBelongsToOrganizationSpy).toHaveBeenCalledWith(
+      "user-1",
+      "org-1",
+    );
+  });
+
+  test('creates a task scoped to the instance\'s organization with origin "channel"', async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    const result = await tasksCreate("my-plugin", {
+      sessionId: "session-1",
+      title: "Investigate the outage",
+      goal: "Find out why the outage happened",
+    });
+
+    expect(result).toEqual({ taskId: "task-1" });
+    expect(createTaskSpy).toHaveBeenCalledTimes(1);
+    expect(createTaskSpy).toHaveBeenCalledWith({
+      organizationId: "org-1",
+      sessionId: "session-1",
+      title: "Investigate the outage",
+      goal: "Find out why the outage happened",
+      origin: "channel",
+    });
+    expect(startTaskSpy).not.toHaveBeenCalled();
+  });
+
+  test("a payload cannot smuggle its own origin or status onto the created task", async () => {
+    resetTasksCreateMocks();
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    await tasksCreate("my-plugin", {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+      origin: "planner",
+      status: "done",
+      initialStatus: "done",
+    });
+
+    const call = createTaskSpy.mock.calls[0]?.[0] as { origin: string };
+    expect(call.origin).toBe("channel");
+    expect(call).not.toHaveProperty("status");
+    expect(call).not.toHaveProperty("initialStatus");
+  });
+
+  test("autoStart starts the task and returns its chatId", async () => {
+    resetTasksCreateMocks();
+    startTaskResult = { ok: true, chatId: "chat-77" };
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    const result = await tasksCreate("my-plugin", {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+      autoStart: true,
+    });
+
+    expect(result).toEqual({ taskId: "task-1", chatId: "chat-77" });
+    expect(startTaskSpy).toHaveBeenCalledWith("org-1", "task-1");
+  });
+
+  test("a startTask failure after autoStart is surfaced as an error result, not a thrown rejection", async () => {
+    resetTasksCreateMocks();
+    startTaskResult = { ok: false, error: "sandbox unavailable" };
+    const handlers = buildCapabilityHandlers(pluginRow());
+    const tasksCreate = handlers["tasks:create"];
+    if (!tasksCreate) {
+      throw new Error("tasks:create handler missing");
+    }
+
+    const result = await tasksCreate("my-plugin", {
+      sessionId: "session-1",
+      title: "Investigate",
+      goal: "Investigate the thing",
+      autoStart: true,
+    });
+
+    expect(result).toEqual({ taskId: "task-1", error: "sandbox unavailable" });
   });
 });

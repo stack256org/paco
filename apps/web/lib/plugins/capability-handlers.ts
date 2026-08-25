@@ -13,6 +13,10 @@ import { submitChatMessage } from "@/lib/chat/submit-message";
 import { db } from "@/lib/db/client";
 import { pluginKv, type PluginRow } from "@/lib/db/schema";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
+import { createTask } from "@/lib/db/tasks";
+import { getOrganization } from "@/lib/org/organization";
+import { sessionBelongsToOrganization } from "@/lib/tasks/planner";
+import { startTask } from "@/lib/tasks/start";
 
 const NET_FETCH_TIMEOUT_MS = 10_000;
 const NET_FETCH_BODY_CAP_BYTES = 1_000_000; // 1MB
@@ -67,6 +71,7 @@ export function buildCapabilityHandlers(
     "net:fetch": (_pluginId, payload) => handleNetFetch(pluginRow, payload),
     "messages:post": (pluginId, payload) =>
       handleMessagesPost(pluginId, payload),
+    "tasks:create": (_pluginId, payload) => handleTasksCreate(payload),
   };
 }
 
@@ -601,4 +606,88 @@ async function handleMessagesPost(
       );
     }
   }
+}
+
+// --- tasks:create ------------------------------------------------------
+
+const tasksCreatePayloadSchema = z.object({
+  sessionId: z.string().min(1),
+  title: z.string().min(1),
+  goal: z.string().min(1),
+  autoStart: z.boolean().optional(),
+});
+
+export interface TasksCreateResult {
+  taskId: string;
+  chatId?: string;
+  /** Set when `autoStart` was requested but `startTask` failed. */
+  error?: string;
+}
+
+/**
+ * Creates a task on the board from an inbound channel message — the
+ * mechanism behind "mention the bot -> task appears" — and, if `autoStart`
+ * is set, starts it the same way the board's own "start" action does.
+ *
+ * Sessions are user-scoped, not org-scoped (`lib/db/schema.ts`), so the only
+ * way to check a session belongs to the instance this plugin runs in is the
+ * same membership check `planGoal` uses for the identical problem:
+ * `sessionBelongsToOrganization` is imported from `lib/tasks/planner.ts`
+ * rather than re-derived here, so the two call sites can never drift into
+ * checking different things. An unknown session id and a session that
+ * belongs to someone else's organization are reported with the exact same
+ * error — a plugin must not be able to tell "no such session" apart from
+ * "not yours" (same reasoning as `messages:post` and `planGoal` before it).
+ *
+ * `origin: "channel"` is hardcoded here, never read from the payload — a
+ * plugin chooses `title`/`goal`/`sessionId`/`autoStart`, nothing else, so it
+ * cannot smuggle a task onto the board tagged as though a human or the
+ * planner created it, and it cannot pick the task's initial status either
+ * (`createTask`'s `initialStatus` is simply never passed, so it defaults to
+ * `"todo"`).
+ *
+ * A failed `autoStart` is returned as `{ taskId, error }`, not thrown: the
+ * task itself was already created successfully by that point, and throwing
+ * would report the whole call as failed when a task in fact now exists on
+ * the board, just without a chat behind it yet.
+ */
+async function handleTasksCreate(payload: unknown): Promise<TasksCreateResult> {
+  const parsed = tasksCreatePayloadSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new Error(`tasks:create: invalid payload: ${parsed.error.message}`);
+  }
+  const { sessionId, title, goal, autoStart } = parsed.data;
+
+  const notFoundError = new Error(
+    `tasks:create: session "${sessionId}" not found`,
+  );
+
+  const [session, organization] = await Promise.all([
+    getSessionById(sessionId),
+    getOrganization(),
+  ]);
+  if (!session || !organization) {
+    throw notFoundError;
+  }
+  if (!(await sessionBelongsToOrganization(session.userId, organization.id))) {
+    throw notFoundError;
+  }
+
+  const task = await createTask({
+    organizationId: organization.id,
+    sessionId,
+    title,
+    goal,
+    origin: "channel",
+  });
+
+  if (!autoStart) {
+    return { taskId: task.id };
+  }
+
+  const started = await startTask(organization.id, task.id);
+  if (!started.ok) {
+    return { taskId: task.id, error: started.error };
+  }
+  return { taskId: task.id, chatId: started.chatId };
 }

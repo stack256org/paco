@@ -14,6 +14,7 @@ export const CAPABILITIES = [
   "net:fetch", // outbound HTTP to declared domains only
   "storage:kv", // per-plugin key-value storage
   "ui:panel", // contribute a sandboxed iframe panel
+  "tasks:create", // create a task on the board from an inbound message
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

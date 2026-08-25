@@ -135,6 +135,16 @@ describe("pluginManifestSchema", () => {
     );
     expect(result.success).toBe(true);
   });
+
+  test('accepts "tasks:create" on its own, with no companion field required', () => {
+    const result = pluginManifestSchema.safeParse(
+      minimalManifest({ capabilities: ["tasks:create"] }),
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.capabilities).toEqual(["tasks:create"]);
+    }
+  });
 });
 
 describe("parsePluginManifest", () => {
