@@ -5,7 +5,6 @@ import {
 } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -63,22 +62,193 @@ const MAX_PLUGIN_DEPTH = 24;
 /** Packages the worker must be able to read for its own imports to resolve. */
 const WORKER_RUNTIME_PACKAGES = ["zod", "@paco/plugin-kit"] as const;
 
+/** The two scripts the host spawns. Both live beside this file. */
+const WORKER_ENTRY_FILENAME = "worker-entry.ts";
+const WORKER_PRELOAD_FILENAME = "worker-preload.ts";
+
 /**
- * Absolute path to the worker entry script.
- *
- * Resolved from this file rather than from `process.cwd()`, because the host
- * runs inside a Next.js server whose working directory is not the package.
+ * Overrides where this package's own files are looked for. The escape hatch
+ * for a deployment whose layout none of the candidates below describes —
+ * named in the error `start()` throws when nothing resolves.
  */
+const PACKAGE_DIR_ENV = "PACO_PLUGIN_HOST_DIR";
+
+/** Injection seams, so `resolvePluginHostDir` can be tested as a pure function. */
+export interface PluginHostDirLookup {
+  /** `import.meta.dirname`, which a bundler leaves `undefined`. */
+  moduleDir?: string | undefined;
+  cwd?: string;
+  override?: string | undefined;
+  exists?: (candidate: string) => boolean;
+}
+
+/**
+ * Absolute directory holding `worker-entry.ts` and `worker-preload.ts`.
+ *
+ * ## Why this is not `import.meta.dirname`
+ *
+ * It used to be, at module scope, and that was wrong twice over.
+ *
+ * The host is imported by a Next.js route (`lib/plugins/registry.ts`), so it
+ * gets bundled. Turbopack rewrites `import.meta.dirname` to `undefined`, and
+ * `path.join(undefined, ...)` throws `TypeError` while the module is being
+ * *evaluated* — which `next build` does for every route to collect its page
+ * config. One unusable constant therefore failed the entire build, blamed on
+ * whichever route happened to sort first.
+ *
+ * Fixing only that would have left the worse half. A bundled
+ * `import.meta.url`/`dirname` that resolves at all resolves into
+ * `.next/server/chunks/`, so the host would have spawned workers pointing at
+ * paths that do not exist and every plugin would have failed to start — a
+ * runtime failure with a green build, which is strictly worse than the build
+ * break that hid it. `packages/claude-code/approval.ts` documents the same
+ * bundler behaviour biting the `PreToolUse` hook.
+ *
+ * That rules out embedding the scripts as strings the way `approval.ts` does:
+ * `worker-entry.ts` imports `zod` and `@paco/plugin-kit`, so writing it to a
+ * scratch directory would break its own module resolution. The worker entry
+ * has to stay in the package directory, next to the `node_modules` that
+ * resolves those two — which is also what `WORKER_RUNTIME_PACKAGES` needs.
+ *
+ * So the directory is found on the filesystem instead, from candidates that
+ * are true in every environment this ships in, first hit wins:
+ *
+ * 1. `PACO_PLUGIN_HOST_DIR`, for a layout none of the rest describe.
+ * 2. `import.meta.dirname` itself — correct and preferred whenever the module
+ *    was *not* bundled: `bun test`, plain `node`, any direct import.
+ * 3. `<ancestor>/node_modules/@paco/plugin-host`, walking up from the working
+ *    directory. `next dev` and `next start` run with `apps/web` as the cwd,
+ *    where that path is pnpm's symlink to `packages/plugin-host`. The `.deb`
+ *    runs with `/usr/lib/paco/apps/web` as the cwd — Next's standalone
+ *    `server.js` chdirs to its own directory — and `packaging/build-deb.sh`
+ *    puts `pnpm deploy`'s `node_modules` there, so the same path applies.
+ *
+ *    Caveat worth knowing before debugging a `.deb`: `pnpm deploy` links
+ *    `@paco/*` workspace packages as relative symlinks back into the *build
+ *    machine's* checkout rather than copying them, and `build-deb.sh` stages
+ *    that tree with `cp -a`, which preserves symlinks. They therefore dangle
+ *    on the target and this candidate finds nothing — which is why
+ *    `assertWorkerScriptsExist` names `PACO_PLUGIN_HOST_DIR` in its error
+ *    rather than letting `spawn` fail with "Cannot find module". Fixing the
+ *    packaging (dereferencing those links) belongs in `build-deb.sh`.
+ * 4. The same walk from `import.meta.dirname`, for a bundled chunk that does
+ *    know where it is — `.next/server/chunks` climbs to `apps/web`.
+ *
+ * Never throws, whatever it is handed: a bad answer here must surface as
+ * `start()` refusing to spawn with an actionable message, never as a
+ * `TypeError` during module evaluation that takes a build down with it.
+ */
+export function resolvePluginHostDir(lookup: PluginHostDirLookup = {}): string {
+  // `in`, not a destructuring default: a default fires on an explicit
+  // `undefined` too, which would make `{ moduleDir: undefined }` — the exact
+  // state a bundler leaves behind, and the one worth testing — silently mean
+  // "use `import.meta.dirname`".
+  const moduleDir =
+    "moduleDir" in lookup ? lookup.moduleDir : import.meta.dirname;
+  const override =
+    "override" in lookup ? lookup.override : process.env[PACKAGE_DIR_ENV];
+  const cwd = lookup.cwd ?? process.cwd();
+  const exists = lookup.exists ?? existsSync;
+
+  const candidates: string[] = [];
+  if (override) {
+    candidates.push(path.resolve(override));
+  }
+  if (moduleDir) {
+    candidates.push(moduleDir);
+  }
+  candidates.push(...installedCopiesAbove(cwd));
+  if (moduleDir) {
+    candidates.push(...installedCopiesAbove(moduleDir));
+  }
+
+  for (const candidate of candidates) {
+    if (exists(path.join(candidate, WORKER_ENTRY_FILENAME))) {
+      return candidate;
+    }
+  }
+
+  // Nothing matched. Answer with the most plausible location anyway so the
+  // module still evaluates; `start()` is where an unusable path becomes an
+  // error, and it can say what to set.
+  return moduleDir ?? path.join(cwd, "node_modules", "@paco", "plugin-host");
+}
+
+/** `<ancestor>/node_modules/@paco/plugin-host` for every ancestor of `from`. */
+function installedCopiesAbove(from: string): string[] {
+  const found: string[] = [];
+  let dir = path.resolve(from);
+  for (;;) {
+    // `turbopackIgnore` because `dir` is a loop variable: without it Next's
+    // build-time tracer gives up and traces the whole project into the NFT
+    // list, which is how real runtime dependencies go missing from
+    // `.next/standalone` (see the long comment in apps/web/next.config.ts).
+    found.push(
+      path.join(
+        /* turbopackIgnore: true */ dir,
+        "node_modules",
+        "@paco",
+        "plugin-host",
+      ),
+    );
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      return found;
+    }
+    dir = parent;
+  }
+}
+
+/**
+ * This package's own directory. Resolved once, eagerly — which is safe
+ * precisely because `resolvePluginHostDir` cannot throw.
+ */
+const pluginHostDir: string = resolvePluginHostDir();
+
+/** Absolute path to the worker entry script. */
 export const workerEntryPath: string = path.join(
-  import.meta.dirname,
-  "worker-entry.ts",
+  pluginHostDir,
+  WORKER_ENTRY_FILENAME,
 );
 
 /** Absolute path to the `--import` preload that closes the network. */
 export const workerPreloadPath: string = path.join(
-  import.meta.dirname,
-  "worker-preload.ts",
+  pluginHostDir,
+  WORKER_PRELOAD_FILENAME,
 );
+
+/**
+ * The worker's command line, as a pure function of what constrains it.
+ *
+ * Split out of `PluginHost` so a test can assert on the argv the host
+ * actually builds. That matters more than tidiness: `SECURITY.md` promises
+ * the worker gets "no subprocesses, threads, or native code", and the only
+ * thing delivering that promise is the *absence* of `--allow-child-process`,
+ * `--allow-worker` and `--allow-addons` from this array. An absence is
+ * invisible in review and survives only as long as nobody appends a flag, so
+ * `host.test.ts` asserts on it directly.
+ */
+export function buildWorkerArgv(input: {
+  hardened: boolean;
+  readableDirs: readonly string[];
+  writableDir: string;
+  preloadPath: string;
+  entryPath: string;
+}): string[] {
+  if (!input.hardened) {
+    return [input.entryPath];
+  }
+  return [
+    "--permission",
+    ...input.readableDirs.map(
+      (dir) => `--allow-fs-read=${path.join(dir, "*")}`,
+    ),
+    `--allow-fs-write=${path.join(input.writableDir, "*")}`,
+    "--import",
+    input.preloadPath,
+    input.entryPath,
+  ];
+}
 
 export type HostLogLevel = "info" | "warn" | "error";
 
@@ -327,6 +497,7 @@ export class PluginHost {
 
     await mkdir(this.stateDir, { recursive: true });
     try {
+      this.assertWorkerScriptsExist();
       await this.assertRuntimeIsSupported();
       await this.resolveRealPaths();
       await this.assertPluginTreeIsContained();
@@ -595,6 +766,32 @@ export class PluginHost {
   }
 
   /**
+   * Refuses to spawn a worker whose scripts are not where the host thinks
+   * they are.
+   *
+   * `resolvePluginHostDir` deliberately never throws — a `TypeError` at module
+   * scope is what took `next build` down — so a layout it cannot describe
+   * reaches this point as a plausible-looking path that is simply not there.
+   * This is where that becomes an error, and it is thrown here rather than
+   * left to `spawn` because a Node process asked to run a missing file exits
+   * with a bare "Cannot find module", which names neither the plugin nor the
+   * fix.
+   */
+  private assertWorkerScriptsExist(): void {
+    const missing = [workerEntryPath, workerPreloadPath].filter(
+      // `turbopackIgnore` for the same reason as `installedCopiesAbove`: these
+      // paths are resolved at runtime, and without it Next's tracer gives up
+      // and pulls the whole project into the NFT list.
+      (script) => !existsSync(/* turbopackIgnore: true */ script),
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `plugin ${this.pluginId} cannot start: the plugin-host package files are not where they were expected (missing: ${missing.join(", ")}). This host resolved its own package directory to ${pluginHostDir}. Set ${PACKAGE_DIR_ENV} to the directory holding ${WORKER_ENTRY_FILENAME} and ${WORKER_PRELOAD_FILENAME}.`,
+      );
+    }
+  }
+
+  /**
    * Refuses to run a hardened worker on a runtime whose permission model does
    * not gate sockets.
    *
@@ -701,27 +898,21 @@ export class PluginHost {
    * `--allow-addons`.
    */
   private buildWorkerArgs(): string[] {
-    if (!this.hardened) {
-      return [workerEntryPath];
-    }
-
-    const readable = [
-      this.rootDir,
-      realpathSyncOrSelf(import.meta.dirname),
-      this.stateDir,
-      ...WORKER_RUNTIME_PACKAGES.map((specifier) =>
-        realpathSyncOrSelf(resolvePackageDir(specifier)),
-      ),
-    ];
-
-    return [
-      "--permission",
-      ...readable.map((dir) => `--allow-fs-read=${path.join(dir, "*")}`),
-      `--allow-fs-write=${path.join(this.stateDir, "*")}`,
-      "--import",
-      realpathSyncOrSelf(workerPreloadPath),
-      realpathSyncOrSelf(workerEntryPath),
-    ];
+    const packageDir = realpathSyncOrSelf(pluginHostDir);
+    return buildWorkerArgv({
+      hardened: this.hardened,
+      readableDirs: [
+        this.rootDir,
+        packageDir,
+        this.stateDir,
+        ...WORKER_RUNTIME_PACKAGES.map((specifier) =>
+          realpathSyncOrSelf(resolvePackageDir(specifier, packageDir)),
+        ),
+      ],
+      writableDir: this.stateDir,
+      preloadPath: realpathSyncOrSelf(workerPreloadPath),
+      entryPath: realpathSyncOrSelf(workerEntryPath),
+    });
   }
 
   /**
@@ -1181,33 +1372,41 @@ function realpathSyncOrSelf(target: string): string {
 }
 
 /**
- * Absolute directory of an installed package, following pnpm's symlinks to
- * the real path — which is what Node's permission model compares against.
+ * Absolute directory of a package the worker imports, found the way Node's
+ * own resolver would: `node_modules/<specifier>` in each ancestor of the
+ * directory doing the importing, nearest first.
+ *
+ * `from` is the worker entry's own directory, not this module's, because the
+ * worker is what has to resolve these — and once bundled, this module has no
+ * directory worth resolving from. That also retires the `createRequire`
+ * this used to call: a `require.resolve` of a computed specifier is one of
+ * the dynamic-resolution shapes that makes Turbopack's tracer fall back to
+ * tracing the whole project, and Next only re-does the work of Node's
+ * resolver here to reach an answer three lines of `path.join` already give.
+ *
+ * The result is left for the caller to `realpath`: pnpm's `node_modules`
+ * entries are symlinks, and the permission model matches real paths.
  */
-function resolvePackageDir(specifier: string): string {
-  const requireFromHost = createRequire(import.meta.url);
-  let dir: string;
-  try {
-    dir = path.dirname(requireFromHost.resolve(specifier));
-  } catch (error) {
-    throw new Error(
-      `cannot resolve ${specifier}, which the plugin worker must be able to read: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      { cause: error },
+function resolvePackageDir(specifier: string, from: string): string {
+  let dir = path.resolve(from);
+  for (;;) {
+    // `turbopackIgnore` for the same reason as `installedCopiesAbove`.
+    const candidate = path.join(
+      /* turbopackIgnore: true */ dir,
+      "node_modules",
+      ...specifier.split("/"),
     );
-  }
-
-  // Ascend to the directory that owns the package.json. `require.resolve`
-  // has already followed pnpm's symlink to the real path, which is what the
-  // permission model matches against.
-  while (dir !== path.dirname(dir)) {
-    if (existsSync(path.join(dir, "package.json"))) {
-      return dir;
+    if (existsSync(path.join(candidate, "package.json"))) {
+      return candidate;
     }
-    dir = path.dirname(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      throw new Error(
+        `cannot locate ${specifier}, which the plugin worker must be able to read, in any node_modules above ${from}`,
+      );
+    }
+    dir = parent;
   }
-  throw new Error(`cannot locate the package directory for ${specifier}`);
 }
 
 function defaultLogger(entry: HostLogEntry): void {

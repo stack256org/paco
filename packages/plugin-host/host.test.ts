@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readdirSync,
   realpathSync,
@@ -20,9 +21,12 @@ import * as path from "node:path";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
 import { discoverPlugin } from "@paco/plugin-kit";
 import {
+  buildWorkerArgv,
   type CapabilityHandlers,
   type HostLogEntry,
   PluginHost,
+  resolvePluginHostDir,
+  workerEntryPath,
   workerPreloadPath,
 } from "./host.ts";
 import { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
@@ -2360,3 +2364,169 @@ describe("hardened Node floor, unusable runtimes", () => {
 if (!(legacyNode || modernNode)) {
   warnMissingTier("any Node with --permission");
 }
+
+describe("worker script resolution", () => {
+  test("resolves to a directory that really holds both worker scripts", () => {
+    // The whole point. A path that resolves but does not exist is the failure
+    // mode that survives a green build and breaks every plugin at runtime.
+    expect(existsSync(workerEntryPath)).toBe(true);
+    expect(existsSync(workerPreloadPath)).toBe(true);
+    expect(path.basename(workerEntryPath)).toBe("worker-entry.ts");
+    expect(path.basename(workerPreloadPath)).toBe("worker-preload.ts");
+  });
+
+  test("does not throw when a bundler has erased import.meta.dirname", () => {
+    // This is the regression. `path.join(undefined, "worker-entry.ts")` threw
+    // a TypeError while the module was being evaluated, and `next build`
+    // evaluates every route module to collect its page config — so the build
+    // died on whichever route reached this package first.
+    expect(() =>
+      resolvePluginHostDir({ moduleDir: undefined, cwd: "/nowhere-at-all" }),
+    ).not.toThrow();
+    expect(
+      resolvePluginHostDir({ moduleDir: undefined, cwd: "/nowhere-at-all" }),
+    ).toEndWith(path.join("node_modules", "@paco", "plugin-host"));
+  });
+
+  test("finds the installed package from the working directory alone", () => {
+    // `next dev`, `next start` and the `.deb` all run with the web app as the
+    // working directory and this package under its `node_modules` — which is
+    // the only signal left once bundling has erased `import.meta.dirname`.
+    const webDir = path.join(
+      realpathSync(import.meta.dirname),
+      "..",
+      "..",
+      "apps",
+      "web",
+    );
+    const resolved = resolvePluginHostDir({
+      moduleDir: undefined,
+      cwd: webDir,
+      override: undefined,
+    });
+
+    expect(existsSync(path.join(resolved, "worker-entry.ts"))).toBe(true);
+    expect(realpathSync(resolved)).toBe(realpathSync(import.meta.dirname));
+  });
+
+  test("climbs to an installed copy from a bundled chunk's own directory", () => {
+    const chunkDir = path.join(
+      realpathSync(import.meta.dirname),
+      "..",
+      "..",
+      "apps",
+      "web",
+      ".next",
+      "server",
+      "chunks",
+    );
+    const resolved = resolvePluginHostDir({
+      moduleDir: chunkDir,
+      cwd: "/nowhere-at-all",
+      override: undefined,
+    });
+
+    expect(realpathSync(resolved)).toBe(realpathSync(import.meta.dirname));
+  });
+
+  test("an explicit override wins over everything else", () => {
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), "host-dir-")));
+    try {
+      writeFileSync(path.join(dir, "worker-entry.ts"), "");
+      expect(resolvePluginHostDir({ override: dir })).toBe(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an override that does not hold the scripts is ignored, not obeyed", () => {
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), "host-dir-")));
+    try {
+      // Falls through to the real package rather than handing `spawn` a
+      // directory with nothing in it.
+      const resolved = resolvePluginHostDir({ override: dir });
+      expect(resolved).not.toBe(dir);
+      expect(existsSync(path.join(resolved, "worker-entry.ts"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `SECURITY.md` promises the worker gets "no subprocesses, threads, or native
+ * code". Nothing implements that promise: it holds only because
+ * `buildWorkerArgv` does not pass `--allow-child-process`, `--allow-worker` or
+ * `--allow-addons`. An absence is invisible in review and survives exactly as
+ * long as nobody appends a flag — so it is asserted here, by scanning the argv
+ * for anything that grants one of them rather than by pinning the array, which
+ * would fail on a harmless reordering and teach people to re-bless it.
+ */
+describe("hardened worker argv", () => {
+  const FORBIDDEN_GRANTS = [
+    "--allow-child-process",
+    "--allow-worker",
+    "--allow-addons",
+    "--allow-wasi",
+    "--allow-net",
+  ];
+
+  function argv(): string[] {
+    return buildWorkerArgv({
+      hardened: true,
+      readableDirs: ["/plugin/root", "/pkg/dir", "/state/dir"],
+      writableDir: "/state/dir",
+      preloadPath: "/pkg/dir/worker-preload.ts",
+      entryPath: "/pkg/dir/worker-entry.ts",
+    });
+  }
+
+  test("grants nothing that would let a plugin execute code outside its process", () => {
+    for (const flag of argv()) {
+      const granted = FORBIDDEN_GRANTS.find(
+        (forbidden) => flag === forbidden || flag.startsWith(`${forbidden}=`),
+      );
+      expect(
+        granted === undefined
+          ? "no forbidden permission granted"
+          : `argv grants ${granted} — SECURITY.md promises the worker cannot spawn processes, threads or native code`,
+      ).toBe("no forbidden permission granted");
+    }
+  });
+
+  test("turns the permission model on and allows exactly the intended paths", () => {
+    const args = argv();
+
+    // Without `--permission` every `--allow-*` below is inert and the worker
+    // runs with the full filesystem.
+    expect(args).toContain("--permission");
+    expect(args.filter((arg) => arg.startsWith("--allow-fs-read="))).toEqual([
+      `--allow-fs-read=${path.join("/plugin/root", "*")}`,
+      `--allow-fs-read=${path.join("/pkg/dir", "*")}`,
+      `--allow-fs-read=${path.join("/state/dir", "*")}`,
+    ]);
+    // Exactly one writable path, and it is the per-plugin scratch dir.
+    expect(args.filter((arg) => arg.startsWith("--allow-fs-write="))).toEqual([
+      `--allow-fs-write=${path.join("/state/dir", "*")}`,
+    ]);
+    // The preload is what closes the network inside the process; it has to be
+    // the argument to `--import`, and the entry has to be last.
+    expect(args.at(-3)).toBe("--import");
+    expect(args.at(-2)).toBe("/pkg/dir/worker-preload.ts");
+    expect(args.at(-1)).toBe("/pkg/dir/worker-entry.ts");
+  });
+
+  test("the unhardened argv is the entry alone, with no permission flags", () => {
+    // `hardened: false` removes the sandbox entirely — it must not look like a
+    // weaker sandbox, which would be worse than none.
+    expect(
+      buildWorkerArgv({
+        hardened: false,
+        readableDirs: ["/plugin/root"],
+        writableDir: "/state/dir",
+        preloadPath: "/pkg/dir/worker-preload.ts",
+        entryPath: "/pkg/dir/worker-entry.ts",
+      }),
+    ).toEqual(["/pkg/dir/worker-entry.ts"]);
+  });
+});
