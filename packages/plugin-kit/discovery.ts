@@ -2,6 +2,8 @@ import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
+  channelSlotKey,
+  checkChannelDeclarations,
   checkChannelsCapability,
   parsePluginManifest,
   type PluginManifest,
@@ -140,6 +142,14 @@ export async function discoverPlugin(
   );
   if (channelsCapabilityError) {
     return { ok: false, error: channelsCapabilityError };
+  }
+
+  const channelDeclarationError = checkChannelDeclarations(
+    parsed.manifest,
+    channels.map((filePath) => channelSlotKey(filePath)),
+  );
+  if (channelDeclarationError) {
+    return { ok: false, error: channelDeclarationError };
   }
 
   return {

@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { channelAuthMode } from "@paco/plugin-kit";
 import { open } from "@/lib/crypto/secret-box";
 import { getPlugin } from "@/lib/db/plugins";
 import { getPluginRegistry } from "@/lib/plugins/registry";
@@ -39,20 +40,32 @@ import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
  *    caller for it yet, and confirming which of "unknown" and
  *    "unconfigured" applies would leak installed-plugin ids to an
  *    unauthenticated caller.
- * 4. The shared secret is compared in constant time, after being unsealed
- *    with the same `lib/crypto/secret-box` every other stored secret in
- *    this codebase uses (`githubTokens.sealedToken`, `smtpPasswordSealed`).
- *    A secret that fails to unseal (corrupted row, or sealed under a
- *    rotated APP_SECRET) is treated as a bad secret, not a 500: from the
- *    caller's side these are indistinguishable, and the operator's fix is
- *    the same either way — re-enable the plugin to mint a fresh one.
+ * 4. Which auth gate applies is the channel's own manifest declaration
+ *    (`channelAuthMode`). For `"shared-secret"` — the default, and what any
+ *    channel that says nothing gets — the secret is compared in constant
+ *    time, after being unsealed with the same `lib/crypto/secret-box` every
+ *    other stored secret in this codebase uses (`githubTokens.sealedToken`,
+ *    `smtpPasswordSealed`). A secret that fails to unseal (corrupted row, or
+ *    sealed under a rotated APP_SECRET) is treated as a bad secret, not a
+ *    500: from the caller's side these are indistinguishable, and the
+ *    operator's fix is the same either way — re-enable the plugin to mint a
+ *    fresh one. For `"self-verified"` this step is skipped entirely and the
+ *    request reaches the worker unauthenticated, because the providers that
+ *    need it (Slack) cannot attach a custom header and sign the raw body
+ *    instead; the handler's own signature check is then the only gate, which
+ *    is why the mode is declared in the manifest the operator consents to.
  * 5. Only once auth passes does this look at whether the plugin is actually
  *    running, so an attacker probing secrets cannot use response timing (or
  *    the 401-vs-503 distinction) to learn a plugin's up/down state before
- *    they have the secret.
+ *    they have the secret. (A `"self-verified"` channel has no secret to
+ *    probe, so it learns nothing this way that its own 401 would not tell
+ *    it anyway.)
  * 6. Only once auth AND the running check both pass is the body actually
- *    read, and capped — defense-in-depth against a compromised secret
- *    holder, not a boundary an unauthenticated caller can reach at all.
+ *    read, and capped. For `"shared-secret"` that is defense-in-depth
+ *    against a compromised secret holder rather than a boundary an
+ *    unauthenticated caller can reach; for `"self-verified"` it IS such a
+ *    boundary, which is why the cap and both rate limiters above are load
+ *    bearing there.
  */
 
 /** Matches `pluginManifestSchema.name` (`packages/plugin-kit/manifest.ts`). */
@@ -222,23 +235,43 @@ export async function POST(
     return notFound();
   }
 
-  const providedSecret = request.headers.get(INGRESS_SECRET_HEADER);
-  if (!(plugin.ingressSecret && providedSecret)) {
-    return unauthorized();
-  }
+  /*
+   * Which gate this channel gets, per its manifest declaration.
+   *
+   * `"self-verified"` skips the shared-secret comparison ONLY. It exists
+   * because the providers this route is for cannot send a custom header:
+   * Slack's Event Subscriptions UI takes a Request URL and nothing else, and
+   * signs the raw body instead (`x-slack-signature`). A channel that opts in
+   * is stating that its own handler verifies the request, so the request
+   * reaches the worker unauthenticated and the handler's signature check is
+   * the only thing standing in the way — which is why it is declared in the
+   * manifest, where the operator sees it on the consent screen, rather than
+   * decided by plugin code at runtime.
+   *
+   * Everything else below still applies to it: the `channels:ingress` grant
+   * check and the running-plugin check inside `deliverIngress`, both rate
+   * limiters above (which matter MORE here, not less, since there is no
+   * secret to turn away an unauthenticated flood), and the body size cap.
+   */
+  if (channelAuthMode(plugin.manifest, channel) === "shared-secret") {
+    const providedSecret = request.headers.get(INGRESS_SECRET_HEADER);
+    if (!(plugin.ingressSecret && providedSecret)) {
+      return unauthorized();
+    }
 
-  let expectedSecret: string;
-  try {
-    expectedSecret = open(plugin.ingressSecret);
-  } catch {
-    // Corrupted row, or sealed under an APP_SECRET that has since rotated:
-    // indistinguishable from "wrong secret" to the caller, and the fix is
-    // the same (re-enable the plugin to mint a fresh one).
-    return unauthorized();
-  }
+    let expectedSecret: string;
+    try {
+      expectedSecret = open(plugin.ingressSecret);
+    } catch {
+      // Corrupted row, or sealed under an APP_SECRET that has since rotated:
+      // indistinguishable from "wrong secret" to the caller, and the fix is
+      // the same (re-enable the plugin to mint a fresh one).
+      return unauthorized();
+    }
 
-  if (!timingSafeEqualStrings(providedSecret, expectedSecret)) {
-    return unauthorized();
+    if (!timingSafeEqualStrings(providedSecret, expectedSecret)) {
+      return unauthorized();
+    }
   }
 
   const host = getPluginRegistry().get(pluginId);

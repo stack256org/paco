@@ -161,6 +161,55 @@ describe("discoverPlugin", () => {
     expect(result.error).toContain('"channels:ingress"');
   });
 
+  test("returns ok:false when the manifest declares a channel with no slot file", async () => {
+    // A self-verified declaration for a channel that does not exist would
+    // otherwise be a silent no-op — the operator consents to an
+    // unauthenticated ingress path that never materialises. Caught here,
+    // at install, rather than at the first webhook.
+    const rootDir = await makeTempDir();
+    await writeManifest(rootDir, {
+      capabilities: ["channels:ingress"],
+      channels: [{ name: "typo", auth: "self-verified" }],
+    });
+
+    await mkdir(path.join(rootDir, "channels"));
+    await writeFile(path.join(rootDir, "channels", "events.ts"), "");
+
+    const result = await discoverPlugin(rootDir);
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      return;
+    }
+    expect(result.error).toContain("typo");
+  });
+
+  test("accepts a channel declaration matching its slot file's basename", async () => {
+    const rootDir = await makeTempDir();
+    await writeManifest(rootDir, {
+      capabilities: ["channels:ingress"],
+      channels: [{ name: "events", auth: "self-verified" }],
+    });
+
+    await mkdir(path.join(rootDir, "channels"));
+    await writeFile(path.join(rootDir, "channels", "events.ts"), "");
+
+    const result = await discoverPlugin(rootDir);
+    expect(result.ok).toBe(true);
+  });
+
+  test("accepts a channels/ slot file the manifest does not declare", async () => {
+    // Undeclared means shared-secret, which is the default and needs no
+    // manifest entry — only opting into self-verified does.
+    const rootDir = await makeTempDir();
+    await writeManifest(rootDir, { capabilities: ["channels:ingress"] });
+
+    await mkdir(path.join(rootDir, "channels"));
+    await writeFile(path.join(rootDir, "channels", "events.ts"), "");
+
+    const result = await discoverPlugin(rootDir);
+    expect(result.ok).toBe(true);
+  });
+
   test("discovers a channels/ slot when channels:ingress is requested", async () => {
     const rootDir = await makeTempDir();
     await writeManifest(rootDir, { capabilities: ["channels:ingress"] });

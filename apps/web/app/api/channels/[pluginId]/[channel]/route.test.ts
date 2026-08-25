@@ -7,12 +7,27 @@ mock.module("server-only", () => ({}));
 // `secret-box.test.ts` uses.
 process.env.APP_SECRET ??= "test-secret-for-channel-ingress-route-000000";
 
-type PluginRowStub = { id: string; ingressSecret: string | null };
+type PluginRowStub = {
+  id: string;
+  ingressSecret: string | null;
+  /**
+   * Only set by the tests that care which auth gate applies. Omitting it
+   * stands for the common case — a manifest declaring no channel auth modes
+   * at all — which `channelAuthMode` reads as `"shared-secret"`.
+   */
+  manifest?: {
+    channels?: { name: string; auth: "shared-secret" | "self-verified" }[];
+  };
+};
 let pluginRow: PluginRowStub | undefined;
 
 mock.module("@/lib/db/plugins", () => ({
   getPlugin: (id: string) =>
-    Promise.resolve(pluginRow && pluginRow.id === id ? pluginRow : undefined),
+    Promise.resolve(
+      pluginRow && pluginRow.id === id
+        ? { ...pluginRow, manifest: pluginRow.manifest ?? {} }
+        : undefined,
+    ),
 }));
 
 type IngressOutcomeStub =
@@ -138,6 +153,96 @@ describe("POST /api/channels/[pluginId]/[channel]", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  test('a "self-verified" channel is delivered with no secret header at all', async () => {
+    // The reason this mode exists: Slack's Event Subscriptions UI takes a
+    // Request URL and nothing else, so the shared-secret header can never
+    // arrive. The handler verifies the signature itself instead.
+    pluginRow = {
+      id: "slack",
+      ingressSecret: seal(CORRECT_SECRET),
+      manifest: { channels: [{ name: "events", auth: "self-verified" }] },
+    };
+    let seenHeaders: Record<string, string> | undefined;
+    registry = new Map([
+      [
+        "slack",
+        {
+          state: "running",
+          deliverIngress: (
+            _channel: string,
+            headers: Record<string, string>,
+          ) => {
+            seenHeaders = headers;
+            return Promise.resolve({ ok: true as const, status: 200 });
+          },
+        },
+      ],
+    ]);
+
+    const response = await POST(
+      makeRequest({ secret: null }),
+      paramsFor("slack", "events"),
+    );
+
+    expect(response.status).toBe(200);
+    // The handler cannot verify a Slack signature without these.
+    expect(seenHeaders?.["content-type"]).toBe("application/json");
+  });
+
+  test('a "self-verified" declaration applies only to the channel it names', async () => {
+    pluginRow = {
+      id: "slack",
+      ingressSecret: seal(CORRECT_SECRET),
+      manifest: { channels: [{ name: "events", auth: "self-verified" }] },
+    };
+    registry = new Map();
+
+    const response = await POST(
+      makeRequest({ secret: null }),
+      paramsFor("slack", "commands"),
+    );
+
+    // "commands" is undeclared, so it keeps the shared-secret default and a
+    // missing header is still a 401 — not the 503 a delivered request would
+    // have produced against this empty registry.
+    expect(response.status).toBe(401);
+  });
+
+  test('a "shared-secret" declaration behaves exactly like no declaration', async () => {
+    pluginRow = {
+      id: "explicit",
+      ingressSecret: seal(CORRECT_SECRET),
+      manifest: { channels: [{ name: "events", auth: "shared-secret" }] },
+    };
+    registry = new Map();
+
+    const response = await POST(
+      makeRequest({ secret: "wrong" }),
+      paramsFor("explicit", "events"),
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  test('a "self-verified" channel still gets the grant and running checks', async () => {
+    // Skipping the secret must not skip anything else: an operator who never
+    // granted channels:ingress, or a plugin that is down, answers the same
+    // way it would for a shared-secret channel.
+    pluginRow = {
+      id: "slack",
+      ingressSecret: null,
+      manifest: { channels: [{ name: "events", auth: "self-verified" }] },
+    };
+    registry = new Map();
+
+    const response = await POST(
+      makeRequest({ secret: null }),
+      paramsFor("slack", "events"),
+    );
+
+    expect(response.status).toBe(503);
   });
 
   test("503s when the plugin has no host in the registry", async () => {

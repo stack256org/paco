@@ -12,5 +12,6 @@
     "storage:kv",
     "tools:register"
   ],
-  "netDomains": ["slack.com"]
+  "netDomains": ["slack.com"],
+  "channels": [{ "name": "events", "auth": "self-verified" }]
 }

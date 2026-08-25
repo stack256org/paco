@@ -34,11 +34,31 @@ it explicitly:
 3. **Enable** starts the plugin's worker process with the granted set. If
    the plugin has a `channels/` slot (this one does), enabling it also mints
    a per-plugin **ingress secret** and shows it to you **exactly once** — if
-   you lose it, remove and re-enable the plugin to mint a new one. That
-   secret authenticates every inbound webhook this plugin's channels accept:
-   requests must carry it in an `x-paco-channel-secret` header, checked in
-   constant time by `apps/web/app/api/channels/[pluginId]/[channel]/route.ts`
-   before the request ever reaches the plugin's own code.
+   you lose it, remove and re-enable the plugin to mint a new one.
+
+### How an inbound webhook is authenticated
+
+Each `channels/` slot picks one of two gates, declared per channel in
+`plugin.json`'s `channels` array. A channel that says nothing gets the first.
+
+- **`shared-secret`** (the default): the request must carry the plugin's
+  ingress secret in an `x-paco-channel-secret` header, compared in constant
+  time by `apps/web/app/api/channels/[pluginId]/[channel]/route.ts` before
+  the request ever reaches the plugin's own code.
+- **`self-verified`**: Paco does not check the secret, and the request
+  reaches the plugin's handler unauthenticated — the handler verifies it
+  itself. This exists because real providers often cannot attach a custom
+  header: Slack's Event Subscriptions UI takes a Request URL and nothing
+  else, and signs the raw request body instead. A channel that opts in is
+  taking on its own authentication, so the mode is declared in the manifest
+  where you see it at consent time, rather than chosen by plugin code at
+  runtime.
+
+Everything else applies to both. The `channels:ingress` grant, the
+plugin-is-running check, the request body cap, and both rate limiters (one
+per source IP across all plugins, one per plugin+channel+IP) run regardless
+— and they carry more weight for a `self-verified` channel, since there is
+no secret to turn an unauthenticated flood away at the door.
 
 ## Worked example: the Slack channel plugin
 
@@ -71,7 +91,9 @@ Install `local:/abs/path/to/plugins/first-party/slack`, review the
 requested capabilities in the consent dialog (`channels:ingress`,
 `net:fetch` limited to `slack.com`, `messages:post`, `tasks:create`,
 `events:subscribe`, `storage:kv`, `tools:register`), grant them, and enable
-the plugin. Save the ingress secret the enable step shows you.
+the plugin. Enabling still shows you an ingress secret, but this plugin's
+channel does not use it (see "Why this channel verifies its own requests"
+below) — it is there for any other channel you add to the plugin later.
 
 ### 3. Run `slack_setup` from a Paco chat
 
@@ -110,33 +132,36 @@ add `app_mention`. Save.
 | --- | --- | --- |
 | Slack signing secret | `slack_setup`'s `signingSecret` input | Verifies Slack's own request signature. Never sent to Slack. |
 | Slack bot token | `slack_setup`'s `botToken` input | Used to call `chat.postMessage`/`auth.test`. Never sent anywhere but `slack.com`. |
-| Paco ingress secret | Slack's Request URL, as an `x-paco-channel-secret` **header** | See the limitation below — Slack's own UI cannot set a custom header. |
+| Paco ingress secret | *(not used by this channel)* | The `events` channel is declared `self-verified`, so Slack's own request signature is the gate. See below. |
 | Webhook URL | Slack's Event Subscriptions **Request URL** field | Returned by `slack_setup`; also constructable by hand as `<appUrl>/api/channels/slack/events`. |
 
-### A known limitation: Slack cannot set the ingress-secret header
+### Why this channel verifies its own requests
 
-Every inbound webhook, for every plugin's `channels/` slot, is gated by
-Paco's own `x-paco-channel-secret` header **before** the request reaches any
-plugin code (`apps/web/app/api/channels/[pluginId]/[channel]/route.ts`).
 Slack's Events API configuration has no field for adding a custom header to
-its outbound webhook requests — it only lets you set the Request URL itself.
-As shipped, this means Slack's request will be rejected with 401 by Paco's
-generic ingress gate before it ever reaches this plugin's own Slack-signature
-check.
+its outbound webhook requests — it only lets you set the Request URL. So the
+generic `x-paco-channel-secret` gate can never be satisfied by Slack itself.
 
-Until the ingress route accepts the secret some other way Slack *can*
-express (for example as a query parameter on the Request URL, which Slack
-does preserve), a real deployment needs something in front of Paco that
-injects the header — a reverse proxy or edge rule that adds
-`x-paco-channel-secret: <secret>` to requests forwarded to
-`/api/channels/slack/events`. The plugin's own Slack-signature verification
-(`lib/signature.ts`) is unaffected either way and still runs on every
-request that gets through.
+Rather than require a reverse proxy to inject the header, this plugin's
+`plugin.json` declares its channel `self-verified`:
 
-This does not block local verification: a `curl` request can set any header
-directly, so signing a test payload by hand (see the plugin's own
-`slack.test.ts` for how) and sending it with both headers reproduces the
-whole path end to end without needing Slack's own UI to cooperate.
+```json
+"channels": [{ "name": "events", "auth": "self-verified" }]
+```
+
+Paco therefore forwards Slack's request — raw body and all headers — to the
+plugin without checking a secret, and this plugin's own signature check
+(`lib/signature.ts`) is what authenticates it: an HMAC-SHA256 over
+`v0:{timestamp}:{rawBody}` compared in constant time against
+`x-slack-signature`, with the timestamp rejected outside a short window so a
+captured request cannot be replayed. That check is the only thing between
+the public internet and this plugin's handler, which is why it fails closed
+on a missing header, a malformed signature, an unset signing secret, or an
+unparseable timestamp.
+
+The raw body matters: Slack signs the exact bytes it sent, so the ingress
+protocol carries `rawBody` alongside the parsed payload. Re-serialising the
+parsed JSON would produce a different byte string and every real signature
+would fail.
 
 ### What the plugin does with each event
 

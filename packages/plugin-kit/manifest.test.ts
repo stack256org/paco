@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  channelAuthMode,
+  channelSlotKey,
+  checkChannelDeclarations,
   checkChannelsCapability,
   parsePluginManifest,
   pluginManifestSchema,
@@ -233,5 +236,124 @@ describe("parsePluginManifest", () => {
     expect(() => parsePluginManifest("garbage")).not.toThrow();
     expect(() => parsePluginManifest(123)).not.toThrow();
     expect(() => parsePluginManifest(null)).not.toThrow();
+  });
+});
+
+describe("channelSlotKey", () => {
+  test("is a slot file's basename without its extension", () => {
+    expect(channelSlotKey("/plugins/slack/channels/events.ts")).toBe("events");
+    expect(channelSlotKey("/plugins/slack/channels/events.js")).toBe("events");
+    expect(channelSlotKey("channels/events.ts")).toBe("events");
+  });
+
+  test("handles Windows-style separators and a bare filename", () => {
+    expect(channelSlotKey("C:\\plugins\\slack\\channels\\events.ts")).toBe(
+      "events",
+    );
+    expect(channelSlotKey("events.ts")).toBe("events");
+  });
+
+  test("leaves a dotted name that is not a .ts/.js extension alone", () => {
+    expect(channelSlotKey("channels/events.v2.ts")).toBe("events.v2");
+  });
+});
+
+describe("channel auth declarations", () => {
+  test("an undeclared channel defaults to shared-secret", () => {
+    const result = parsePluginManifest(minimalManifest());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(channelAuthMode(result.manifest, "events")).toBe("shared-secret");
+    }
+  });
+
+  test("a declared channel gets the mode it declares", () => {
+    const result = parsePluginManifest(
+      minimalManifest({
+        channels: [
+          { name: "events", auth: "self-verified" },
+          { name: "commands", auth: "shared-secret" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(channelAuthMode(result.manifest, "events")).toBe("self-verified");
+      expect(channelAuthMode(result.manifest, "commands")).toBe(
+        "shared-secret",
+      );
+      // A sibling declaration must not leak onto an unnamed channel.
+      expect(channelAuthMode(result.manifest, "other")).toBe("shared-secret");
+    }
+  });
+
+  test("rejects an unknown auth mode rather than silently defaulting", () => {
+    const result = parsePluginManifest(
+      minimalManifest({ channels: [{ name: "events", auth: "none" }] }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  test("rejects a duplicate channel declaration", () => {
+    const result = parsePluginManifest(
+      minimalManifest({
+        channels: [
+          { name: "events", auth: "self-verified" },
+          { name: "events", auth: "shared-secret" },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("duplicate channel declaration");
+    }
+  });
+});
+
+describe("checkChannelDeclarations", () => {
+  function manifestWith(channels: unknown) {
+    const result = parsePluginManifest(minimalManifest({ channels }));
+    if (!result.ok) {
+      throw new Error(`fixture manifest did not parse: ${result.error}`);
+    }
+    return result.manifest;
+  }
+
+  test("accepts declarations that all have a matching slot file", () => {
+    const manifest = manifestWith([
+      { name: "events", auth: "self-verified" },
+      { name: "commands", auth: "shared-secret" },
+    ]);
+    expect(
+      checkChannelDeclarations(manifest, ["events", "commands"]),
+    ).toBeUndefined();
+  });
+
+  test("rejects a declaration with no matching slot file", () => {
+    // Declaring self-verified for a channel that does not exist would
+    // otherwise be a silent no-op, and the operator would have consented to
+    // an unauthenticated ingress path that never appears.
+    const manifest = manifestWith([{ name: "typo", auth: "self-verified" }]);
+    const error = checkChannelDeclarations(manifest, ["events"]);
+    expect(error).toContain("typo");
+  });
+
+  test("accepts a slot file with no declaration, which defaults to shared-secret", () => {
+    const manifest = manifestWith([{ name: "events", auth: "self-verified" }]);
+    expect(
+      checkChannelDeclarations(manifest, ["events", "undeclared"]),
+    ).toBeUndefined();
+    expect(channelAuthMode(manifest, "undeclared")).toBe("shared-secret");
+  });
+
+  test("accepts a manifest that declares no channels at all", () => {
+    const result = parsePluginManifest(minimalManifest());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(checkChannelDeclarations(result.manifest, [])).toBeUndefined();
+      expect(
+        checkChannelDeclarations(result.manifest, ["events"]),
+      ).toBeUndefined();
+    }
   });
 });
