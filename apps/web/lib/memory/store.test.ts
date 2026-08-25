@@ -76,6 +76,54 @@ describe("renderMemoryFile / parseMemoryFile round-trip", () => {
     ].join("\n");
     expect(parseMemoryFile(broken, "bad-source")).toBeUndefined();
   });
+
+  test("parses a CRLF-encoded file identically to its LF twin", () => {
+    const entry: Omit<MemoryEntry, "slug"> = {
+      title: "Prefers dark mode",
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      source: "distilled",
+      body: "Line one.\nLine two.",
+    };
+
+    const lf = renderMemoryFile(entry);
+    const crlf = lf.replace(/\n/g, "\r\n");
+
+    expect(parseMemoryFile(crlf, "prefers-dark-mode")).toEqual(
+      parseMemoryFile(lf, "prefers-dark-mode"),
+    );
+    expect(parseMemoryFile(crlf, "prefers-dark-mode")).toEqual({
+      slug: "prefers-dark-mode",
+      ...entry,
+    });
+  });
+
+  test("round-trips a body containing a literal '---' line", () => {
+    const entry: Omit<MemoryEntry, "slug"> = {
+      title: "Has a divider",
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      source: "manual",
+      body: "Before the divider.\n---\nAfter the divider.",
+    };
+
+    const rendered = renderMemoryFile(entry);
+    const parsed = parseMemoryFile(rendered, "has-a-divider");
+
+    expect(parsed).toEqual({ slug: "has-a-divider", ...entry });
+  });
+
+  test("round-trips a body containing '\\n---\\n\\n'", () => {
+    const entry: Omit<MemoryEntry, "slug"> = {
+      title: "Has a blank-padded divider",
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      source: "manual",
+      body: "Section one.\n---\n\nSection two.",
+    };
+
+    const rendered = renderMemoryFile(entry);
+    const parsed = parseMemoryFile(rendered, "has-a-blank-padded-divider");
+
+    expect(parsed).toEqual({ slug: "has-a-blank-padded-divider", ...entry });
+  });
 });
 
 describe("listMemory", () => {
@@ -141,6 +189,37 @@ describe("listMemory", () => {
     const entries = await listMemory(dir);
     expect(entries).toHaveLength(1);
   });
+
+  // Running as root bypasses directory permission bits entirely, which would
+  // make this test pass without exercising anything — skip in that case.
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  test.skipIf(isRoot)(
+    "returns [] and logs, without throwing, on a non-ENOENT readdir error",
+    async () => {
+      const locked = path.join(dir, "locked");
+      await writeMemory(locked, {
+        title: "Unreachable",
+        body: "Body",
+        source: "manual",
+      });
+      await fs.chmod(locked, 0o000);
+
+      const originalConsoleError = console.error;
+      const errors: unknown[][] = [];
+      console.error = (...args: unknown[]) => {
+        errors.push(args);
+      };
+      try {
+        const entries = await listMemory(locked);
+        expect(entries).toEqual([]);
+        expect(errors.length).toBeGreaterThan(0);
+      } finally {
+        console.error = originalConsoleError;
+        await fs.chmod(locked, 0o755);
+      }
+    },
+  );
 });
 
 describe("writeMemory", () => {
@@ -165,6 +244,18 @@ describe("writeMemory", () => {
       body: "Body",
       source: "manual",
     });
+    expect(slug).toMatch(/^[a-z0-9-]+$/);
+  });
+
+  test("collapses newlines in the title instead of corrupting the frontmatter", async () => {
+    const { slug } = await writeMemory(dir, {
+      title: "Multi\nLine\r\nTitle",
+      body: "Body",
+      source: "manual",
+    });
+
+    const [entry] = await listMemory(dir);
+    expect(entry?.title).toBe("Multi Line Title");
     expect(slug).toMatch(/^[a-z0-9-]+$/);
   });
 

@@ -64,7 +64,12 @@ export function parseMemoryFile(
   content: string,
   slug: string,
 ): MemoryEntry | undefined {
-  const match = FRONTMATTER_PATTERN.exec(content);
+  // Project memory is git-versioned with no `.gitattributes` of our own to
+  // add to a user's repo, so a CRLF checkout is a real possibility — without
+  // this, `\r` trailing every frontmatter value and the pattern's literal
+  // `\n`s would make every entry fail to parse and silently vanish.
+  const normalized = content.replace(/\r\n/g, "\n");
+  const match = FRONTMATTER_PATTERN.exec(normalized);
   if (!match) {
     return;
   }
@@ -107,10 +112,13 @@ export async function listMemory(dir: string): Promise<MemoryEntry[]> {
   try {
     filenames = await fs.readdir(dir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
+    // Memory is additive context: a failed retrieval must never block or
+    // fail a turn (see the plan's memory invariants), so any readdir error —
+    // not just a missing directory — is swallowed here, not just ENOENT.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[memory] failed to list ${dir}:`, error);
     }
-    throw error;
+    return [];
   }
 
   const entries: MemoryEntry[] = [];
@@ -150,9 +158,13 @@ export async function writeMemory(
   entry: { title: string; body: string; source: MemoryEntry["source"] },
 ): Promise<{ slug: string }> {
   await fs.mkdir(dir, { recursive: true });
-  const slug = slugify(entry.title);
+  // The title becomes a single frontmatter line (`title: "..."`); an
+  // embedded newline would corrupt it, so collapse any run of CR/LF into one
+  // space before it's slugged or rendered.
+  const title = entry.title.replace(/[\r\n]+/g, " ");
+  const slug = slugify(title);
   const content = renderMemoryFile({
-    title: entry.title,
+    title,
     updatedAt: new Date().toISOString(),
     source: entry.source,
     body: entry.body,
