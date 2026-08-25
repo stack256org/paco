@@ -1,5 +1,11 @@
 import { describe, expect, mock, test } from "bun:test";
-import { FakeBackend } from "@paco/agent-backend";
+import { FakeBackend, zeroUsage } from "@paco/agent-backend";
+import type {
+  AgentBackend,
+  BackendCapabilities,
+  TurnContext,
+  TurnHandle,
+} from "@paco/agent-backend";
 import type { UIMessage, UIMessageChunk } from "ai";
 mock.module("server-only", () => ({}));
 
@@ -92,6 +98,67 @@ function makeOptions() {
   } as never;
 }
 
+/** Same fixture as `makeOptions`, plus the fields that flow into `backendOptions`. */
+function makeFullOptions() {
+  return {
+    sandbox: {
+      state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
+      environmentDetails: "",
+      currentBranch: "main",
+    },
+    model: { id: "sonnet", effort: "high" },
+    agents: { explorer: { description: "explores the repo" } },
+  } as never;
+}
+
+interface SpyBackend extends AgentBackend {
+  lastCtx?: TurnContext;
+}
+
+/**
+ * Records the `TurnContext` it was started with, so a test can assert exactly
+ * what `runAgentTurn` forwards to a backend — the thing missing before this
+ * test, per review: a dropped option (e.g. `model`) would otherwise go
+ * unnoticed since no test inspected the call args.
+ *
+ * A plain object rather than a class: the mock above already defines one
+ * class, and lint caps a file at one.
+ */
+function createSpyBackend(): SpyBackend {
+  const spy: SpyBackend = {
+    lastCtx: undefined,
+    capabilities(): BackendCapabilities {
+      return {
+        id: "spy",
+        resume: true,
+        steering: "restart",
+        mcp: false,
+        effort: false,
+        subagents: false,
+      };
+    },
+    startTurn(ctx: TurnContext): TurnHandle {
+      spy.lastCtx = ctx;
+      return {
+        chunks: (async function* () {
+          // no chunks: this backend only exists to record its TurnContext
+        })(),
+        result: Promise.resolve({
+          finishReason: "stop",
+          isError: false,
+          usage: zeroUsage(),
+          resumeToken: "spy-session-1",
+        }),
+        steer: () => Promise.resolve(),
+        interrupt: () => {
+          // no-op: not exercised here
+        },
+      };
+    },
+  };
+  return spy;
+}
+
 describe("runAgentTurn", () => {
   test("stamps the caller's message id onto the response", async () => {
     const { runAgentTurn } = await modulePromise;
@@ -164,5 +231,81 @@ describe("runAgentTurn", () => {
       models: {},
     });
     expect(step.claudeSessionId).toBe("fake-session-1");
+  });
+
+  test("forwards the resolved cwd, prompt, and backend options to startTurn", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = createSpyBackend();
+    const abortController = new AbortController();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: makeFullOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend,
+      claudeSessionId: "prior-session-99",
+      maxTurns: 7,
+      githubToken: "gh-token-abc",
+      chatId: "chat-123",
+      approval: {
+        url: "https://example.test/approve",
+        token: "approval-token-xyz",
+      },
+      abortSignal: abortController.signal,
+      onChunk: async () => {
+        // no-op: this test only inspects the recorded TurnContext
+      },
+    });
+
+    const ctx = backend.lastCtx;
+    expect(ctx?.cwd).toBe("/tmp/paco-workspaces/session_x");
+    expect(ctx?.prompt).toBe("build the thing");
+    expect(ctx?.resumeToken).toBe("prior-session-99");
+    expect(ctx?.abortSignal).toBe(abortController.signal);
+
+    const backendOptions = ctx?.backendOptions as Record<string, unknown>;
+    expect(backendOptions.model).toBe("sonnet");
+    expect(backendOptions.effort).toBe("high");
+    expect(backendOptions.agents).toEqual({
+      explorer: { description: "explores the repo" },
+    });
+    expect(backendOptions.permissionMode).toBe("bypassPermissions");
+    expect(backendOptions.maxTurns).toBe(7);
+    expect(backendOptions.includePartialMessages).toBe(true);
+    expect(backendOptions.settings).toBeDefined();
+
+    const env = backendOptions.env as Record<string, string>;
+    expect(env.GH_TOKEN).toBe("gh-token-abc");
+    expect(env.GITHUB_TOKEN).toBe("gh-token-abc");
+    expect(env.PACO_APPROVAL_URL).toBe("https://example.test/approve");
+    expect(env.PACO_APPROVAL_TOKEN).toBe("approval-token-xyz");
+    expect(env.PACO_APPROVAL_CHAT_ID).toBe("chat-123");
+  });
+
+  test("with no claudeSessionId: mints a fresh sessionId and leaves resumeToken unset", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = createSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "hi",
+      options: makeOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    const ctx = backend.lastCtx;
+    expect(ctx?.resumeToken).toBeUndefined();
+
+    const backendOptions = ctx?.backendOptions as Record<string, unknown>;
+    expect(backendOptions.sessionId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
   });
 });
