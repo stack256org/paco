@@ -363,7 +363,19 @@ export class AcpClient {
 
     this.process = spawn(options.executable ?? "openfx", args, {
       cwd: options.cwd,
-      env: buildMinimalEnv(options.env),
+      // Cast, not a widened return type on `buildMinimalEnv`: Next.js's
+      // own `next/types/global.d.ts` augments the global `NodeJS.ProcessEnv`
+      // with a required `NODE_ENV: 'development' | 'production' | 'test'`
+      // field. `apps/web`'s TS program picks that up for every file it
+      // typechecks, including this one, so `spawn()`'s `env` overload sees
+      // a stricter `ProcessEnv` here than `@paco/openfx-backend`'s own
+      // isolated tsconfig ever does. This env is deliberately minimal
+      // (PATH/HOME plus explicit provider vars, see `buildMinimalEnv`) and
+      // must NOT gain a `NODE_ENV` key just to satisfy that unrelated
+      // ambient type — Node's `spawn()` has no runtime requirement on it.
+      // The object is a valid runtime env either way; only the
+      // compile-time shape differs by which program is doing the checking.
+      env: buildMinimalEnv(options.env) as NodeJS.ProcessEnv,
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
 
