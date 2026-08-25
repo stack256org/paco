@@ -278,8 +278,8 @@ One new settings page: **Memory**.
 
 A full loop, not a roster entry:
 
-1. A chat toggle enters design mode; the `designer` agent (MCP-equipped —
-   e.g. the daisyUI Blueprint server — briefed with a design-system summary
+1. A chat toggle enters design mode; the `designer` agent (equipped with the project's design
+   skills — e.g. the daisyUI skill — and briefed with a design-system summary
    distilled from the repo) produces **2–3 candidate screens as real
    running code on throwaway branches**.
 2. The preview pane splits side-by-side. Candidates are real worktrees with

@@ -133,15 +133,11 @@ See [Architecture & Workspace Structure](docs/agents/architecture.md) for detail
 
 ## UI work
 
-**Use the daisyUI Blueprint MCP for any UI or design work.** Anything that
-renders — a new component, a layout change, restyling an existing one, picking
-colours or spacing — goes through it rather than hand-written Tailwind.
-
-The flow is fixed: pick a unique lowercase `workflowId` for the task, call
-`daisyui_setup_expert` with it and the absolute `projectRoot`, then the
-mandatory `daisyui_rules_enforcer`. Add `daisyui_creative_director` for visual
-direction and `daisyui_page_architect` for a whole page or screen. One
-`workflowId` per cohesive task; never share one across unrelated work.
+**Use the daisyUI skill (`.agents/skills/daisyui/SKILL.md`) for any UI or
+design work.** Anything that renders — a new component, a layout change,
+restyling an existing one, picking colours or spacing — follows that skill
+rather than hand-written Tailwind utility classes. Read it before writing any
+HTML or JSX.
 
 This is not optional polish. The app is built on daisyUI, and hand-rolled
 utility classes drift from its tokens — that is how the composer ended up with
