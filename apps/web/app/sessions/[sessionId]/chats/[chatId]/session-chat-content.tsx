@@ -136,6 +136,7 @@ import { useDestructiveConfirm } from "@/hooks/use-destructive-confirm";
 import {
   COMPACT_CHAT_CONFIRM,
   FORK_CONVERSATION_CONFIRM,
+  REVERT_TURN_CONFIRM,
 } from "./conversation-confirm-copy";
 import { useGitPanel } from "./git-panel-context";
 import { WorkspacePanel } from "./workspace-panel";
@@ -987,12 +988,7 @@ export function SessionChatContent({
       // Destructive and not undoable, so it is confirmed rather than
       // optimistic — and the wording says what actually goes, including any
       // edits made by hand since the turn.
-      const confirmed = await confirmDestructive({
-        confirmLabel: "Revert this turn",
-        description:
-          "Every file change made since — by the agent and by you — will be discarded. This cannot be undone.",
-        title: "Revert this turn?",
-      });
+      const confirmed = await confirmDestructive(REVERT_TURN_CONFIRM);
       if (!confirmed) return;
 
       setRevertingMessageId(messageId);
