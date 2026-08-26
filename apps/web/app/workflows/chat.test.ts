@@ -408,50 +408,15 @@ let generateIdCounter = 0;
 // ran in the same process, breaking it with no relation to what it tests.
 const realAi = await import("ai");
 
+// `convertToModelMessages`/`pruneMessages` used to be stubbed here too, for
+// a `convertMessages` step whose output `runAgentStep` never read. Both the
+// step and the stubs are gone: the real exports now stand, so a file sharing
+// this registry gets the library's behaviour rather than this file's.
 mock.module("ai", () => ({
   ...realAi,
-  convertToModelMessages: async (
-    msgs: Array<Record<string, unknown>>,
-    options?: { convertDataPart?: (part: Record<string, unknown>) => unknown },
-  ) =>
-    msgs.map((message) => {
-      const parts = Array.isArray(message.parts) ? message.parts : [];
-      const content = parts.flatMap((part) => {
-        if (typeof part !== "object" || part === null) {
-          return [];
-        }
-
-        if (part.type === "text" && typeof part.text === "string") {
-          return [{ type: "text", text: part.text }];
-        }
-
-        if (
-          typeof part.type === "string" &&
-          part.type.startsWith("data-") &&
-          options?.convertDataPart
-        ) {
-          const convertedPart = options.convertDataPart(
-            part as Record<string, unknown>,
-          );
-          return convertedPart === undefined ? [] : [convertedPart];
-        }
-
-        return [];
-      });
-
-      return {
-        role: message.role,
-        content,
-      };
-    }),
   generateId: () => `gen-id-${++generateIdCounter}`,
   isToolUIPart: (part: { type: string }) =>
     part.type === "tool-invocation" || part.type.startsWith("tool-"),
-  pruneMessages: ({ messages }: { messages: Array<Record<string, unknown>> }) =>
-    messages.filter((message) => {
-      const content = message.content;
-      return !Array.isArray(content) || content.length > 0;
-    }),
 }));
 
 const setChatResumeTokenSpy = mock(
@@ -502,8 +467,17 @@ const loadMemorySectionForTurnSpy = mock(
 
 /** Lets a test simulate the repo directory failing to resolve. */
 let resolveWorkCwdShouldThrow = false;
+/**
+ * Where `hostWorkspaceFor` says this session's workspace lives.
+ *
+ * A `let` rather than a constant because the attachment tests below stage
+ * real files under it: an attachment too large to inline is written to disk
+ * and the prompt names its path, so proving that requires a directory that
+ * actually exists.
+ */
+let hostWorkspaceDir = "/workspaces/session-1";
 mock.module("@/lib/agent/workspace-paths", () => ({
-  hostWorkspaceFor: () => "/workspaces/session-1",
+  hostWorkspaceFor: () => hostWorkspaceDir,
   resolveWorkCwd: () => {
     if (resolveWorkCwdShouldThrow) {
       throw new Error("Could not resolve the session repo dir");
@@ -840,6 +814,7 @@ beforeEach(() => {
   organizationRecord = { id: "org-1" };
   memorySectionToReturn = undefined;
   resolveWorkCwdShouldThrow = false;
+  hostWorkspaceDir = "/workspaces/session-1";
   resolveChatAgentsResult = undefined;
   resolveChatSkillsResult = undefined;
   resolveChatMcpServersResult = undefined;
@@ -2605,6 +2580,210 @@ describe("design mode", () => {
     // Two of three candidates survived — still something to pick from, so
     // nothing gets cleaned up.
     expect(removeCandidatesSpy).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * Attachments.
+ *
+ * The composer turns an uploaded file — or a pasted block big enough for
+ * `text-attachment-utils.ts` to promote — into a `data-snippet` part, and an
+ * image into a `file` part. Both were persisted and rendered in the
+ * transcript, and neither reached the model: the prompt was built by
+ * filtering the newest user message down to `type === "text"` parts, so the
+ * one part carrying the content was dropped on the floor. Every "why is it
+ * ignoring my log file?" was this.
+ */
+describe("attachments", () => {
+  test("a data-snippet part's filename and content reach the prompt", async () => {
+    await runAgentWorkflow(
+      makeOptions({
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "Why is this failing?" },
+              {
+                type: "data-snippet",
+                id: "snippet-1",
+                data: {
+                  filename: "pasted.log",
+                  content: "ERROR boom\n  at thing (thing.ts:4)",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const prompt = agentTurnCalls[0]?.prompt ?? "";
+    expect(prompt).toContain("Why is this failing?");
+    expect(prompt).toContain("pasted.log");
+    expect(prompt).toContain("ERROR boom");
+    expect(prompt).toContain("at thing (thing.ts:4)");
+  });
+
+  test("the logged prompt is the prompt that was dispatched", async () => {
+    // The spine invariant (`recorder.assertPromptLogged`): what the model saw
+    // has to be what a replay of `turn/start` rebuilds. Enriching the prompt
+    // with attachment content is only honest if the log moves with it.
+    await runAgentWorkflow(
+      makeOptions({
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "Look at this" },
+              {
+                type: "data-snippet",
+                id: "snippet-1",
+                data: { filename: "notes.txt", content: "the contents" },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const started = appendSessionEventsSpy.mock.calls
+      .flatMap(([, events]) => events)
+      .find((event) => event.type === "turn/start") as
+      | { prompt: string }
+      | undefined;
+    expect(started?.prompt).toBe(agentTurnCalls[0]?.prompt);
+    expect(started?.prompt).toContain("the contents");
+  });
+
+  test("a design turn sees the attachment too", async () => {
+    // A design turn that silently ignores an attached mockup is the same bug
+    // as a normal turn that ignores an attached log.
+    await runAgentWorkflow(
+      makeOptions({
+        mode: "design",
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "Build this" },
+              {
+                type: "data-snippet",
+                id: "snippet-1",
+                data: {
+                  filename: "spec.md",
+                  content: "# Spec\n\nA three column layout.",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const runCall = runDesignTurnSpy.mock.calls[0][0] as { prompt: string };
+    expect(runCall.prompt).toContain("Build this");
+    expect(runCall.prompt).toContain("spec.md");
+    expect(runCall.prompt).toContain("A three column layout.");
+  });
+
+  test("an attachment too large to inline is staged to a file the prompt names", async () => {
+    // Attachments are often logs. Inlining a multi-megabyte paste whole is a
+    // different failure — a turn that costs a fortune or is rejected outright
+    // — so past the budget the content goes to disk and the agent is told
+    // where to read it from.
+    const { mkdtempSync } = await import("node:fs");
+    const { readFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    hostWorkspaceDir = mkdtempSync(join(tmpdir(), "paco-attachment-test-"));
+
+    const huge = `${"log line with enough text to matter\n".repeat(20_000)}NEEDLE_AT_THE_END`;
+
+    await runAgentWorkflow(
+      makeOptions({
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "Find the error" },
+              {
+                type: "data-snippet",
+                id: "snippet-1",
+                data: { filename: "huge.log", content: huge },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const prompt = agentTurnCalls[0]?.prompt ?? "";
+    expect(prompt).toContain("Find the error");
+    expect(prompt).toContain("huge.log");
+    // Not inlined: the prompt stays small, and the tail of the file is only
+    // reachable by reading the path.
+    expect(prompt.length).toBeLessThan(huge.length / 10);
+    expect(prompt).not.toContain("NEEDLE_AT_THE_END");
+
+    // The path it names is real, and holds the whole attachment.
+    const pathMatch = prompt.match(/(\/\S*huge\.log)/);
+    expect(pathMatch).not.toBeNull();
+    const staged = await readFile(pathMatch?.[1] ?? "", "utf8");
+    expect(staged).toBe(huge);
+  });
+
+  test("an image reaches the agent as a path it can read", async () => {
+    // `file` parts were dropped by the same filter as `data-snippet` parts.
+    const { mkdtempSync } = await import("node:fs");
+    const { readFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    hostWorkspaceDir = mkdtempSync(join(tmpdir(), "paco-attachment-test-"));
+
+    // A 1x1 transparent PNG.
+    const base64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    await runAgentWorkflow(
+      makeOptions({
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "What is in this screenshot?" },
+              {
+                type: "file",
+                mediaType: "image/png",
+                filename: "shot.png",
+                url: `data:image/png;base64,${base64}`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const prompt = agentTurnCalls[0]?.prompt ?? "";
+    expect(prompt).toContain("What is in this screenshot?");
+    expect(prompt).toContain("shot.png");
+
+    const pathMatch = prompt.match(/(\/\S*shot\.png)/);
+    expect(pathMatch).not.toBeNull();
+    const staged = await readFile(pathMatch?.[1] ?? "");
+    expect(staged.toString("base64")).toBe(base64);
+  });
+
+  test("a message with no attachments still sends the plain text prompt", async () => {
+    await runAgentWorkflow(makeOptions());
+
+    expect(agentTurnCalls[0]?.prompt).toBe("Hello");
   });
 });
 

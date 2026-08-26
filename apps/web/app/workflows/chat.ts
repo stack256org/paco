@@ -1,11 +1,8 @@
 import {
-  convertToModelMessages,
   type FinishReason,
   generateId as generateIdAi,
   isToolUIPart,
   type LanguageModelUsage,
-  type ModelMessage,
-  pruneMessages,
   type UIMessageChunk,
 } from "ai";
 import type { ClaudeAgentDefinition, ClaudeRunUsage } from "@paco/claude-code";
@@ -58,7 +55,14 @@ import {
   runTaskCompletionStep,
   sendFinish,
 } from "./chat-post-finish";
-import { dedupeMessageReasoning } from "@/lib/chat/dedupe-message-reasoning";
+import {
+  composeTurnPrompt,
+  decodeDataUrl,
+  planAttachments,
+  type PromptAttachment,
+  renderAttachmentSection,
+  type StagedAttachment,
+} from "@/lib/chat/attachment-prompt";
 import { deriveAssistantMessage } from "@/lib/chat/derive-from-events";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
@@ -146,33 +150,20 @@ function shouldRefreshDiffCacheForParts(
   );
 }
 
-const convertMessages = async (
-  messages: WebAgentUIMessage[],
-): Promise<ModelMessage[]> => {
-  "use step";
-  const dedupedMessages = messages.map(dedupeMessageReasoning);
-  const modelMessages = await convertToModelMessages<WebAgentUIMessage>(
-    dedupedMessages,
-    {
-      ignoreIncompleteToolCalls: true,
-      convertDataPart: (part) => {
-        if (part.type === "data-snippet") {
-          const { filename, content } = part.data;
-          return {
-            type: "text",
-            text: JSON.stringify({ type: "snippet", filename, content }),
-          };
-        }
-        return undefined;
-      },
-    },
-  );
-
-  return pruneMessages({
-    messages: modelMessages,
-    emptyMessages: "remove",
-  });
-};
+/*
+ * `convertMessages` used to live here: it ran `convertToModelMessages` over
+ * the whole transcript, mapping `data-snippet` parts to text through
+ * `convertDataPart`, and handed the result to `runAgentStep` as a parameter
+ * that function never read. It was the only code that put an attachment's
+ * contents anywhere near the model, and its output went straight in the bin
+ * — which is how uploaded files came to be persisted, rendered, and never
+ * seen by the agent.
+ *
+ * Nothing replaced it as a message list, because there is no message list to
+ * build: the backend owns the transcript and resumes it from its own token,
+ * so a turn sends one prompt and nothing else. What the attachments needed
+ * was to be IN that prompt — see `buildTurnPromptStep` below.
+ */
 
 async function resolveChatModelRuntime(params: {
   userId: string;
@@ -852,7 +843,6 @@ export async function runAgentWorkflow(options: Options) {
       ? latestMessage.id
       : (options.assistantId ?? generateIdAi());
 
-  const modelMessagesPromise = convertMessages(options.messages);
   const inputMessagesPersistPromise = options.inputMessagesPersisted
     ? Promise.resolve()
     : persistInputMessages(options.chatId, options.messages);
@@ -889,7 +879,6 @@ export async function runAgentWorkflow(options: Options) {
     // workflow can mutate this chat.
     await Promise.allSettled([
       runtimePromise,
-      modelMessagesPromise,
       inputMessagesPersistPromise,
       modelRuntimePromise,
     ]);
@@ -945,11 +934,10 @@ export async function runAgentWorkflow(options: Options) {
   let finalSessionRepoDir: string | undefined;
 
   try {
-    const [, runtime, modelRuntime, modelMessages] = await Promise.all([
+    const [, runtime, modelRuntime] = await Promise.all([
       activeStreamClaimPromise,
       runtimePromise,
       modelRuntimePromise,
-      modelMessagesPromise,
       inputMessagesPersistPromise,
     ]);
     selectedModelId = options.selectedModelId ?? modelRuntime.selectedModelId;
@@ -976,6 +964,24 @@ export async function runAgentWorkflow(options: Options) {
       ...(runtime.skills.length > 0 ? { skills: runtime.skills } : {}),
     };
     sandboxState = runtime.sandboxState;
+
+    /*
+     * One prompt, built once, used by whichever kind of turn runs below.
+     *
+     * Computed here rather than at each dispatch because it is the same
+     * prompt either way and because building it stages the message's
+     * attachments — doing that twice would prune the directory out from
+     * under the first copy's paths.
+     *
+     * The prompt comes from the whole message list, not just the newest
+     * entry: when a stopped run is resumed the newest entry is the partial
+     * assistant message, and reading only that yields an empty prompt.
+     */
+    const turnPrompt = await buildTurnPromptStep({
+      messages: options.messages,
+      sandboxState: runtime.sandboxState,
+      chatId: options.chatId,
+    });
 
     /*
      * A design turn runs N parallel candidate variants in their own
@@ -1031,7 +1037,10 @@ export async function runAgentWorkflow(options: Options) {
           extractLatestUserMessageId(options.messages) ?? assistantId,
         baseBranch: runtime.currentBranch,
         count: requestedCandidateCount,
-        prompt: extractLatestUserText(options.messages),
+        // The same prompt the ordinary turn would have dispatched,
+        // attachments included: a design turn that silently ignores an
+        // attached mockup is the bug this file just fixed, wearing a hat.
+        prompt: turnPrompt,
         agentOptions,
         writable,
         ...(iterateCandidate ? { iterateCandidate } : {}),
@@ -1113,7 +1122,6 @@ export async function runAgentWorkflow(options: Options) {
 
       try {
         stepResult = await runAgentStep(
-          modelMessages,
           prompt,
           turnOriginalMessages,
           turnAssistantId,
@@ -1143,7 +1151,6 @@ export async function runAgentWorkflow(options: Options) {
       shouldRefreshCachedDiff =
         shouldRefreshCachedDiff ||
         shouldRefreshDiffCacheForParts(pendingAssistantResponse.parts);
-      modelMessages.push(...stepResult.responseMessages);
       wasAborted = wasAborted || stepResult.stepWasAborted;
       finalFinishReason = stepResult.finishReason;
       exhaustedMaxSteps = stepResult.finishReason === "length";
@@ -1180,11 +1187,8 @@ export async function runAgentWorkflow(options: Options) {
       return stepResult;
     };
 
-    // The prompt comes from the whole message list, not just the newest
-    // entry: when a stopped run is resumed the newest entry is the partial
-    // assistant message, and reading only that yields an empty prompt.
     let result = await runTurn(
-      extractLatestUserText(options.messages),
+      turnPrompt,
       1,
       assistantId,
       extractLatestUserMessageId(options.messages),
@@ -1565,6 +1569,121 @@ function extractLatestUserText(messages: WebAgentUIMessage[]): string {
     .trim();
 }
 
+/**
+ * The newest user turn's attachments, in the order the user attached them.
+ *
+ * The counterpart to `extractLatestUserText`, off the same message and for
+ * the same reason: the newest MESSAGE may be a partial assistant reply when
+ * a stopped run resumes, so both read the newest USER message instead.
+ *
+ * A `file` part carries its payload as a data URL (`lib/image-utils.ts`), so
+ * it is decoded here into bytes that can be written; one that points
+ * somewhere else — a transcript replayed from a persisted row, say — becomes
+ * a `remote` attachment the prompt names rather than one it drops.
+ */
+function extractLatestUserAttachments(
+  messages: WebAgentUIMessage[],
+): PromptAttachment[] {
+  const lastUser = messages.findLast((message) => message.role === "user");
+  if (!lastUser) {
+    return [];
+  }
+
+  const attachments: PromptAttachment[] = [];
+  for (const part of lastUser.parts) {
+    if (part.type === "data-snippet") {
+      attachments.push({
+        kind: "text",
+        filename: part.data.filename,
+        content: part.data.content,
+      });
+      continue;
+    }
+    if (part.type !== "file") {
+      continue;
+    }
+    const decoded = decodeDataUrl(part.url);
+    const filename =
+      part.filename ?? `attachment.${part.mediaType.split("/").pop()}`;
+    attachments.push(
+      decoded
+        ? {
+            kind: "binary",
+            filename,
+            mediaType: part.mediaType || decoded.mediaType,
+            base64: decoded.base64,
+          }
+        : {
+            kind: "remote",
+            filename,
+            mediaType: part.mediaType,
+            url: part.url,
+          },
+    );
+  }
+  return attachments;
+}
+
+/**
+ * Build the single prompt this turn dispatches.
+ *
+ * Both turn kinds go through here — the ordinary turn and the design turn's
+ * fan-out — because "the model never saw the attached mockup" and "the model
+ * never saw the attached log" are the same defect.
+ *
+ * The size rule matters as much as the content rule. An attachment is very
+ * often a log, and a log is the thing users paste without checking its size:
+ * inlining a five-megabyte one is not a fix, it is a turn that costs a
+ * fortune or is refused for length. So small attachments go into the prompt
+ * verbatim and large ones are written to disk beside (never inside) the
+ * repository, with the prompt naming the path and an excerpt — the agent has
+ * `Read` and `Grep`, and using them on demand beats paying for the whole
+ * file on every turn of the conversation.
+ *
+ * A `"use step"` because the staging half touches the filesystem, which the
+ * workflow body — replayed in a sandboxed VM with no Node modules — cannot
+ * do, and because the prompt it returns should survive a replay rather than
+ * being rebuilt against a directory a later turn has since pruned.
+ */
+const buildTurnPromptStep = async (params: {
+  messages: WebAgentUIMessage[];
+  sandboxState: AgentCallOptions["sandbox"]["state"];
+  chatId: string;
+}): Promise<string> => {
+  "use step";
+
+  const text = extractLatestUserText(params.messages);
+  const attachments = extractLatestUserAttachments(params.messages);
+  if (attachments.length === 0) {
+    return text;
+  }
+
+  const plan = planAttachments(attachments);
+  let staged: ReadonlyMap<number, StagedAttachment> = new Map();
+  try {
+    // Dynamically imported for the same reason `runAgentStep` defers its own
+    // sandbox/memory imports: this module is reachable from a `"use
+    // workflow"` body, which must not pull in Node or the sandbox package
+    // statically.
+    const { stageTurnAttachments } =
+      await import("@/lib/chat/attachment-staging");
+    staged = await stageTurnAttachments({
+      sandboxState: params.sandboxState,
+      chatId: params.chatId,
+      userMessageId: extractLatestUserMessageId(params.messages) ?? "turn",
+      plan,
+    });
+  } catch (error) {
+    // Additive, never a turn dependency — the same posture as memory
+    // loading. Whatever could not be written still reaches the model as an
+    // excerpt plus a statement that the rest is missing, which is the one
+    // outcome this whole path exists to prevent being silent.
+    console.error("[workflow] Failed to stage turn attachments:", error);
+  }
+
+  return composeTurnPrompt(text, renderAttachmentSection(plan, staged));
+};
+
 /** Convert Claude Code usage into the AI SDK shape the UI metadata expects. */
 function toLanguageModelUsage(usage: ClaudeRunUsage): LanguageModelUsage {
   const inputTokens = usage.inputTokens + usage.cachedInputTokens;
@@ -1586,7 +1705,15 @@ function toLanguageModelUsage(usage: ClaudeRunUsage): LanguageModelUsage {
 }
 
 const runAgentStep = async (
-  _messages: ModelMessage[],
+  /**
+   * Everything this turn sends the model.
+   *
+   * There is no message-list parameter beside it, and there deliberately no
+   * longer is one: this used to take a `ModelMessage[]` it never referenced,
+   * which meant the only conversion that understood attachments produced a
+   * value nothing read. `buildTurnPromptStep` folds attachments into this
+   * string instead, so what the model sees is what this parameter holds.
+   */
   prompt: string,
   originalMessages: WebAgentUIMessage[],
   messageId: string,
@@ -1937,9 +2064,6 @@ const runAgentStep = async (
 
     return {
       responseMessage,
-      // Claude Code owns the transcript, so nothing is fed back into the
-      // model-message list.
-      responseMessages: [] as ModelMessage[],
       finishReason: step.finishReason,
       rawFinishReason: undefined,
       stepUsage,
@@ -1974,7 +2098,6 @@ const runAgentStep = async (
       await recorder?.finish({ finishReason: "stop", isError: false });
       return {
         responseMessage: undefined,
-        responseMessages: [] as ModelMessage[],
         finishReason: abortedFinishReason,
         rawFinishReason: undefined,
         stepUsage: undefined,
