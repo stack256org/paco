@@ -23,6 +23,7 @@ import {
   splitPath,
   stagedRows,
   statusLabel,
+  statusLetter,
   statusToneClass,
   totalChangeCount,
   type WorkingTreeStatus,
@@ -78,6 +79,14 @@ export type SourceControlPanelProps = {
   toolbarExtra?: ReactNode;
 };
 
+/**
+ * The one-character status column.
+ *
+ * The letter comes from `statusLetter`, not straight off the row: git reports
+ * an untracked file as `A`, and showing that would give an untracked file and
+ * a staged addition the same mark for two states that differ in exactly the
+ * way this list exists to show. VS Code writes `U` there, and so do we.
+ */
 function StatusLetter({ file }: { file: ChangeRow }) {
   const label = statusLabel(file.status, file.untracked);
 
@@ -90,7 +99,7 @@ function StatusLetter({ file }: { file: ChangeRow }) {
       title={label}
     >
       <span className="sr-only">{label}: </span>
-      <span aria-hidden>{file.status}</span>
+      <span aria-hidden>{statusLetter(file.status, file.untracked)}</span>
     </span>
   );
 }

@@ -10,6 +10,7 @@ import {
   splitPath,
   stagedRows,
   statusLabel,
+  statusLetter,
   statusToneClass,
   totalChangeCount,
   type WorkingTreeStatus,
@@ -79,19 +80,36 @@ describe("commitBlocker", () => {
 });
 
 describe("status letters", () => {
-  test("tells an untracked U apart from a conflicted one", () => {
-    expect(statusLabel("U", true)).toBe("Untracked");
+  /*
+   * Git reports an untracked file as `A`, not `U` — it is an addition, and
+   * that is what `git status` calls it. The panel still writes `U`, as VS Code
+   * does, because `A` on an untracked row and `A` on a staged row would be one
+   * letter for the two states this list exists to tell apart.
+   */
+  test("writes U for an untracked file even though git sent A", () => {
+    expect(statusLetter("A", true)).toBe("U");
+    expect(statusLabel("A", true)).toBe("Untracked");
+    expect(statusToneClass("A", true)).toBe("text-success");
+  });
+
+  test("leaves a staged addition as A", () => {
+    expect(statusLetter("A", false)).toBe("A");
+    expect(statusLabel("A", false)).toBe("Added");
+    expect(statusToneClass("A", false)).toBe("text-success");
+  });
+
+  test("a U from git is a conflict, and shows red", () => {
+    expect(statusLetter("U", false)).toBe("U");
     expect(statusLabel("U", false)).toBe("Conflicted");
-    expect(statusToneClass("U", true)).toBe("text-success");
     expect(statusToneClass("U", false)).toBe("text-error");
   });
 
   test("uses the conventional colours for the rest", () => {
     expect(statusToneClass("M", false)).toBe("text-warning");
-    expect(statusToneClass("A", false)).toBe("text-success");
     expect(statusToneClass("D", false)).toBe("text-error");
     expect(statusLabel("R", false)).toBe("Renamed");
     expect(statusLabel("C", false)).toBe("Copied");
+    expect(statusLetter("M", false)).toBe("M");
   });
 });
 
@@ -138,25 +156,34 @@ describe("workingTreeRows", () => {
     const rows = workingTreeRows(
       status({
         unstaged: [{ path: "z/last.ts", status: "M" }],
-        untracked: [{ path: "a/first.ts", status: "U" }],
+        untracked: [{ path: "a/first.ts", status: "A" }],
       }),
     );
 
     expect(rows.map((file) => file.path)).toEqual(["a/first.ts", "z/last.ts"]);
   });
 
-  test("keeps untracked apart from a conflict, though both are U", () => {
+  /*
+   * The invariant the server half guarantees: nothing in `untracked` is ever
+   * `U`, and nothing outside `unstaged` is ever `U`. The flag is what keeps
+   * that readable once the two arrays have been merged into one list.
+   */
+  test("keeps an untracked addition apart from a conflict after the merge", () => {
     const rows = workingTreeRows(
       status({
         unstaged: [{ path: "conflict.ts", status: "U" }],
-        untracked: [{ path: "new.ts", status: "U" }],
+        untracked: [{ path: "new.ts", status: "A" }],
       }),
     );
+    const untracked = rows.find((file) => file.path === "new.ts");
+    const conflict = rows.find((file) => file.path === "conflict.ts");
 
-    expect(rows.find((file) => file.path === "new.ts")?.untracked).toBeTrue();
-    expect(
-      rows.find((file) => file.path === "conflict.ts")?.untracked,
-    ).toBeFalse();
+    expect(untracked?.untracked).toBeTrue();
+    expect(statusLetter(untracked?.status ?? "M", true)).toBe("U");
+    expect(conflict?.untracked).toBeFalse();
+    expect(statusToneClass(untracked?.status ?? "M", true)).not.toBe(
+      statusToneClass(conflict?.status ?? "M", false),
+    );
   });
 
   test("nothing in the index is ever untracked", () => {
@@ -189,7 +216,7 @@ describe("totalChangeCount", () => {
 describe("describeDiscard", () => {
   test("names the file that will be deleted when it is untracked", () => {
     const request = describeDiscard([
-      row({ path: "scratch/notes.md", status: "U", untracked: true }),
+      row({ path: "scratch/notes.md", status: "A", untracked: true }),
     ]);
 
     expect(request.title).toBe("Delete notes.md?");
@@ -211,7 +238,7 @@ describe("describeDiscard", () => {
 
   test("does not offer that promise when only untracked files are going", () => {
     const request = describeDiscard([
-      row({ path: "one.txt", status: "U", untracked: true }),
+      row({ path: "one.txt", status: "A", untracked: true }),
     ]);
 
     expect(request.description).not.toContain("unstage it first");
@@ -221,7 +248,7 @@ describe("describeDiscard", () => {
     const request = describeDiscard([
       row({ path: "a.ts" }),
       row({ path: "b.ts" }),
-      row({ path: "c.txt", status: "U", untracked: true }),
+      row({ path: "c.txt", status: "A", untracked: true }),
     ]);
 
     expect(request.title).toBe("Discard changes in 3 files?");
@@ -242,7 +269,7 @@ describe("describeDiscard", () => {
   test("never leaks a backtick or markdown into the copy shown to a person", () => {
     for (const request of [
       describeDiscard([row()]),
-      describeDiscard([row({ status: "U", untracked: true })]),
+      describeDiscard([row({ status: "A", untracked: true })]),
       describeDiscard([row({ path: "a.ts" }), row({ path: "b.ts" })]),
     ]) {
       expect(request.title).not.toContain("`");

@@ -60,12 +60,17 @@ export type SourceControlApi = {
 /**
  * One row in one of the two lists.
  *
- * `untracked` is not redundant with `status`. Git spends `U` twice: on a file
- * it has never seen, and on a merge conflict. They arrive in different arrays
- * — `untracked` and `unstaged` — and that is the only thing that tells them
- * apart, so the flag has to survive the merge into one flat list. A green `U`
- * meaning "new file" where a red one should say "conflict" is the kind of
- * mistake that gets committed.
+ * `untracked` is not redundant with `status`, and not for the reason it first
+ * looks. Git reports an untracked file as `A` — it is an addition, which is
+ * what it is. `U` is only ever a conflict, and a conflict only ever arrives in
+ * `unstaged`. So the two are already distinguishable, but only while they are
+ * still in separate arrays; this flag is what carries the distinction through
+ * the merge into one flat list.
+ *
+ * It has to survive, because on screen the two rows must not read alike. An
+ * untracked file and a staged addition both carry `A`, and the difference
+ * between them — one is in the commit, the other is not — is the single most
+ * important thing the list has to say.
  */
 export type ChangeRow = FileChange & { untracked: boolean };
 
@@ -94,13 +99,36 @@ export function isSameFile(
   return a.path === b.path && a.staged === b.staged;
 }
 
-/** What a letter means, spelled out for tooltips and screen readers. */
+/**
+ * The letter a row shows, which is not always the letter git sent.
+ *
+ * Git calls an untracked file `A`. VS Code calls it `U`, and so does this
+ * panel: `A` on an untracked row and `A` on a staged row would be one letter
+ * for two states that differ in the only way that matters here — whether the
+ * file is in the commit.
+ *
+ * That leaves `U` on screen meaning two different things, which is safe
+ * because they cannot collide. A `U` from git is always a conflict; a `U` this
+ * function invents is always untracked; and the colour separates them anyway,
+ * red against green.
+ */
+export function statusLetter(
+  status: FileChangeStatus,
+  untracked: boolean,
+): FileChangeStatus {
+  return untracked ? "U" : status;
+}
+
+/** What a row's letter means, spelled out for tooltips and screen readers. */
 export function statusLabel(
   status: FileChangeStatus,
   untracked: boolean,
 ): string {
+  if (untracked) {
+    return "Untracked";
+  }
   if (status === "U") {
-    return untracked ? "Untracked" : "Conflicted";
+    return "Conflicted";
   }
   switch (status) {
     case "M":
@@ -125,8 +153,11 @@ export function statusToneClass(
   status: FileChangeStatus,
   untracked: boolean,
 ): string {
+  if (untracked) {
+    return "text-success";
+  }
   if (status === "U") {
-    return untracked ? "text-success" : "text-error";
+    return "text-error";
   }
   switch (status) {
     case "M":

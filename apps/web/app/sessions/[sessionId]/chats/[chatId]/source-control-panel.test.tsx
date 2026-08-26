@@ -58,7 +58,7 @@ describe("SourceControlPanel — the two lists", () => {
       { path: "apps/web/lib/tokens.ts", status: "A" },
     ],
     unstaged: [{ path: "apps/web/app/page.tsx", status: "M" }],
-    untracked: [{ path: "scratch/notes.md", status: "U" }],
+    untracked: [{ path: "scratch/notes.md", status: "A" }],
   });
 
   test("renders both headings with their own counts", () => {
@@ -81,11 +81,25 @@ describe("SourceControlPanel — the two lists", () => {
     expect(html).toContain("scratch");
   });
 
-  test("marks an untracked file U in green and shows what the letter means", () => {
+  /*
+   * Git sends an untracked file as `A`. The row still shows `U`, as VS Code
+   * does — otherwise an untracked file and the staged addition two rows above
+   * it carry the same mark, and the whole point of the two lists is that those
+   * are not the same thing.
+   */
+  test("marks an untracked file U in green, though git called it A", () => {
     const html = render({ status });
 
     expect(html).toContain("text-success");
     expect(html).toContain("Untracked");
+    expect(html).toContain(">U</span>");
+  });
+
+  test("still marks a staged addition A", () => {
+    const html = render({ status });
+
+    expect(html).toContain("Added");
+    expect(html).toContain(">A</span>");
   });
 
   test("marks a conflict U in red, not as a new file", () => {
