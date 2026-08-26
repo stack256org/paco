@@ -321,3 +321,87 @@ describe("describeBackendLimitations", () => {
     ).toEqual([]);
   });
 });
+
+describe("describeTestResult", () => {
+  /**
+   * The claim the green tick is allowed to make got stronger in exactly one
+   * direction. `initialize` still does not authenticate — a locally
+   * signed-in `pool` answers without the key — but it now echoes the
+   * endpoint the binary resolved, which is the only way an operator can
+   * catch the mistake this form is most likely to produce: a base URL that
+   * is wrong but perfectly well-formed, against which the handshake
+   * succeeds just as happily.
+   */
+  test("carries the resolved endpoint through, so the tick can be checked", async () => {
+    const { describeTestResult } = await modulePromise;
+
+    const result = describeTestResult({
+      success: true,
+      serviceMode: "provider: inference.poolside.ai",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.serviceMode).toBe("provider: inference.poolside.ai");
+  });
+
+  /**
+   * The degrade path. An agent build that does not report the key must leave
+   * the caller making the weaker claim — never an empty endpoint, which
+   * would read as "it resolved nothing".
+   */
+  test("falls back to the weaker claim when no service mode is reported", async () => {
+    const { describeTestResult } = await modulePromise;
+
+    const result = describeTestResult({ success: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe(
+      "Paco started the Poolside agent and it answered.",
+    );
+    expect(result.serviceMode).toBeUndefined();
+  });
+
+  test("treats an empty service mode as absent rather than rendering it", async () => {
+    const { describeTestResult } = await modulePromise;
+
+    expect(
+      describeTestResult({ success: true, serviceMode: "" }).serviceMode,
+    ).toBeUndefined();
+  });
+
+  test("never claims the key was checked", async () => {
+    const { describeTestResult } = await modulePromise;
+
+    const text = [
+      describeTestResult({ success: true, serviceMode: "provider: x" }),
+      describeTestResult({ success: true }),
+    ]
+      .map((entry) => entry.message)
+      .join(" ")
+      .toLowerCase();
+
+    expect(text).not.toContain("key");
+    expect(text).not.toContain("authenticated");
+  });
+
+  test("shows the server's reason for a failure, and its own when there is none", async () => {
+    const { describeTestResult } = await modulePromise;
+
+    expect(
+      describeTestResult({ success: false, error: "pool: no such file" })
+        .message,
+    ).toBe("pool: no such file");
+    expect(describeTestResult({ success: false }).message).toBe(
+      "The Poolside agent refused the handshake.",
+    );
+  });
+
+  test("never carries a service mode on a failed handshake", async () => {
+    const { describeTestResult } = await modulePromise;
+
+    expect(
+      describeTestResult({ success: false, serviceMode: "provider: x" })
+        .serviceMode,
+    ).toBeUndefined();
+  });
+});

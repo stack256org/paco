@@ -63,6 +63,7 @@ const noop = () => {
 function render(
   capabilities: BackendCapabilities,
   backend: ChatBackendSelection = "claude-code",
+  modelId = "sonnet",
 ) {
   return renderToStaticMarkup(
     <ModelEffortBackendControls
@@ -70,7 +71,7 @@ function render(
       capabilities={capabilities}
       disabled={false}
       effort={null}
-      modelId="sonnet"
+      modelId={modelId}
       modelOptions={MODEL_OPTIONS}
       onBackendChange={noop}
       onEffortChange={noop}
@@ -145,6 +146,47 @@ describe("ModelEffortBackendControls", () => {
       "poolside",
     );
     expect(capablePoolside).toContain("Change how hard Paco thinks");
+  });
+
+  /**
+   * The cross-vendor filter, asserted through the one thing a static render
+   * makes observable about it.
+   *
+   * `ModelSelectorCompact` renders the SELECTED option's `shortLabel`, and
+   * falls back to the raw id when the option is not in the list it was given
+   * (`displayText = selectedOption?.shortLabel ?? value`). So a Poolside id
+   * showing as "poolside/laguna-s-2.1" rather than "Laguna S" is proof the
+   * filter removed it.
+   *
+   * This is the client half of the bug `listAllModels()` opened on the
+   * server: once the catalog spans vendors, handing every option to every
+   * backend offers `poolside/laguna-*` to a Claude Code chat, whose CLI
+   * rejects it. `capabilitiesForBackend` expands `models: undefined` into an
+   * explicit Claude id set before it reaches this component, and this test
+   * fails if that expansion stops being honoured here.
+   */
+  test("does not offer another vendor's model to a backend that lists its own", () => {
+    const claudeOnly: BackendCapabilities = {
+      ...CLAUDE_CAPABILITIES,
+      models: ["sonnet", "haiku"],
+    };
+
+    expect(render(claudeOnly, "claude-code", "sonnet")).toContain("Sonnet");
+
+    const html = render(claudeOnly, "claude-code", "poolside/laguna-s-2.1");
+    expect(html).toContain("poolside/laguna-s-2.1");
+    expect(html).not.toContain("Laguna S");
+  });
+
+  /** And the mirror: Poolside's own id survives its own list. */
+  test("offers a Poolside model to a Poolside chat", () => {
+    const html = render(
+      POOLSIDE_CAPABILITIES,
+      "poolside",
+      "poolside/laguna-s-2.1",
+    );
+
+    expect(html).toContain("Laguna S");
   });
 
   test("always shows the backend control regardless of capabilities", () => {

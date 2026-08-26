@@ -21,7 +21,52 @@ export type PoolsideFormState = {
 type TestResult = {
   ok: boolean;
   message: string;
+  /**
+   * The endpoint the binary resolved, echoed back from the handshake. Absent
+   * whenever the agent did not report one — see `describeTestResult`.
+   */
+  serviceMode?: string;
 };
+
+/** What `testPoolsideConnection` answers with. */
+export type PoolsideTestResponse = {
+  success: boolean;
+  error?: string;
+  serviceMode?: string;
+};
+
+/**
+ * Turn a connection-test response into what the alert shows.
+ *
+ * The interesting case is the one that reads like a detail and is not.
+ * `initialize` does not authenticate and it does not validate the base URL:
+ * a handshake against the WRONG endpoint succeeds exactly as happily as one
+ * against the right endpoint, so a green tick on its own is close to
+ * meaningless for the mistake an operator is most likely to have just made.
+ * `poolside/service_mode` echoes what the binary actually resolved, which is
+ * the one thing that makes the tick checkable — hence a separate line rather
+ * than a sentence, so it can be compared with the field above at a glance.
+ *
+ * When the agent reports no service mode, this degrades to the weaker claim
+ * instead of rendering an empty endpoint: an older build that does not send
+ * the key should say less, not appear to have resolved nothing.
+ *
+ * Pure and exported so both branches are testable without a DOM.
+ */
+export function describeTestResult(response: PoolsideTestResponse): TestResult {
+  if (!response.success) {
+    return {
+      ok: false,
+      message: response.error ?? "The Poolside agent refused the handshake.",
+    };
+  }
+
+  return {
+    ok: true,
+    message: "Paco started the Poolside agent and it answered.",
+    ...(response.serviceMode ? { serviceMode: response.serviceMode } : {}),
+  };
+}
 
 /**
  * The form's fields as `poolsideSchema` wants them.
@@ -342,18 +387,7 @@ export function PoolsideProviderSection({
     setTestResult(null);
 
     try {
-      const result = await testPoolsideConnection();
-      if (result.success) {
-        setTestResult({
-          message: "Paco started the Poolside agent and it answered.",
-          ok: true,
-        });
-      } else {
-        setTestResult({
-          message: result.error ?? "The Poolside agent refused the handshake.",
-          ok: false,
-        });
-      }
+      setTestResult(describeTestResult(await testPoolsideConnection()));
     } catch {
       setTestResult({
         message: "The connection test failed to run.",
@@ -427,9 +461,10 @@ export function PoolsideProviderSection({
           <p className="mt-1 text-base-content/60 text-xs">
             Spawns the binary and exchanges a bare handshake — the same first
             frames a real chat turn opens with, without starting a session. That
-            proves Paco can start the Poolside agent. It does not prove the key
-            above is the one in use: a pool binary that is already signed in
-            locally answers the handshake without it.
+            proves Paco can start the Poolside agent, and it reports back which
+            endpoint the binary resolved. It does not prove the key above is the
+            one in use: a pool binary that is already signed in locally answers
+            the handshake without it.
           </p>
 
           <button
@@ -458,7 +493,19 @@ export function PoolsideProviderSection({
               ) : (
                 <AlertTriangle aria-hidden="true" className="size-4 shrink-0" />
               )}
-              <span className="wrap-anywhere">{testResult.message}</span>
+              <div className="min-w-0">
+                <p className="wrap-anywhere">{testResult.message}</p>
+                {testResult.serviceMode ? (
+                  <p className="mt-1 wrap-anywhere opacity-80">
+                    It resolved{" "}
+                    <span className="font-mono">{testResult.serviceMode}</span>
+                    {" — "}
+                    check that against the base URL above. A handshake against
+                    the wrong endpoint succeeds just as happily as one against
+                    the right endpoint.
+                  </p>
+                ) : null}
+              </div>
             </div>
           ) : null}
         </div>

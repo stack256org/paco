@@ -63,12 +63,21 @@ export function ModelEffortBackendControls({
    * The same rule `lib/model-catalog.ts#listAvailableModels` applies on the
    * server, re-applied here because a chat's backend is switched from this
    * very row: `modelOptions` was rendered for whichever backend the page
-   * loaded on. `capabilities.models` is the backend's own list of accepted
-   * ids — `undefined` means the whole catalog applies (Claude Code, whose
-   * tier aliases the catalog is written in), and a list means exactly those
-   * ids and no others. An EMPTY list is the degenerate case of that, not a
-   * separate rule: a backend that takes no id from the picker leaves nothing
-   * to render and the control disappears on its own.
+   * loaded on, and by the time the switch lands it is the wrong list.
+   *
+   * `capabilities.models` is the backend's own list of accepted ids. A list
+   * means exactly those ids and no others; an EMPTY list is the degenerate
+   * case of that, not a separate rule — a backend that takes no id from the
+   * picker leaves nothing to render and the control disappears on its own.
+   *
+   * `undefined` DOES NOT mean "show everything", and must never be made to
+   * mean that here. It was a safe shorthand for "the whole catalog" only
+   * while the catalog was Claude Code's tier aliases and nothing else; now
+   * that it spans vendors, honouring it literally would offer
+   * `poolside/laguna-*` to a Claude Code chat, whose CLI rejects it.
+   * `capabilitiesForBackend` expands `undefined` into the explicit Claude id
+   * set before the object crosses to the client, so the branch below is
+   * reached only by a backend that genuinely accepts anything on offer.
    */
   const accepted = capabilities.models;
   const visibleModelOptions =
