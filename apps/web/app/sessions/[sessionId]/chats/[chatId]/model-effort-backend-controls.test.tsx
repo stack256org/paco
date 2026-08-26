@@ -33,6 +33,7 @@ const CLAUDE_CAPABILITIES: BackendCapabilities = {
   mcp: true,
   effort: true,
   subagents: true,
+  images: true,
 };
 
 /**
@@ -61,6 +62,7 @@ const POOLSIDE_CAPABILITIES: BackendCapabilities = {
   mcp: true,
   effort: false,
   subagents: true,
+  images: false,
   models: ["poolside/laguna-s-2.1"],
 };
 

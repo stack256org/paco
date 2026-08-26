@@ -128,6 +128,8 @@ export const POOLSIDE_LIMITATION_COPY: Readonly<Record<string, string>> = {
     "Paco's own subagent roster and its per-agent model tiers are not available — Poolside delegates to its own internal subagents instead.",
   structuredOutput:
     "Turns that need a schema-shaped answer — task planning and the reviewer gate — come back as free text, so those turns cannot run on Poolside.",
+  images:
+    "Poolside's models cannot see images. An attached screenshot or mockup still reaches the agent as a file it can move, rename or check the size of, but never as a picture it can look at — describe what matters in the message instead.",
   models:
     "The model comes from Poolside's own configuration rather than Paco's model picker, so the picker is hidden on Poolside chats.",
 };

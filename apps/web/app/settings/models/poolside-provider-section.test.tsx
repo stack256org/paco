@@ -230,7 +230,9 @@ describe("describeBackendLimitations", () => {
           (entry) => entry.capability,
         ),
       ),
-    ).toEqual(new Set(["effort", "customAgents", "structuredOutput"]));
+    ).toEqual(
+      new Set(["effort", "images", "customAgents", "structuredOutput"]),
+    );
   });
 
   /**
@@ -315,6 +317,7 @@ describe("describeBackendLimitations", () => {
         mcp: true,
         effort: true,
         subagents: true,
+        images: true,
       }),
     ).toEqual([]);
   });

@@ -1644,6 +1644,12 @@ function extractLatestUserAttachments(
  * workflow body — replayed in a sandboxed VM with no Node modules — cannot
  * do, and because the prompt it returns should survive a replay rather than
  * being rebuilt against a directory a later turn has since pruned.
+ *
+ * Staging an image and naming its path only works if the backend's model can
+ * see one. Poolside's cannot — verified on both `poolside/laguna-*` models —
+ * so the path is still named but the prompt says outright that the picture
+ * is not available, rather than issuing a `Read` instruction that fails.
+ * See `BackendCapabilities.images`.
  */
 const buildTurnPromptStep = async (params: {
   messages: WebAgentUIMessage[];
@@ -1659,6 +1665,40 @@ const buildTurnPromptStep = async (params: {
   }
 
   const plan = planAttachments(attachments);
+
+  /*
+   * Whether the backend THIS chat runs on can actually look at an image.
+   *
+   * Read here, from the chat row, for the same reason `runAgentStep` and
+   * `runDesignTurnStep` read it: the workflow body has no `chat` in scope,
+   * only a `chatId`, and this is a `"use step"` that may do I/O.
+   *
+   * Dynamically imported like `attachment-staging` below —
+   * `backend-capabilities` instantiates the real backends, so a static
+   * import would pull `@paco/claude-code` and `@paco/poolside-backend` into
+   * a module reachable from a `"use workflow"` body.
+   *
+   * Failing open (`true`) on an error: an unreadable chat row must not turn
+   * a working Claude Code turn into one that tells the model it is blind.
+   */
+  let canViewImages = true;
+  if (plan.some((entry) => entry.attachment.kind === "binary")) {
+    try {
+      const [{ getChatById: readChat }, { capabilitiesForBackend }] =
+        await Promise.all([
+          import("@/lib/db/sessions"),
+          import("@/lib/agent/backend-capabilities"),
+        ]);
+      const chatRow = await readChat(params.chatId);
+      canViewImages = capabilitiesForBackend(chatRow?.backend).images;
+    } catch (error) {
+      console.error(
+        "[workflow] Could not resolve the backend's image capability:",
+        error,
+      );
+    }
+  }
+
   let staged: ReadonlyMap<number, StagedAttachment> = new Map();
   try {
     // Dynamically imported for the same reason `runAgentStep` defers its own
@@ -1681,7 +1721,10 @@ const buildTurnPromptStep = async (params: {
     console.error("[workflow] Failed to stage turn attachments:", error);
   }
 
-  return composeTurnPrompt(text, renderAttachmentSection(plan, staged));
+  return composeTurnPrompt(
+    text,
+    renderAttachmentSection(plan, staged, { canViewImages }),
+  );
 };
 
 /** Convert Claude Code usage into the AI SDK shape the UI metadata expects. */

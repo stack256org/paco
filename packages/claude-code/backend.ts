@@ -39,6 +39,11 @@ export class ClaudeCodeBackend implements AgentBackend {
       mcp: true,
       effort: true,
       subagents: true,
+      // The CLI's own `Read` tool description says it "reads images (eg PNG,
+      // JPG) and displays them visually", and Paco's attachment path relies
+      // on exactly that: an uploaded screenshot is staged to disk and named
+      // in the prompt for `Read` to pick up.
+      images: true,
     };
   }
 

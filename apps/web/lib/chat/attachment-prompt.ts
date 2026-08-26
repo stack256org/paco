@@ -129,6 +129,11 @@ export function sanitizeAttachmentFilename(filename: string): string {
  * Binary attachments are never inlined — base64 in a prompt is unreadable to
  * the model and enormous — so an image always becomes a path, which is the
  * form the agent's `Read` tool understands for images.
+ *
+ * Staged either way, even for a backend whose model cannot see images: the
+ * file on disk is still useful for everything about an image that is not
+ * looking at it, and `renderAttachmentSection` is where the difference is
+ * told to the model. See `RenderAttachmentOptions`.
  */
 export function planAttachments(
   attachments: readonly PromptAttachment[],
@@ -216,13 +221,53 @@ function renderStagedText(
   ].join("\n");
 }
 
+/**
+ * What the rendering needs to know about the backend that will read it.
+ *
+ * One field today, and an options object rather than a bare boolean because
+ * "the third positional argument is a boolean" is unreadable at every call
+ * site and because the next capability that changes this text should not
+ * change this signature again.
+ */
+export type RenderAttachmentOptions = {
+  /**
+   * `BackendCapabilities.images` for the backend this turn runs on.
+   *
+   * Defaults to `true` — the assumption every caller written before this
+   * option existed was built on, and the one Claude Code satisfies — so an
+   * omission cannot quietly degrade a turn that was working.
+   */
+  canViewImages: boolean;
+};
+
+const DEFAULT_RENDER_OPTIONS: RenderAttachmentOptions = { canViewImages: true };
+
 function renderStagedBinary(
   attachment: BinaryPromptAttachment,
   staged: StagedAttachment,
+  options: RenderAttachmentOptions,
 ): string {
+  const heading = `### ${attachment.filename} (${attachment.mediaType}, ${formatByteSize(staged.byteSize)}) — saved to ${staged.path}`;
+  if (options.canViewImages) {
+    return [heading, "Use `Read` on that path to view it."].join("\n");
+  }
+  /*
+   * The file is still written and still named, because plenty of real work
+   * on an image needs no eyes — moving it into the repo, checking its size,
+   * converting it, wiring it into a page. Dropping it would take away a
+   * capability the backend genuinely has.
+   *
+   * What must not survive is the instruction to `Read` it "to view it".
+   * On Poolside that call fails outright, and an inline image block is
+   * dropped without even an error, so a prompt that implies the picture
+   * arrived is the exact silent failure the unstaged fallback below was
+   * written to avoid. Same rule, applied one step earlier: state what is
+   * NOT available.
+   */
   return [
-    `### ${attachment.filename} (${attachment.mediaType}, ${formatByteSize(staged.byteSize)}) — saved to ${staged.path}`,
-    "Use `Read` on that path to view it.",
+    heading,
+    'You cannot see images: this chat\'s backend runs a model that does not accept image input, and `Read` on that path fails with "the configured model does not support image inputs".',
+    "The file is on disk, so non-visual work on it still works — but WHAT IT DEPICTS IS NOT available to you. Do not describe, infer or guess at its contents. Ask the user to describe what it shows, or to paste the part that matters as text.",
   ].join("\n");
 }
 
@@ -233,7 +278,10 @@ function renderStagedBinary(
  * rest is missing — the model can then say so instead of answering as
  * though it had read the file.
  */
-function renderUnstaged(attachment: PromptAttachment): string {
+function renderUnstaged(
+  attachment: PromptAttachment,
+  options: RenderAttachmentOptions,
+): string {
   if (attachment.kind === "text") {
     const fence = fenceFor(attachment.content);
     const truncated = attachment.content.length > ATTACHMENT_EXCERPT_CHAR_LIMIT;
@@ -252,7 +300,9 @@ function renderUnstaged(attachment: PromptAttachment): string {
   if (attachment.kind === "binary") {
     return [
       `### ${attachment.filename} (${attachment.mediaType})`,
-      "The user attached this file, but it could not be saved anywhere you can read it. Say so rather than guessing at its contents.",
+      options.canViewImages
+        ? "The user attached this file, but it could not be saved anywhere you can read it. Say so rather than guessing at its contents."
+        : "The user attached this file. It could not be saved anywhere you can read it, and you cannot see images anyway — this chat's backend runs a model that does not accept image input. Its contents are NOT available to you. Ask the user to describe what it shows rather than guessing.",
     ].join("\n");
   }
   return renderReference(attachment);
@@ -276,6 +326,7 @@ function renderReference(attachment: RemotePromptAttachment): string {
 export function renderAttachmentSection(
   plan: readonly AttachmentPlanEntry[],
   staged: ReadonlyMap<number, StagedAttachment>,
+  options: RenderAttachmentOptions = DEFAULT_RENDER_OPTIONS,
 ): string {
   if (plan.length === 0) {
     return "";
@@ -293,13 +344,13 @@ export function renderAttachmentSection(
       return renderInline(entry.attachment);
     }
     if (!written) {
-      return renderUnstaged(entry.attachment);
+      return renderUnstaged(entry.attachment, options);
     }
     if (entry.attachment.kind === "text") {
       return renderStagedText(entry.attachment, written);
     }
     if (entry.attachment.kind === "binary") {
-      return renderStagedBinary(entry.attachment, written);
+      return renderStagedBinary(entry.attachment, written, options);
     }
     return renderReference(entry.attachment);
   });

@@ -174,6 +174,96 @@ describe("renderAttachmentSection", () => {
   });
 });
 
+/**
+ * A staged image is only useful if the model can actually look at it, and on
+ * Poolside it cannot: both `poolside/laguna-*` models answer "IMAGE-NOT-
+ * VISIBLE" to an inline image block and fail `Read` on a PNG with "the
+ * configured model does not support image inputs". Telling such a model to
+ * `Read` the path is a confident-looking instruction that cannot work, and
+ * the fallback for a failed write already establishes the rule: say what is
+ * NOT available rather than implying it is.
+ */
+describe("renderAttachmentSection, backend that cannot see images", () => {
+  const image: PromptAttachment = {
+    kind: "binary",
+    filename: "shot.png",
+    mediaType: "image/png",
+    base64: "AAAA",
+  };
+  const staged = new Map([
+    [0, { path: "/w/.paco-attachments/shot.png", byteSize: 3 }],
+  ]);
+
+  test("tells a sighted backend to Read the staged image", () => {
+    const section = renderAttachmentSection(planAttachments([image]), staged, {
+      canViewImages: true,
+    });
+    expect(section).toContain("/w/.paco-attachments/shot.png");
+    expect(section).toContain("Use `Read` on that path to view it.");
+  });
+
+  test("never tells a blind backend to Read the image to view it", () => {
+    const section = renderAttachmentSection(planAttachments([image]), staged, {
+      canViewImages: false,
+    });
+    expect(section).not.toContain("Use `Read` on that path to view it.");
+  });
+
+  test("states plainly that the image's contents are not available", () => {
+    const section = renderAttachmentSection(planAttachments([image]), staged, {
+      canViewImages: false,
+    });
+    expect(section).toContain("cannot see images");
+    expect(section).toContain("NOT available to you");
+    expect(section).toContain("Ask the user to describe");
+  });
+
+  test("still names the path, because non-visual work on the file is real", () => {
+    // Moving it into the repo, checking its size, converting it: none of
+    // that needs eyes, and dropping the file would remove a capability the
+    // backend does have.
+    const section = renderAttachmentSection(planAttachments([image]), staged, {
+      canViewImages: false,
+    });
+    expect(section).toContain("/w/.paco-attachments/shot.png");
+  });
+
+  test("leaves text attachments completely alone", () => {
+    const plan = planAttachments([textAttachment("notes.txt", "ERROR boom")]);
+    expect(
+      renderAttachmentSection(plan, noneStagedTop, { canViewImages: false }),
+    ).toBe(
+      renderAttachmentSection(plan, noneStagedTop, { canViewImages: true }),
+    );
+  });
+
+  test("defaults to the sighted rendering when no capability is given", () => {
+    // Every caller written before this option existed assumed a model that
+    // could look at the file; that assumption stays the default so an
+    // omission cannot quietly degrade a Claude Code turn.
+    expect(renderAttachmentSection(planAttachments([image]), staged)).toBe(
+      renderAttachmentSection(planAttachments([image]), staged, {
+        canViewImages: true,
+      }),
+    );
+  });
+
+  test("says the image is unreachable AND unviewable when staging failed", () => {
+    const section = renderAttachmentSection(
+      planAttachments([image]),
+      new Map(),
+      {
+        canViewImages: false,
+      },
+    );
+    expect(section).toContain("shot.png");
+    expect(section).toContain("cannot see images");
+    expect(section).not.toContain("Use `Read` on that path to view it.");
+  });
+});
+
+const noneStagedTop: ReadonlyMap<number, StagedAttachment> = new Map();
+
 describe("composeTurnPrompt", () => {
   test("keeps a plain message untouched", () => {
     expect(composeTurnPrompt("Hello", "")).toBe("Hello");

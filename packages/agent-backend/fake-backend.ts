@@ -45,6 +45,8 @@ export class FakeBackend implements AgentBackend {
       mcp: false,
       effort: false,
       subagents: false,
+      // Literally true of a scripted backend: it never looks at anything.
+      images: false,
     };
   }
 

@@ -372,6 +372,33 @@ export class PoolsideBackend implements AgentBackend {
       // Poolside delegates to its own subagents (usage `_meta` carries
       // `poolside/subagentTotals`), so the UI should know they exist.
       subagents: true,
+      /*
+       * FALSE, measured — and the single most misleading `true` in the
+       * protocol sits right next to it.
+       *
+       * `initialize` answers `promptCapabilities: {image: true}`. That is
+       * the ACP TRANSPORT saying it will carry an image content block; it
+       * says nothing about the model on the other end, and both models this
+       * backend offers are blind. Against `pool` 1.0.16, with a 64x64 solid
+       * red PNG, on `poolside/laguna-s-2.1` AND `poolside/laguna-xs-2.1`:
+       *
+       * - An inline `{type: "image", mimeType: "image/png", data}` block in
+       *   `session/prompt` returns `stopReason: "end_turn"` with no error
+       *   at all, and the model answers "IMAGE-NOT-VISIBLE". The image is
+       *   dropped silently — no tool failure, no protocol error, nothing a
+       *   caller could branch on.
+       * - The agent's own `Read` on the staged file fails with
+       *   `the configured model does not support image inputs`. ("the
+       *   CONFIGURED model" is what first suggested this might vary by
+       *   model. It does not: both were probed, both fail.)
+       *
+       * `PoolsideBackendOptions.images` therefore still TYPES an image
+       * block — the protocol takes one — but sending it accomplishes
+       * nothing today, which is what this field is here to tell callers.
+       * Flip it only after a live turn names the colour of a solid-colour
+       * PNG without shelling out.
+       */
+      images: false,
       // ...but the client cannot INSTALL a roster.
       // `_meta["poolside/session_agent_config"]` selects an already-defined
       // agent — it demands an agent id and name — and nothing in the

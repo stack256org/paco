@@ -159,6 +159,12 @@ describe("PoolsideBackend", () => {
       // against Paco's five, and this boolean cannot say so.
       effort: false,
       subagents: true,
+      // False, and measured on BOTH shipped models rather than inferred:
+      // `promptCapabilities: {image: true}` in the handshake is the ACP
+      // transport talking, not the model. An inline image block is dropped
+      // in silence and `Read` on a staged PNG fails with "the configured
+      // model does not support image inputs". See backend.ts.
+      images: false,
       customAgents: false,
       structuredOutput: false,
       models: ["poolside/laguna-s-2.1", "poolside/laguna-xs-2.1"],

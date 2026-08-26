@@ -2779,6 +2779,137 @@ describe("attachments", () => {
     expect(staged.toString("base64")).toBe(base64);
   });
 
+  /**
+   * Staging a PNG and telling the agent to `Read` it is only honest if the
+   * agent can see one. Poolside's models cannot — verified live on both
+   * `poolside/laguna-s-2.1` and `poolside/laguna-xs-2.1` against `pool`
+   * 1.0.16 — so this is the point where the prompt has to stop implying
+   * otherwise. Before this, a screenshot on a Poolside chat produced a
+   * confident "Use `Read` on that path to view it." and a blind agent.
+   */
+  test("a blind backend is told plainly that it cannot see the attached image", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    hostWorkspaceDir = mkdtempSync(join(tmpdir(), "paco-attachment-test-"));
+    testChatRecord = { ...testChatRecord, backend: "poolside" };
+
+    const base64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    await runAgentWorkflow(
+      makeOptions({
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "What is in this screenshot?" },
+              {
+                type: "file",
+                mediaType: "image/png",
+                filename: "shot.png",
+                url: `data:image/png;base64,${base64}`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const prompt = agentTurnCalls[0]?.prompt ?? "";
+    expect(prompt).not.toContain("Use `Read` on that path to view it.");
+    expect(prompt).toContain("You cannot see images");
+    expect(prompt).toContain("NOT available to you");
+    // Still staged and still named: moving the file, renaming it or checking
+    // its size needs no eyes, and dropping it would remove a capability
+    // Poolside genuinely has.
+    expect(prompt).toContain("shot.png");
+    expect(prompt).toMatch(/\/\S*shot\.png/);
+  });
+
+  test("a sighted backend's image prompt is unchanged", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    hostWorkspaceDir = mkdtempSync(join(tmpdir(), "paco-attachment-test-"));
+
+    const base64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    await runAgentWorkflow(
+      makeOptions({
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "What is in this screenshot?" },
+              {
+                type: "file",
+                mediaType: "image/png",
+                filename: "shot.png",
+                url: `data:image/png;base64,${base64}`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const prompt = agentTurnCalls[0]?.prompt ?? "";
+    expect(prompt).toContain("Use `Read` on that path to view it.");
+    expect(prompt).not.toContain("You cannot see images");
+  });
+
+  /**
+   * Design mode is reachable on a Poolside chat (the composer's Design
+   * toggle is always visible, and `runDesignTurnStep` passes the chat's own
+   * backend through to its candidates), and it is where a reference mockup
+   * matters most. Its candidates are reviewed by the USER in an iframe, not
+   * by the agent looking at pixels, so the mode still works — but the
+   * mockup in the prompt has to carry the same honest wording.
+   */
+  test("a design turn on a blind backend carries the same warning", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    hostWorkspaceDir = mkdtempSync(join(tmpdir(), "paco-attachment-test-"));
+    testChatRecord = { ...testChatRecord, backend: "poolside" };
+
+    const base64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    await runAgentWorkflow(
+      makeOptions({
+        mode: "design",
+        messages: [
+          {
+            id: "user-1",
+            role: "user" as const,
+            parts: [
+              { type: "text", text: "Build this mockup" },
+              {
+                type: "file",
+                mediaType: "image/png",
+                filename: "mockup.png",
+                url: `data:image/png;base64,${base64}`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const runCall = runDesignTurnSpy.mock.calls[0][0] as { prompt: string };
+    expect(runCall.prompt).toContain("Build this mockup");
+    expect(runCall.prompt).toContain("You cannot see images");
+    expect(runCall.prompt).not.toContain("Use `Read` on that path to view it.");
+  });
+
   test("a message with no attachments still sends the plain text prompt", async () => {
     await runAgentWorkflow(makeOptions());
 

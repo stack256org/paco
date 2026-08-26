@@ -298,6 +298,9 @@ describe("ClaudeCodeBackend", () => {
       mcp: true,
       effort: true,
       subagents: true,
+      // True: the CLI's `Read` renders an image for the model, which is what
+      // the attachment path stages a PNG to disk for.
+      images: true,
     });
   });
 

@@ -69,6 +69,34 @@ describe("capabilitiesForBackend", () => {
     ]);
   });
 
+  /**
+   * The one capability the ACP handshake actively lies about.
+   *
+   * `initialize` answers `promptCapabilities: {image: true}` for Poolside,
+   * which is the TRANSPORT agreeing to carry an image block. Both models
+   * behind it are blind, measured against `pool` 1.0.16: an inline image
+   * block returns `stopReason: "end_turn"` with no error while the model
+   * answers "IMAGE-NOT-VISIBLE", and `Read` on a staged PNG fails with "the
+   * configured model does not support image inputs".
+   *
+   * This is the value the composer and the turn prompt both branch on, so
+   * pin it here rather than only in the package's own test: this is where it
+   * crosses to the client.
+   */
+  test("poolside declares that its model cannot see images", async () => {
+    const { capabilitiesForBackend } = await modulePromise;
+
+    expect(capabilitiesForBackend("poolside").images).toBe(false);
+  });
+
+  test("claude-code declares that it can, which the attachment path relies on", async () => {
+    const { capabilitiesForBackend } = await modulePromise;
+
+    // Not `undefined`: unlike `customAgents`/`structuredOutput`, `images` is
+    // required precisely so no backend can answer by omission.
+    expect(capabilitiesForBackend("claude-code").images).toBe(true);
+  });
+
   /** MCP is declared true AND received — see `run-step.test.ts`. */
   test("poolside declares mcp, resume and steering", async () => {
     const { capabilitiesForBackend } = await modulePromise;

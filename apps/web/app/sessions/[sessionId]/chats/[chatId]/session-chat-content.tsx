@@ -49,6 +49,7 @@ import {
 } from "@/components/assistant-file-link";
 import { FileSuggestionsDropdown } from "@/components/file-suggestions-dropdown";
 import { ImageAttachmentsPreview } from "@/components/image-attachments-preview";
+import { UnviewableImageNotice } from "./unviewable-image-notice";
 import { TextAttachmentsPreview } from "@/components/text-attachments-preview";
 import type { ChatBackendSelection } from "@/components/backend-selector-compact";
 import { useInlineQuestion } from "@/components/inline-question-input";
@@ -3337,6 +3338,18 @@ export function SessionChatContent({
                                 className="p-0"
                               />
                             )}
+                            {/*
+                              Under the thumbnails, inside the same row, so it
+                              reads as a caption on the images it is about —
+                              and only when this chat's backend actually
+                              cannot see them (`capabilities.images`, the same
+                              capability-driven rule that hides the effort
+                              control). It renders nothing otherwise.
+                            */}
+                            <UnviewableImageNotice
+                              capabilities={chatCapabilities}
+                              imageCount={images.length}
+                            />
                           </div>
                         )}
 

@@ -195,6 +195,7 @@ function createPoolsideSpyBackend(): SpyBackend {
         mcp: true,
         effort: false,
         subagents: true,
+        images: false,
         customAgents: false,
         structuredOutput: false,
         models: POOLSIDE_MODELS,
@@ -239,6 +240,7 @@ function createSpyBackend(): SpyBackend {
         mcp: false,
         effort: false,
         subagents: false,
+        images: false,
       };
     },
     startTurn(ctx: TurnContext): TurnHandle {

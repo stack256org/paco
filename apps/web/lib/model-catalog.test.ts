@@ -15,6 +15,7 @@ function capabilities(
     mcp: true,
     effort: true,
     subagents: true,
+    images: true,
     ...overrides,
   };
 }

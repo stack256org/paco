@@ -19,6 +19,34 @@ export interface BackendCapabilities {
   /** Does the backend run its own subagent roster? */
   subagents: boolean;
   /**
+   * Can the backend's CONFIGURED MODEL actually accept image input?
+   *
+   * Not a protocol question, and that distinction is the whole reason this
+   * field exists. ACP's `initialize` handshake answers
+   * `promptCapabilities: {image: true}` for Poolside — the TRANSPORT will
+   * carry an image content block — while every model behind it is blind.
+   * Measured against `pool` 1.0.16, both shipped models, both delivery
+   * paths:
+   *
+   * - An inline `{type: "image"}` block in `session/prompt` is accepted
+   *   with `stopReason: "end_turn"` and NO error, and the model answers
+   *   "IMAGE-NOT-VISIBLE" — a silent drop, on `poolside/laguna-s-2.1` and
+   *   `poolside/laguna-xs-2.1` alike.
+   * - The agent's own `Read` on a staged `.png` fails with "the configured
+   *   model does not support image inputs", again on both models.
+   *
+   * So do NOT "fix" a `false` here by re-reading the handshake: the
+   * handshake is what makes the failure silent. Change it only when a live
+   * turn on that backend reports the colour of a solid-colour PNG without
+   * shelling out to Python.
+   *
+   * Required rather than optional on purpose. The other soft capabilities
+   * below let `undefined` mean "yes" for backends written before they
+   * existed; that default is exactly what hid this one for a release, so
+   * every backend has to answer in writing.
+   */
+  images: boolean;
+  /**
    * Can the CALLER install its own subagent roster (Paco's Section 3
    * agents, with their per-agent model tiers)?
    *
