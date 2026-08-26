@@ -306,7 +306,7 @@ export function ToolLayout({
               : "grid-rows-[0fr] opacity-0 pointer-events-none duration-150 ease-out",
           )}
         >
-          <div className="min-h-0">
+          <div className="min-h-0 min-w-0">
             {shouldRenderExpandedContent && (
               <div className="space-y-2 pb-1">
                 {showErrorExpanded &&

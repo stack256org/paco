@@ -2699,7 +2699,7 @@ export function SessionChatContent({
                                           )}
                                         </div>
                                       ) : (
-                                        <div className="group min-w-0 w-full overflow-hidden">
+                                        <div className="group min-w-0 w-full overflow-hidden wrap-anywhere">
                                           <Streamdown
                                             animated={
                                               isMessageStreaming

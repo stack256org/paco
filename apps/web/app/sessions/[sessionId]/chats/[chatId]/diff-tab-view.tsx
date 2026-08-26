@@ -157,7 +157,7 @@ function FileDiffSection({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-base-200/50"
+        className="flex w-full min-w-0 items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-base-200/50"
       >
         <ChevronRight
           className={cn(
@@ -166,7 +166,7 @@ function FileDiffSection({
           )}
         />
         <FileStatusIcon status={file.status} />
-        <span className="shrink-0 text-xs font-medium text-base-content font-mono">
+        <span className="min-w-0 truncate text-xs font-medium text-base-content font-mono">
           {fileName}
         </span>
         {dirPath && (

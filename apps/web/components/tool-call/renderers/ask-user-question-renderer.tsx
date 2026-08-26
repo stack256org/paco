@@ -50,8 +50,10 @@ export function AskUserQuestionRenderer({
             : (answer ?? "(not answered)");
           return (
             <div key={questionKey} className="space-y-0.5">
-              <p className="text-sm text-base-content">{questionKey}</p>
-              <p className="text-sm text-base-content/60">
+              <p className="wrap-anywhere text-sm text-base-content">
+                {questionKey}
+              </p>
+              <p className="wrap-anywhere text-sm text-base-content/60">
                 <span className="text-success">&rarr;</span> {answerStr}
               </p>
             </div>
