@@ -1293,7 +1293,9 @@ export async function runAgentWorkflow(options: Options) {
      * When there is nothing to propose the turn says so in the transcript as a
      * skipped pull-request card, rather than silently doing nothing: the
      * setting is on, the operator expects a pull request, and "commit your
-     * changes first" is the answer.
+     * changes first" is the answer. This is now the *ordinary* outcome of a
+     * turn rather than an edge case, so the card is read often and its words
+     * have to survive the truncation the card applies to them.
      */
     const autoCreatePrRequested =
       (options.autoPushEnabled ?? modelRuntime.autoPushEnabled) &&
@@ -1348,8 +1350,11 @@ export async function runAgentWorkflow(options: Options) {
           id: prPartId,
           data: {
             status: "skipped",
-            skipReason:
-              "Nothing is committed yet. Commit your changes in the Source Control panel, and the next turn will open the pull request.",
+            // Short because the card that shows it is a one-line separator
+            // label with `truncate` on it (`git-data-part-card.tsx`): a
+            // sentence gets cut off mid-word, and the half that carries the
+            // instruction is the half that disappears.
+            skipReason: "Nothing committed yet — commit to open a pull request",
           },
         };
         pendingAssistantResponse = upsertAssistantDataPart(

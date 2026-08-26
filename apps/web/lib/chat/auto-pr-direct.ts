@@ -82,9 +82,12 @@ export async function performAutoCreatePr(
       created: false,
       syncedExisting: false,
       skipped: true,
+      // Kept short deliberately: `git-data-part-card.tsx` renders a skip
+      // reason as a single truncated line, so a sentence loses its ending —
+      // which is where the instruction lives.
       skipReason: ahead.success
-        ? "Nothing is committed yet, so there is nothing to propose. Commit your changes in the Source Control panel first."
-        : `We couldn't compare this branch with ${params.baseBranch} on GitHub.`,
+        ? "Nothing committed yet — commit to open a pull request"
+        : `Couldn't compare this branch with ${params.baseBranch}`,
     };
   }
 

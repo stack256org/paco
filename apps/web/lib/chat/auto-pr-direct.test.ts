@@ -124,7 +124,11 @@ describe("performAutoCreatePr", () => {
     const result = await performAutoCreatePr(PARAMS);
 
     expect(result).toMatchObject({ skipped: true });
-    expect(result.skipReason).toContain("Source Control");
+    expect(result.skipReason).toBe(
+      "Nothing committed yet — commit to open a pull request",
+    );
+    // Short enough to survive the truncated one-line label it is shown in.
+    expect(result.skipReason?.length).toBeLessThanOrEqual(60);
     expect(pushCalls).toHaveLength(0);
     expect(createCalls).toHaveLength(0);
   });

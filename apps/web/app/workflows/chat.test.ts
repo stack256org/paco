@@ -1663,7 +1663,12 @@ describe("runAgentWorkflow", () => {
     ) as Array<{ data: { status: string; skipReason?: string } }>;
     expect(prChunks).toHaveLength(1);
     expect(prChunks[0]?.data.status).toBe("skipped");
-    expect(prChunks[0]?.data.skipReason).toContain("Source Control");
+    expect(prChunks[0]?.data.skipReason).toBe(
+      "Nothing committed yet — commit to open a pull request",
+    );
+    // The card renders this as one truncated line, so a reason that runs long
+    // loses its ending — and the ending is the instruction.
+    expect(prChunks[0]?.data.skipReason?.length).toBeLessThanOrEqual(60);
   });
 
   test("streams and persists the resolved pull-request part", async () => {
