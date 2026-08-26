@@ -38,6 +38,53 @@ describe("buildPoolsideBackendConfig", () => {
     expect(buildPoolsideBackendConfig({})).toEqual({});
   });
 
+  /**
+   * The login-only host, which is a first-class configuration and not a
+   * half-finished one: `sudo paco auth poolside` runs `pool login` as the
+   * service user, `AcpClient` forwards HOME/XDG_CONFIG_HOME, and the process
+   * reads its own credentials file. Nothing is typed into Settings at all.
+   *
+   * Asserted key-by-key rather than with `toEqual({})` alone, because the
+   * regression this guards against is not "an extra field appeared" but
+   * "POOLSIDE_API_KEY appeared, empty" — which would reach the process, shadow
+   * the credential it was signed in with, and fail every turn on a host whose
+   * only visible symptom is that Settings looks blank.
+   */
+  test("a host signed in with `pool login` needs nothing in Settings", () => {
+    const config = buildPoolsideBackendConfig({
+      baseUrl: null,
+      apiKey: null,
+      binaryPath: null,
+    });
+
+    expect(config.env).toBeUndefined();
+    expect(Object.keys(config)).toEqual([]);
+    expect(JSON.stringify(config)).not.toContain("POOLSIDE_API_KEY");
+  });
+
+  test("an empty-string key is treated as absent, not sent as empty", () => {
+    // What a form that submitted "" instead of null would produce. `pool`
+    // would take the variable at face value and stop consulting its
+    // credentials file, so the falsy check in the mapping is load-bearing.
+    expect(buildPoolsideBackendConfig({ apiKey: "" }).env).toBeUndefined();
+  });
+
+  /**
+   * A binary path is a *location*, not a credential. Setting one on a
+   * login-only host — the normal case, since `pool` is not bundled and rarely
+   * lands on systemd's PATH — must not start inventing an environment.
+   */
+  test("a binary path alone still leaves the process to its own credentials", () => {
+    const config = buildPoolsideBackendConfig({
+      binaryPath: "/opt/poolside/bin/pool",
+      apiKey: null,
+      baseUrl: null,
+    });
+
+    expect(config).toEqual({ executable: "/opt/poolside/bin/pool" });
+    expect(config.env).toBeUndefined();
+  });
+
   test("each field is independent of the others", () => {
     expect(
       buildPoolsideBackendConfig({ apiKey: "sk-only", baseUrl: null }),

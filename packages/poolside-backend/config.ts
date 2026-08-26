@@ -111,6 +111,11 @@ export interface PoolsideBackendConfig {
 export interface PoolsideProviderSettings {
   /** `null` for Poolside's own hosted service. */
   baseUrl?: string | null;
+  /**
+   * `null` when nobody typed a key into Settings — which is a supported,
+   * fully working state, not a half-configured one. See
+   * `buildPoolsideBackendConfig` for what fills the gap.
+   */
   apiKey?: string | null;
   /** `null` to find `pool` on PATH. */
   binaryPath?: string | null;
@@ -135,6 +140,29 @@ export interface PoolsideProviderSettings {
  *   `POOLSIDE_API_URL`, which flips the same field to `"tenant: <host>"` —
  *   a different service mode, reachable but not what "point this at my own
  *   endpoint" means here.
+ *
+ * **No field here is required, and the API key least of all.** Settings is
+ * one of two ways to authenticate `pool`; the other is `pool login` on the
+ * host — `sudo paco auth poolside` runs it as the service user — which writes
+ * a credential into that user's own config directory. `AcpClient` forwards
+ * `HOME` and `XDG_CONFIG_HOME` for exactly this reason, so the process finds
+ * it. Empty settings therefore have to produce an EMPTY config: an
+ * `env: { POOLSIDE_API_KEY: "" }` would override that credential with
+ * nothing and break a host that is correctly signed in. That is what the
+ * per-field `if`s below are for, and what `config.test.ts` pins.
+ *
+ * Two behaviours of `pool` 1.0.16, both verified live against the binary,
+ * decide how the caller should present all this:
+ *
+ * - `POOLSIDE_API_KEY` **wins** over the credentials file. A real key in the
+ *   environment succeeded while `credentials.json` held a bogus token, so
+ *   setting both means the key is the one in use.
+ * - `POOLSIDE_API_KEY` **alone is not enough.** `pool` resolves an API URL
+ *   separately — from `settings.yaml`, which only `pool login` writes, or
+ *   from `POOLSIDE_STANDALONE_BASE_URL`. With neither, `session/new` fails
+ *   with `Authentication required` ("Run `pool login` in a terminal…") even
+ *   though the key is valid. A key-only host that never ran `pool login`
+ *   needs `baseUrl` set too.
  */
 export function buildPoolsideBackendConfig(
   settings: PoolsideProviderSettings,

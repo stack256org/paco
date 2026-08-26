@@ -160,6 +160,64 @@ describe("PoolsideProviderForm", () => {
 
     expect(inputTag(html, "poolside-api-key")).toContain('type="password"');
   });
+
+  /**
+   * The honesty fix `paco auth poolside` exists for.
+   *
+   * `pool` authenticates two ways and the form only ever named one, so an
+   * operator who had no key read this page as "you cannot use Poolside" —
+   * when `sudo paco auth poolside` on the host would have signed the service
+   * user in and needed nothing on this form at all. `buildPoolsideBackendConfig`
+   * has always tolerated that (empty settings produce an empty config, so the
+   * process falls through to its own credentials file); the copy is what did
+   * not.
+   *
+   * Asserted on the rendered markup rather than on a string constant, because
+   * the failure this guards against is the page going back to implying a key
+   * is mandatory — which is a rendering, not a variable.
+   */
+  test("the form says a key is not required and names the other way in", async () => {
+    const html = await renderForm();
+
+    expect(html).toContain("A key is not required.");
+    expect(html).toContain("sudo paco auth poolside");
+    expect(html).toContain("pool login");
+  });
+
+  /**
+   * The trap on the other side of the same fact. A key alone is NOT enough:
+   * `pool` resolves an API URL separately, from `settings.yaml` or
+   * POOLSIDE_STANDALONE_BASE_URL, and with neither it refuses every session
+   * with "API URL not configured. Run pool login to authenticate" — a message
+   * that reads like a broken key rather than a missing URL.
+   */
+  test("the key caption says a key alone is not enough", async () => {
+    const html = await renderForm();
+
+    expect(html).toContain("POOLSIDE_API_KEY");
+    expect(html).toContain("On its own it is not enough");
+    expect(html).toContain("https://inference.poolside.ai");
+  });
+
+  /**
+   * The note has to survive the load, because that is exactly when an
+   * operator with no credentials is reading it.
+   */
+  test("the terminal-login note renders while the settings are still loading", async () => {
+    const { PoolsideProviderForm } = await modulePromise;
+
+    const loading = renderToStaticMarkup(
+      <PoolsideProviderForm
+        form={null}
+        hasStoredApiKey={false}
+        onChange={noop}
+        onSubmit={noop}
+        saving={false}
+      />,
+    );
+
+    expect(loading).toContain("sudo paco auth poolside");
+  });
 });
 
 describe("toPoolsideUpdate", () => {

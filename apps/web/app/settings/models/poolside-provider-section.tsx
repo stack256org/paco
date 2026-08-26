@@ -1,7 +1,13 @@
 "use client";
 
 import type { BackendCapabilities } from "@paco/agent-backend";
-import { AlertTriangle, CheckCircle2, Cpu, Loader2 } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Cpu,
+  Loader2,
+  Terminal,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getInstanceSettings,
@@ -259,7 +265,32 @@ export function PoolsideProviderForm({
             value={form?.apiKey ?? ""}
           />
           <p className="text-base-content/60 text-xs">
-            Sent to Poolside as POOLSIDE_API_KEY.
+            Sent to Poolside as POOLSIDE_API_KEY, and it wins over any{" "}
+            <span className="font-mono">pool login</span> credential on the
+            host. On its own it is not enough:{" "}
+            <span className="font-mono">pool</span> also needs an API URL, so
+            pair a key with a Base URL above (Poolside&apos;s own is
+            https://inference.poolside.ai) unless the service user has already
+            signed in, which writes one.
+          </p>
+        </div>
+      </div>
+
+      <div className="alert alert-info alert-soft mt-1" role="alert">
+        <Terminal aria-hidden="true" className="size-4 shrink-0" />
+        <div className="min-w-0 text-xs">
+          <p>
+            <strong>A key is not required.</strong> The other way to
+            authenticate is from the host&apos;s terminal:{" "}
+            <span className="font-mono">sudo paco auth poolside</span> runs{" "}
+            <span className="font-mono">pool login</span> as the service user,
+            so the credential lands in that user&apos;s home rather than in this
+            database.
+          </p>
+          <p className="mt-1 opacity-80">
+            It signs in the same binary a turn runs — the path above when one is
+            set — and it takes effect on the next turn with nothing to restart.
+            Leave the key blank to use it.
           </p>
         </div>
       </div>
@@ -290,6 +321,13 @@ export interface PoolsideProviderSectionProps {
 /**
  * BYO Poolside provider config: the base URL, API key and binary path a chat
  * whose backend is `"poolside"` runs against.
+ *
+ * The API key is deliberately presented as one of TWO ways to authenticate
+ * rather than as a requirement, because it is not one: `sudo paco auth
+ * poolside` runs `pool login` as the service user, and `AcpClient` forwards
+ * `HOME`/`XDG_CONFIG_HOME` precisely so the credential that writes is the one
+ * a turn reads. A form that only offers the key sends an operator hunting for
+ * a key they never needed.
  *
  * Every field here is load-bearing, which is the substantive difference from
  * the OpenFX section this replaces. That one rendered its endpoint input
@@ -408,10 +446,10 @@ export function PoolsideProviderSection({
           Poolside provider
         </h2>
         <p className="mt-1 text-base-content/60 text-sm">
-          Bring your own Poolside deployment, key and binary — any chat can be
-          switched to run its turns through Poolside instead of Claude Code.
-          Memory, skills, project instructions, GitHub access and plugin MCP
-          servers all carry over.
+          Bring your own Poolside deployment, credential and binary — any chat
+          can be switched to run its turns through Poolside instead of Claude
+          Code. Memory, skills, project instructions, GitHub access and plugin
+          MCP servers all carry over.
         </p>
       </div>
 

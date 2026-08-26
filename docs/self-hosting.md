@@ -310,11 +310,11 @@ to `/etc/paco/paco.env` (`dockerode` honours it) and restarting `paco`.
 | Path | What's there |
 | --- | --- |
 | `/usr/lib/paco` | The app: `apps/web/server.js`, its migration scripts, and a real `node_modules` — plus a bundled Node runtime and the Claude Code CLI, both under `node/`, so nothing else needs installing on the host to run either one. |
-| `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `auth`, `tls`. See §3. |
+| `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `auth [claude\|poolside]`, `tls`. See §3. |
 | `/usr/lib/paco/paco-entrypoint.sh` | What `paco.service` runs: applies pending migrations, resolves a domain saved in Settings into `APP_URL`, then `exec`s the server so systemd signals the Node process rather than a wrapper. |
 | `/usr/bin/claude` | A thin wrapper `exec`ing `/usr/lib/paco/node/bin/claude`, so `claude` is on `PATH` without also putting the bundled Node/npm/npx on it. |
 | `/etc/paco/paco.env` | Configuration: `POSTGRES_URL`, `PGHOST`, `APP_SECRET`, `PACO_WORKSPACE_ROOT`, plus anything you or `install.sh --domain` add (`APP_URL`, `SMTP_*`). Mode `640`, owned `root:paco` — generated once by `postinst` and never regenerated. See §20. |
-| `/var/lib/paco` | The `paco` user's home, and all of its state: `workspaces/` (every session's git repository and chat worktrees) and `.claude/` (the Claude Code credential, written by `paco auth`). This directory is the entire reason the delivery model changed — see §3. |
+| `/var/lib/paco` | The `paco` user's home, and all of its state: `workspaces/` (every session's git repository and chat worktrees), `.claude/` (the Claude Code credential, written by `paco auth`) and — if you use Poolside and signed in rather than pasting a key — `.config/poolside/` (written by `paco auth poolside`, §18). This directory is the entire reason the delivery model changed — see §3. |
 | `/etc/nginx/sites-available/paco` (+ `sites-enabled/paco`) | The nginx site proxying to the app. Edited by `paco tls` when you add a domain (§8). |
 | `/lib/systemd/system/paco.service` | The systemd unit. `Requires=postgresql.service`; runs as `User=paco Group=paco`. |
 
@@ -347,6 +347,14 @@ Runs `claude auth login` as the `paco` user, so the credential lands at
 `/var/lib/paco/.claude`. Do this before the first chat — without it, every
 turn fails with nothing to run.
 
+A provider name is an optional first argument, added when the Poolside backend
+(§18) grew a second credential to keep. Bare `paco auth` still means Claude and
+always will — it is what every runbook and every older copy of this document
+says — so `paco auth` and `paco auth claude` are the same command.
+`paco auth poolside` is the other one, and §18 covers it: it runs `pool login`
+as the same service user, into the same `/var/lib/paco` that `dpkg` does not
+touch, for the same reason.
+
 ### The `paco` command
 
 `/usr/bin/paco` is `scripts/paco`, installed byte-for-byte by
@@ -358,8 +366,10 @@ turn fails with nothing to run.
 | `paco upgrade` | `apt-get update && apt-get install --only-upgrade paco` |
 | `paco logs [-n N]` | Follow the unit's journal; extra args pass through |
 | `paco restart` | Re-reads `paco.env` — the only way to apply a hand-edited `APP_URL` or `SMTP_*` |
-| `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, whether `paco` is authenticated |
-| `paco auth` | Signs the `paco` user into Claude Code, so the credential lands in `/var/lib/paco/.claude` and survives every upgrade |
+| `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, whether `paco` is authenticated, and how Poolside is signed in |
+| `paco auth` | Unchanged: the same as `paco auth claude` |
+| `paco auth claude` | Signs the `paco` user into Claude Code, so the credential lands in `/var/lib/paco/.claude` and survives every upgrade |
+| `paco auth poolside` | Runs `pool login` as the `paco` user, for the Poolside backend (§18). You install `pool` yourself; extra arguments pass through to it |
 | `paco tls <domain>` | A certificate via certbot, DNS-checked first, nginx reloaded after. Optional — and skip it entirely if something in front of this host already terminates TLS (§8) |
 
 There is no `uninstall`; it refuses on purpose and points at `apt remove` /
@@ -476,6 +486,10 @@ purpose, not by skipping this section.
 
 ### The Claude credential
 
+(And, on a Poolside instance signed in from the terminal, `.config/poolside`
+beside it — same reasoning, same commands, `sudo paco auth poolside` to
+recreate it.)
+
 Simplest is not to back it up — after a restore, `sudo paco auth` again. To
 keep it anyway, it's now a plain directory, not a Docker volume to unpack
 through a throwaway container:
@@ -542,6 +556,8 @@ sudo systemctl start paco
 
 # 6. Re-authenticate the agent if you didn't restore the credential.
 sudo paco auth
+# ...and `sudo paco auth poolside` too, on an instance that uses Poolside
+# without an API key in Settings (§18).
 ```
 
 The workspace path must land at the identical absolute path it had before:
@@ -1395,18 +1411,89 @@ below. Two consequences worth knowing before you debug one of them:
   comes from Settings, and only from there.
 - `pool login` still works, because `HOME`/`XDG_CONFIG_HOME` are passed
   through and `pool` reads `~/.config/poolside/credentials.json` under them —
-  but it is the **service user's** home that counts, not yours.
+  but it is the **service user's** home that counts, not yours. `sudo paco
+  auth poolside` is how you sign that user in without a `su` incantation; see
+  *Two ways to authenticate* below.
 
 Configure it in **Settings → Models → Poolside** (admin only):
 
 | Field | What it does |
 | --- | --- |
 | **Binary path** | Absolute path to `pool`. Unset, Paco spawns the bare name `pool` and relies on the service's `PATH`. |
-| **API key** | Passed to the process as `POOLSIDE_API_KEY`. Sealed with `APP_SECRET` the same way GitHub tokens and the SMTP password are, and never sent back to the browser. Unset, `pool` falls back to the credentials `pool login` wrote in the service user's home. |
+| **API key** | Optional — see *Two ways to authenticate* below. Passed to the process as `POOLSIDE_API_KEY`. Sealed with `APP_SECRET` the same way GitHub tokens and the SMTP password are, and never sent back to the browser. Unset, `pool` falls back to the credentials `pool login` wrote in the service user's home; **set, it wins over them.** |
 | **Base URL** | Passed to the process as `POOLSIDE_STANDALONE_BASE_URL`, and genuinely honoured — point it at your own Poolside deployment. Unset, `pool` uses its own default (`inference.poolside.ai`). |
 
 Settings are read fresh on every turn rather than cached, so an edit takes
 effect on the very next turn with no restart.
+
+### Two ways to authenticate
+
+The form above lists an API key, and it is easy to read that as a requirement.
+It is not one. `pool` takes a credential from either of two places, and the
+one most operators want is the terminal:
+
+```bash
+sudo paco auth poolside
+```
+
+That runs `pool login` as the `paco` user — Poolside's own sign-in, driven by
+Poolside, not by Paco — so the credential lands in that user's own config
+directory (`/var/lib/paco/.config/poolside/`, which `pool config` will print
+for you) rather than in Paco's database. Nothing goes in Settings at all.
+
+It is the same shape as `paco auth` for Claude, with one difference that
+changes the error you get when it goes wrong: **Paco ships `claude` and does
+not ship `pool`.** A missing `claude` means a broken package; a missing `pool`
+means you have not installed it yet, and the command says so rather than
+telling you to reinstall Paco.
+
+Two details worth knowing before you run it:
+
+- **It signs in the binary your turns run.** If **Binary path** is set in
+  Settings, that is the binary `paco auth poolside` invokes — not some other
+  `pool` earlier on root's `PATH`. Signing in the wrong one is the failure
+  mode this avoids: a login that succeeds while every turn keeps failing.
+- **Extra arguments go through to `pool login`.** `paco auth poolside
+  --api-url https://tenant.example` configures enterprise tenant mode;
+  `--api-key …` configures standalone mode without the browser step, if you
+  would rather not store a key in Paco's database.
+
+**No restart afterwards.** Every turn spawns a fresh `pool` process which
+reads the credential off disk as it starts, so the next turn picks it up.
+That is the same reason a Settings edit needs no restart, arrived at from the
+other direction.
+
+`sudo paco status` reports what it found:
+
+```text
+Poolside:  credential file present (/var/lib/paco/.config/poolside/credentials.json)
+```
+
+Read that line for exactly what it says. `pool` has no `auth status`
+subcommand to ask, so this is the presence of the credential *file* and not a
+statement that the service still accepts it — a revoked credential looks
+identical here. The first turn is what proves it. The line also names the
+other two states plainly: `no login, using the API key in Settings` when a key
+is stored and no file exists, and `not installed` when `pool` is not runnable
+by the service user at all.
+
+#### If you use the API key instead
+
+Two behaviours of `pool` 1.0.16, both checked against the binary rather than
+inferred, decide how the two ways interact:
+
+- **The key wins.** `POOLSIDE_API_KEY` overrides the credentials file. Set
+  both and the key is the one in use — which is why `paco auth poolside`
+  prints a warning when it finds a key stored, and why `paco status` says
+  "but an API key in Settings takes precedence over it".
+- **The key alone is not enough.** `pool` resolves an API *URL* separately —
+  from the `settings.yaml` that `pool login` writes, or from
+  `POOLSIDE_STANDALONE_BASE_URL`. On a host that has never run `pool login`,
+  a key with no **Base URL** fails every session with `Authentication
+  required` / `API URL not configured`, which reads like a rejected key and
+  is not one. **Set Base URL to `https://inference.poolside.ai`** (or your own
+  deployment) alongside the key, or sign in from the terminal and skip the key
+  entirely.
 
 ### Prove it before a chat depends on it
 
@@ -1640,6 +1727,9 @@ sudo paco auth
 sudo su -s /bin/sh -l paco -c "claude auth status"   # should print a logged-in account
 ```
 
+For a chat whose backend is Poolside, it is a different credential entirely —
+`paco auth` does not touch it. Use `sudo paco status` and §18.
+
 ### Chats fail trying to reach the Docker socket
 
 `postinst` puts the `paco` user in the `docker` group, so this should not
@@ -1811,6 +1901,18 @@ the API key against a provider (§18). A green test and a failing first turn
 points at the credential, not the path — either the API key in Settings, or
 the `pool login` credentials it falls back to, which live in the *service
 user's* home and not yours.
+
+```bash
+sudo paco status          # the Poolside: line says which of the two it found
+sudo paco auth poolside   # sign the service user in, if it found neither
+```
+
+Two failures here are worth telling apart, because both name a credential and
+only one is about one. `Authentication required` with no API key stored means
+exactly what it says: sign in. The same message *with* a key stored usually
+means the key has no API URL to go with it — set **Base URL** as well, or sign
+in from the terminal and clear the key (§18, *If you use the API key
+instead*).
 
 If instead the turns succeed but reach the wrong deployment, compare the
 endpoint Test connection reports with the **Base URL** you typed (§18).
