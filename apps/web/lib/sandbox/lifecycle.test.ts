@@ -72,3 +72,80 @@ describe("getLifecycleDueAtMs", () => {
     );
   });
 });
+
+describe("readSandboxSetupOutlook", () => {
+  const base = {
+    lifecycleState: null as string | null,
+    lifecycleError: null as string | null,
+    sandboxProvisioningRunId: null as string | null,
+  };
+
+  test("a run in flight is in progress, not a failure with no cause", () => {
+    // The bug: `lifecycleError` is blanked at the start of every run, so this
+    // is what a turn sees when it reads mid-provision. It used to be read as
+    // "failed, and we don't know why".
+    expect(
+      lifecycleModule.readSandboxSetupOutlook({
+        session: {
+          ...base,
+          lifecycleState: "provisioning",
+          sandboxProvisioningRunId: "run-a",
+        },
+        waitedRunId: null,
+      }),
+    ).toEqual({ status: "in-progress" });
+  });
+
+  test("a recorded error on the run we waited on is that run's failure", () => {
+    expect(
+      lifecycleModule.readSandboxSetupOutlook({
+        session: {
+          ...base,
+          lifecycleState: "failed",
+          lifecycleError: "Cannot connect to the Docker daemon",
+          sandboxProvisioningRunId: null,
+        },
+        waitedRunId: "run-a",
+      }),
+    ).toEqual({
+      status: "failed",
+      error: "Cannot connect to the Docker daemon",
+    });
+  });
+
+  test("an error left by a superseded run is not reported as the current one", () => {
+    // A kick claims the new run id one statement before it blanks the column,
+    // so this row really does occur: run-b owns the session, run-a's error is
+    // still sitting there. Reporting it would be exactly the stale-error
+    // problem the blanking exists to prevent.
+    expect(
+      lifecycleModule.readSandboxSetupOutlook({
+        session: {
+          ...base,
+          lifecycleState: "failed",
+          lifecycleError: "an older attempt's error",
+          sandboxProvisioningRunId: "run-b",
+        },
+        waitedRunId: "run-a",
+      }),
+    ).toEqual({ status: "in-progress" });
+  });
+
+  test("nothing in flight and nothing recorded is a genuine unknown", () => {
+    expect(
+      lifecycleModule.readSandboxSetupOutlook({
+        session: { ...base, lifecycleState: "failed" },
+        waitedRunId: "run-a",
+      }),
+    ).toEqual({ status: "no-cause" });
+  });
+
+  test("an empty error string does not count as a cause", () => {
+    expect(
+      lifecycleModule.readSandboxSetupOutlook({
+        session: { ...base, lifecycleState: "failed", lifecycleError: "" },
+        waitedRunId: "run-a",
+      }),
+    ).toEqual({ status: "no-cause" });
+  });
+});

@@ -36,6 +36,76 @@ export interface SandboxLifecycleEvaluationResult {
   reason?: string;
 }
 
+/**
+ * What a session that has no active sandbox is actually doing.
+ *
+ * Three states, and the bug this exists to fix was the first two collapsing
+ * into the third. A turn that could not get a sandbox used to read one column —
+ * `lifecycleError` — and treat an empty one as "failed, cause unknown". But
+ * `provisioning-kick.ts` blanks that column at the start of every run, so an
+ * empty one is the *normal* reading while provisioning is in flight. The turn
+ * reported a failure for a session that had not failed, and reported it in the
+ * vaguest words available, because the fallback string it invented
+ * ("Workspace setup failed") matches none of the classifier's patterns.
+ *
+ * The blanking is not the bug and is deliberately kept: it is precisely what
+ * makes a *non-empty* `lifecycleError` trustworthy. Without it, the column
+ * would hold the last failure forever and every reader would have to guess
+ * whether it described the attempt it was waiting on. What was missing was the
+ * other half — asking whether an attempt is in flight before concluding
+ * anything from an empty column.
+ */
+export type SandboxSetupOutlook =
+  /** An attempt owns this session right now. Nothing has failed. */
+  | { status: "in-progress" }
+  /** An attempt finished, failed, and recorded why. */
+  | { status: "failed"; error: string }
+  /** Nothing is in flight, and no attempt left a cause behind. */
+  | { status: "no-cause" };
+
+/** The three session columns that answer "is setup running, or over?". */
+export interface SandboxSetupOutlookSource {
+  lifecycleState: string | null;
+  lifecycleError: string | null;
+  sandboxProvisioningRunId: string | null;
+}
+
+/**
+ * Read a session's setup state the way a waiting turn needs to see it.
+ *
+ * `waitedRunId` is what makes this exact rather than approximate. A kick claims
+ * the run id first and blanks `lifecycleError` a statement later, so there is a
+ * window in which the row holds a *new* run's id beside an *old* run's error.
+ * A reader that trusted the column there would report a superseded attempt's
+ * failure as though it were the current one — the very staleness the blanking
+ * exists to prevent. Comparing against the run this caller actually waited on
+ * closes that window without a schema change: an owner that is not our run is,
+ * by definition, an attempt whose outcome we have not observed.
+ */
+export function readSandboxSetupOutlook(params: {
+  session: SandboxSetupOutlookSource;
+  /** The run this caller waited on, or null if it had none to wait on. */
+  waitedRunId: string | null;
+}): SandboxSetupOutlook {
+  const { session, waitedRunId } = params;
+  const owner = session.sandboxProvisioningRunId;
+
+  if (owner !== null && owner !== waitedRunId) {
+    return { status: "in-progress" };
+  }
+
+  const error = session.lifecycleError;
+  if (error !== null && error !== "") {
+    return { status: "failed", error };
+  }
+
+  if (owner !== null || session.lifecycleState === "provisioning") {
+    return { status: "in-progress" };
+  }
+
+  return { status: "no-cause" };
+}
+
 interface LifecycleTimingSource {
   hibernateAfter: Date | null;
   lastActivityAt: Date | null;
