@@ -144,19 +144,21 @@ export async function testPoolsideConnection(): Promise<{
   await requireAdmin();
 
   const settings = await readInstanceSettings();
-  if (
-    !(
-      settings.poolside.binaryPath ||
-      settings.poolside.apiKey ||
-      settings.poolside.baseUrl
-    )
-  ) {
-    return {
-      success: false,
-      error:
-        "Set a binary path, base URL or API key first — there is nothing to test yet.",
-    };
-  }
+  /*
+   * No "configure something first" guard.
+   *
+   * There used to be one, refusing to run unless a binary path, base URL or
+   * API key was set. It predated `paco auth poolside`: a host signed in with
+   * `pool login` has none of the three — `pool` is on PATH and the credential
+   * lives in the service user's config directory — and that is precisely the
+   * host whose operator most wants to press this button, because nothing on
+   * the page reflects a credential they set from a terminal.
+   *
+   * Spawning with nothing configured is also the cheaper answer: the probe is
+   * one local `initialize` with a 10s bound, and its real failure ("pool: not
+   * found", "Authentication required") tells the operator more than a
+   * pre-emptive refusal that describes the form rather than the host.
+   */
 
   // Imported lazily: this module is a server-action entry point pulled in by
   // every settings save, and the backend package spawns processes.
