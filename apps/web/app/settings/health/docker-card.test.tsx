@@ -83,7 +83,7 @@ describe("DockerCard", () => {
 
   test("an unreadable metric says so, rather than implying Docker is broken", () => {
     const text = render({
-      docker: { status: "unavailable", error: "timed out" },
+      docker: { status: "unavailable" },
     });
 
     expect(text).toContain("could not be checked");
