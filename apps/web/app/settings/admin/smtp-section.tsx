@@ -257,7 +257,7 @@ export function SmtpSection({
                   type="text"
                   value={form?.host ?? ""}
                 />
-                <p className="label">
+                <p className="text-base-content/60 text-xs">
                   Saving a host here makes Settings the only source — any SMTP_*
                   environment variables are ignored entirely, so username and
                   password must be entered below too, even if they&apos;re
@@ -291,7 +291,7 @@ export function SmtpSection({
                   value={form?.port ?? ""}
                 />
                 {portError ? (
-                  <p className="label text-error" id="smtp-port-error">
+                  <p className="text-error text-xs" id="smtp-port-error">
                     {portError}
                   </p>
                 ) : null}
@@ -321,7 +321,7 @@ export function SmtpSection({
               <option value="tls">TLS on connect</option>
               <option value="starttls">STARTTLS</option>
             </select>
-            <p className="label">
+            <p className="text-base-content/60 text-xs">
               Automatic picks TLS for port 465 and STARTTLS otherwise.
             </p>
 

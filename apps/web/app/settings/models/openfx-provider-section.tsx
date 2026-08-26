@@ -223,7 +223,7 @@ export function OpenFxProviderSection() {
               type="text"
               value={form?.endpoint ?? ""}
             />
-            <p className="label">
+            <p className="text-base-content/60 text-xs">
               Disabled: the OpenFX binary itself currently has no way to point
               at a custom endpoint, so this would have no effect on where it
               sends provider traffic.
@@ -247,7 +247,7 @@ export function OpenFxProviderSection() {
                   type="text"
                   value={form?.binaryPath ?? ""}
                 />
-                <p className="label">
+                <p className="text-base-content/60 text-xs">
                   Leave blank to run whatever &quot;openfx&quot; resolves to on
                   PATH.
                 </p>
@@ -275,7 +275,9 @@ export function OpenFxProviderSection() {
                   type="password"
                   value={form?.apiKey ?? ""}
                 />
-                <p className="label">Sent to OpenFX as AI_GATEWAY_API_KEY.</p>
+                <p className="text-base-content/60 text-xs">
+                  Sent to OpenFX as AI_GATEWAY_API_KEY.
+                </p>
               </div>
             </div>
 
