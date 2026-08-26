@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import { DockerCard } from "./docker-card";
 import { HealthCardSkeleton } from "./health-card";
 import { MigrationsCard } from "./migrations-card";
 import { QueueCard } from "./queue-card";
@@ -54,6 +55,7 @@ export function HealthPageContent() {
 
       {health ? (
         <div className="grid gap-4 md:grid-cols-2">
+          <DockerCard docker={health.docker} />
           <QueueCard queue={health.queue} />
           <MigrationsCard migrations={health.migrations} />
           <SpendCard spend={health.spend} />
