@@ -165,10 +165,14 @@ describe("classifySetupFailureText", () => {
     ).not.toBe("docker-not-running");
   });
 
-  test("rootless outranks the refusal it causes", () => {
-    // A rootless daemon refuses another user's connection in exactly the same
-    // words, and "add yourself to the docker group" would not fix it: Paco
-    // cannot use a rootless daemon at all.
+  test("rootless is matched before the permission refusal, not after", () => {
+    // The second half of the ordering argument, and the half most likely to be
+    // "tidied up": a rootless daemon refuses another user's connection in
+    // exactly the same words as a missing `docker` group, so whichever matcher
+    // runs first wins the string. Rootless has to win, because "add yourself
+    // to the docker group" cannot fix it — Paco cannot use a rootless daemon
+    // at all. Moving the permission matcher above the rootless one fails here
+    // and nowhere else.
     expect(
       classifySetupFailureText(
         "permission denied while trying to connect to the Docker daemon socket at unix:///run/user/1000/docker.sock",
@@ -253,15 +257,25 @@ describe("setupFailureMessage", () => {
 
   test("no Docker copy sends a Linux self-hoster to Docker Desktop", () => {
     // The packaged install is Debian/Ubuntu plus systemd. There is no Docker
-    // Desktop on that machine, and the whole point of these three sentences is
+    // Desktop on that machine, and the whole point of these four sentences is
     // that they name a fix the reader can actually run.
     for (const message of [
+      DOCKER_MISSING,
       DOCKER_NOT_RUNNING,
       DOCKER_PERMISSION,
       DOCKER_ROOTLESS,
     ]) {
       expect(message).not.toMatch(/docker desktop/i);
     }
+  });
+
+  test("the missing-Docker fix is the one the installer itself runs", () => {
+    // `install.sh` installs docker.io from apt and `postinst` prints exactly
+    // this pair for this state. A download link would send a server operator
+    // somewhere Paco never sends them, and dropping the reconfigure leaves
+    // Docker installed with the `paco` user still not in the `docker` group.
+    expect(DOCKER_MISSING).toContain("apt-get install -y docker.io");
+    expect(DOCKER_MISSING).toContain("dpkg-reconfigure paco");
   });
 
   test("the permission fix restarts Paco, because groups are read at start", () => {

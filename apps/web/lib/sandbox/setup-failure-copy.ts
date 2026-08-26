@@ -26,8 +26,19 @@ import {
  * the one word that identifies the problem helps nobody.
  */
 
+// A download link is the wrong advice for the machine most likely to be reading
+// this. `install.sh` installs `docker.io` from apt, and `postinst` prints
+// `apt-get install -y docker.io && dpkg-reconfigure paco` for exactly this
+// state — so on a server that is the fix, verbatim, and it does not involve a
+// website. The reconfigure is the half that is easy to miss: it is what puts
+// the `paco` user back in the `docker` group once Docker exists.
+//
+// Both installers try to prevent this state, so a server that reaches it is
+// already off the happy path; the Mac half is for someone running from a
+// checkout. As with the other Docker copy, neither half asserts which machine
+// the reader is on.
 export const DOCKER_MISSING =
-  "Paco runs your app inside Docker, and Docker isn't installed on this computer. Install Docker Desktop from docker.com, then start it and try again.";
+  "Paco runs your app inside Docker, and Docker isn't installed on this computer. On a Linux server, run `sudo apt-get install -y docker.io && sudo dpkg-reconfigure paco` — the same commands Paco's own installer uses, and the reconfigure is what gets Paco back onto the Docker socket afterwards. On a Mac, install Docker from docker.com and start it. Then try again.";
 
 // Deliberately does not guess which machine the reader is on. Paco ships as a
 // .deb for Debian/Ubuntu with systemd, and it is also run locally on a Mac
@@ -169,10 +180,14 @@ const MATCHERS: ReadonlyArray<{
     reason: "docker-missing",
   },
   {
-    // Rootless first, because a rootless daemon refuses other users in the
-    // *same* words as the group problem below, and the two fixes are opposite:
-    // adding a group would not help, and nothing the reader does to this
-    // daemon will. Measured on Ubuntu 24.04 — the socket lives under
+    // Rootless MUST stay ahead of the permission matcher below, and the reason
+    // is not stylistic: a rootless daemon refuses another user's connection in
+    // the *same* words as the group problem, so whichever matcher runs first
+    // wins the string outright. The two fixes are opposite — the group advice
+    // would send a rootless admin to `usermod`, which cannot work, when the
+    // honest answer is that Paco cannot use their daemon at all. Do not
+    // reorder these two; the guard test is the only other thing that would
+    // notice. Measured on Ubuntu 24.04 — the socket lives under
     // `/run/user/<uid>/`, the shim is `rootlesskit`, the unit is
     // `dockerd-rootless.sh`.
     test: /rootlesskit|dockerd-rootless|\/run\/user\/\d+\/[\w.-]*docker[\w.-]*\.sock/,
