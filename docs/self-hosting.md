@@ -164,6 +164,67 @@ Two things that look like steps but are not:
 **Requirements, honestly:** a Linux host running systemd, root access, and
 ports 80 and 443 free. nginx owns both, and there is no flag to move either
 one (unlike the Traefik-based installer this replaced, which had `--port`).
+And a **rootful** Docker daemon — the ordinary system-wide one, which is what
+`install.sh` installs. Rootless Docker does not work; the next section says
+exactly why.
+
+### Rootless Docker is not supported
+
+If you run Docker rootless — `dockerd-rootless.sh`, the socket under
+`$XDG_RUNTIME_DIR` — **Paco cannot use it, and there is no configuration that
+makes it work.** This is a real limitation, not a missing feature, and it is
+stated here rather than left to be discovered because a rootless daemon
+answers every call Paco makes and then breaks the workspace silently.
+
+The reason is the uid. A sandbox container runs as *this host's own uid* —
+`User: hostContainerUser()` in `packages/sandbox/docker/sandbox.ts` — and the
+workspace is a bind mount shared by both sides: the agent edits files on the
+host as the `paco` user, the container runs them, and git worktrees are
+created on one side and resolved from the other. As that file puts it,
+"matching the uid is the only arrangement where both sides can read and write
+the same tree."
+
+A rootless daemon puts the container in a user namespace, so the uid the
+container claims is not the uid the kernel writes to disk. Measured on Ubuntu
+24.04, with the stock `/etc/subuid` entry `ubuntu:100000:65536`:
+
+```text
+inside the namespace:   uid=106 gid=109
+on the host afterwards: uid=100106 gid=100109
+```
+
+`paco` is uid 106 on a packaged install. So every file the sandbox created
+came back owned by uid 100106 — an id that exists on no account on the
+machine — and the service could neither read nor write its own workspace.
+Writing into a normally-permissioned directory failed outright with
+`Permission denied`.
+
+Nothing in Paco can bridge that. There is no uid the container can claim that
+arrives on the host as `paco`, and Paco is unprivileged, so it cannot chown
+its way out either.
+
+There is a second, more confusing symptom worth knowing about, because it
+does not look like this at all. Paco talks to Docker through `dockerode`,
+whose socket discovery (`docker-modem@5.0.7/lib/modem.js:80`) probes exactly
+`$HOME/.docker/run/docker.sock` and then `/var/run/docker.sock`. It never
+looks at `$XDG_RUNTIME_DIR/docker.sock`, which is where a rootless daemon
+listens — and neither `packaging/paco.service` nor `paco.env` sets
+`DOCKER_HOST`, which `dockerode` *does* honour. So on a host with **only** a
+rootless daemon, `docker info` works perfectly in your shell while Paco
+reports that Docker is not running. Setting `DOCKER_HOST` to the rootless
+socket does not fix it; it just moves you to the uid problem above, which
+Paco now detects and refuses up front (`docker info`'s `SecurityOptions`
+contains `name=rootless`).
+
+**What to do instead:** install the system-wide daemon, the one that runs as
+root, and put the `paco` user in the `docker` group — which is what
+`install.sh` and the package's `postinst` do on a host with no container
+runtime. Be clear-eyed about what that grants: membership of the `docker`
+group is equivalent to root on this host, because a process that can reach
+`/var/run/docker.sock` can create its own privileged container. That is
+inherent to running containers on behalf of an agent, and it is the reason
+rootless is an attractive idea here — it simply cannot be made to work with a
+shared-uid bind mount.
 
 ---
 
@@ -1481,6 +1542,31 @@ Group membership for `/var/run/docker.sock` is equivalent to root on this
 host: a process that can reach it can create its own privileged container.
 That is inherent to running containers on behalf of an agent, but grant it only
 where you are comfortable with it.
+
+If the chat instead says Paco does not support rootless Docker, believe it:
+that message comes from asking the daemon about itself, not from guessing.
+`docker info` on the host will show `name=rootless` under **Security
+Options**, and §1 has the fix and the reason there is no other one.
+
+### `docker info` works in my shell, but Paco says Docker isn't running
+
+Almost always a host with **only** a rootless daemon. Paco's Docker client
+looks for `$HOME/.docker/run/docker.sock` and `/var/run/docker.sock` and
+nothing else; a rootless daemon listens on `$XDG_RUNTIME_DIR/docker.sock`,
+which is never probed. Your shell finds it because the rootless installer put
+`DOCKER_HOST` in your profile; the service has no such thing.
+
+Do not point `DOCKER_HOST` at the rootless socket to close the gap — Paco will
+then reach the daemon and refuse it, for the reason in §1. Install the
+system-wide daemon instead:
+
+```bash
+docker info --format '{{.SecurityOptions}}'   # `name=rootless` present?
+sudo apt-get install -y docker.io
+sudo systemctl enable --now docker.service
+sudo usermod -aG docker paco
+sudo systemctl restart paco
+```
 
 ### `paco status` / `paco logs` / `paco tls` isn't a recognised command
 

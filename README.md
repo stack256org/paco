@@ -93,7 +93,14 @@ afterwards:
 
 - **Docker**, installed and started, and the service account put in the
   `docker` group. Chats run in containers, so this is not optional; the
-  installer does it rather than telling you to.
+  installer does it rather than telling you to. It has to be the ordinary
+  **rootful** daemon: a sandbox runs as the host's own uid and shares the
+  workspace directory with it, and a rootless daemon remaps every uid through
+  a user namespace, so the files it writes come back owned by an id the
+  service cannot read. Paco detects that and refuses rather than failing
+  halfway; if this host already runs Docker rootless, read
+  [docs/self-hosting.md](docs/self-hosting.md) §1 before installing — the
+  installer sees a working `docker` and will not replace it.
 - **PostgreSQL and nginx** as ordinary host packages. Postgres is reached over
   a Unix socket, with no TCP listener at all.
 - **Its own bundled Node and Claude Code CLI**, pinned — no system Node, no npm.
@@ -111,8 +118,9 @@ sudo paco auth
 
 Then open the URL it printed and create your account.
 
-**What it needs:** a Linux host running systemd, root access, and ports 80 and
-443 free — nginx owns both, and there's no flag to move them.
+**What it needs:** a Linux host running systemd, root access, ports 80 and
+443 free — nginx owns both, and there's no flag to move them — and, if Docker
+is already installed here, a rootful daemon rather than a rootless one.
 
 ### About the domain
 

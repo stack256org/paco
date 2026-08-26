@@ -22,6 +22,20 @@ export {
   REPO_DIRNAME,
   repoDir,
 } from "./layout.ts";
+export {
+  assertDockerUsable,
+  classifyDockerInfoError,
+  type DockerInfoHost,
+  type DockerPreflightFailure,
+  type DockerPreflightOptions,
+  type DockerPreflightResult,
+  type DockerPreflightState,
+  dockerEndpoint,
+  dockerPreflight,
+  DockerUnusableError,
+  isRootlessInfo,
+  readSecurityOptions,
+} from "./preflight.ts";
 export { listSandboxPreviewPorts } from "./preview-ports.ts";
 export {
   isSandboxContainerName,

@@ -20,6 +20,7 @@ import {
 } from "./config.ts";
 import { BASELINE_GITIGNORE } from "./baseline-gitignore.ts";
 import { ContainerIdleTimer } from "./idle-timer.ts";
+import { assertDockerUsable } from "./preflight.ts";
 import { REPO_DIRNAME, repoDir } from "./layout.ts";
 import { migrateLegacyWorkspace } from "./worktree.ts";
 import type { DockerState } from "./state.ts";
@@ -464,6 +465,22 @@ export class DockerSandbox implements Sandbox {
    */
   static async create(config: DockerSandboxConfig): Promise<DockerSandbox> {
     const docker = new Docker();
+
+    // Before anything is created on disk or in Docker.
+    //
+    // This is the narrowest point every sandbox passes through — new or
+    // resumed — and it is also where the two arrangements a rootless daemon
+    // breaks are decided: `User: hostContainerUser()` below, and the workspace
+    // bind-mounted twice at the same source. A rootless daemon answers every
+    // call here happily and then hands back a workspace owned by a uid this
+    // process cannot touch, so the failure surfaces much later as an
+    // unreadable file or a git error, with nothing naming the cause.
+    //
+    // `assertDockerUsable` also separates "the daemon is refusing this
+    // process" from "there is no daemon", which used to be one error. See
+    // `preflight.ts` for the measured evidence behind all three states.
+    await assertDockerUsable({ host: docker });
+
     const containerName = toContainerName(config.name);
     const hostWorkspace = path.resolve(config.hostWorkspace);
     const ports = config.ports ?? [...DEFAULT_PORTS];

@@ -30,6 +30,27 @@ chat's worktree, which is mounted into the container. So:
 - The agent has the operator's privileges, which is why tool calls are gated
   (below).
 
+### Docker is the sandbox, not one option among several
+
+`Sandbox` is an interface and `SandboxState` is a discriminated union, which
+makes this look pluggable. It is not: `"docker"` is the only variant either
+one has ever had, `connectSandbox` has one branch, and the two things that
+make the design work — the container running as the host's own uid, and the
+workspace bind-mounted twice at the same absolute path — are Docker bind-mount
+semantics rather than anything an interface could abstract. Treat the
+interface as a seam for testing, not as a backend contract.
+
+It has to be a **rootful** daemon, and that is load-bearing rather than a
+default. A rootless daemon puts the container in a user namespace, so
+`User: hostContainerUser()` no longer means what it says: measured on Ubuntu
+24.04 with `/etc/subuid` at `ubuntu:100000:65536`, a container claiming
+`uid=106` wrote files owned by `uid=100106` on the host, and the service —
+uid 106 — could not read back its own workspace. There is no uid that maps
+back correctly and no privilege Paco holds to repair it afterwards, so
+`packages/sandbox/docker/preflight.ts` asks the daemon (`docker info`'s
+`SecurityOptions`) and refuses up front instead. `docs/self-hosting.md` §1
+states the same limitation for operators.
+
 ## Workspace layout
 
 A session is one git repository. A chat is one worktree of it.
