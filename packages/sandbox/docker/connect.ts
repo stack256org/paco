@@ -60,6 +60,15 @@ function resolveHostWorkspace(state: DockerState, name: string): string {
  *
  * No-ops when `repo/` already contains a git repository, so reconnecting to an
  * existing sandbox never clobbers in-progress work.
+ *
+ * That guard is also why `connectDocker` skips the repo half of the workspace
+ * bootstrap whenever there is a source. `#bootstrapWorkspace` used to run
+ * first and `git init` an empty `repo/`, which this check then read as "a
+ * repository is already here" — so the clone was skipped, every time, and a
+ * session started from a GitHub repository came up with an empty workspace
+ * and no error anywhere. `git clone` also refuses a non-empty target, so
+ * leaving the init in place and cloning anyway was never an option: the
+ * directory has to still be absent when we get here.
  */
 async function prepareSource(
   sandbox: DockerSandbox,
@@ -119,6 +128,11 @@ async function prepareSource(
         30_000,
       );
     }
+
+    // Applied here rather than during bootstrap, which this path skips. Only
+    // written when the clone brought none of its own, so the repository's
+    // rules still win where it has them.
+    await sandbox.ensureBaselineGitignore();
   } finally {
     if (githubToken) {
       await sandbox.setGitHubAuthToken(undefined);
@@ -155,7 +169,13 @@ export async function connectDocker(
     ...(options?.networkDisabled !== undefined && {
       networkDisabled: options.networkDisabled,
     }),
-    ...(options?.skipGitWorkspaceBootstrap && {
+    /*
+     * A source means `prepareSource` owns `repo/`, so the bootstrap must not
+     * create it first — see that function's doc for the failure this fixes.
+     * Identity and legacy-layout migration still run; only the repo half is
+     * skipped.
+     */
+    ...((options?.skipGitWorkspaceBootstrap || state.source) && {
       skipGitWorkspaceBootstrap: true,
     }),
     ...(options?.labels && { labels: options.labels }),

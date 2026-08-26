@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import Docker from "dockerode";
 import { CONTAINER_WORKDIR } from "./config.ts";
+import { connectDocker } from "./connect.ts";
 import { repoDir } from "./layout.ts";
 import { DockerSandbox } from "./sandbox.ts";
 import { ensureChatWorktree, removeChatWorktree } from "./worktree.ts";
@@ -337,4 +338,80 @@ describeDocker("DockerSandbox", () => {
     const restored = await sandbox.exec("cat tracked.txt", after.path, 30_000);
     expect(restored.stdout.trim()).toBe("committed");
   }, 120_000);
+});
+
+/**
+ * A session started from a GitHub repository has to actually contain it.
+ *
+ * This is a regression test for a bug that made every such session come up
+ * empty, with no error anywhere: `DockerSandbox.create` bootstrapped the
+ * workspace by running `git init` in `repo/`, and `prepareSource` — which
+ * runs after it — treats an existing git directory as "already cloned" and
+ * returns. So the clone was skipped, always, and the user got a workspace
+ * with an empty repository and an empty file tree.
+ *
+ * It is asserted against a real clone rather than a mocked `exec` because the
+ * defect was entirely in the ORDER two real operations ran in; a test that
+ * stubbed either one would have passed throughout.
+ */
+describeDocker("connectDocker with a source", () => {
+  const name = `test-clone-${Date.now()}`;
+  let workspace: string;
+  let sandbox: Awaited<ReturnType<typeof connectDocker>>;
+
+  beforeAll(async () => {
+    workspace = path.join(os.tmpdir(), `paco-sbx-clone-${Date.now()}`);
+    sandbox = await connectDocker(
+      {
+        sandboxName: name,
+        hostWorkspace: workspace,
+        source: {
+          repo: "https://github.com/octocat/Hello-World",
+          branch: "master",
+        },
+      },
+      {
+        gitUser: { name: "Paco Test", email: "test@example.com" },
+        timeout: 120_000,
+      },
+    );
+  }, 300_000);
+
+  afterAll(async () => {
+    await sandbox?.stop?.();
+    await fs.rm(workspace, { recursive: true, force: true });
+  }, 120_000);
+
+  test("clones the repository into repo/", async () => {
+    const repo = repoDir(workspace);
+
+    // The upstream file, not just "a git directory exists" — an empty
+    // `git init` would satisfy the weaker check, which is exactly how this
+    // shipped broken.
+    const entries = await fs.readdir(repo);
+    expect(entries).toContain("README");
+
+    const log = await hostGit(repo, "log --oneline -1");
+    expect(log).not.toBe("");
+    expect(log).not.toContain("does not have any commits yet");
+  }, 120_000);
+
+  test("does not leave the clone credential in the remote", async () => {
+    const remote = await hostGit(repoDir(workspace), "remote get-url origin");
+
+    expect(remote).toBe("https://github.com/octocat/Hello-World");
+    expect(remote).not.toContain("x-access-token");
+  }, 60_000);
+
+  test("still applies the baseline gitignore the bootstrap would have", async () => {
+    // The clone path skips the repo half of `#bootstrapWorkspace`, so this
+    // has to be applied on the far side of the clone or a cloned repo with no
+    // rules of its own regains the 650k-line-diff problem.
+    const gitignore = await fs.readFile(
+      path.join(repoDir(workspace), ".gitignore"),
+      "utf-8",
+    );
+
+    expect(gitignore).toContain("node_modules");
+  }, 60_000);
 });

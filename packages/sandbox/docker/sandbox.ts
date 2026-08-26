@@ -695,9 +695,9 @@ export class DockerSandbox implements Sandbox {
 
     // Created on the HOST, not with `exec("mkdir -p …")` inside the container.
     //
-    // The container has no `User:` and the image sets no `USER`, so it runs as
-    // root — and on a Linux bind mount a directory it creates is root-owned on
-    // the host too. `#ensureBaselineGitignore` below then writes into that
+    // Historically the container ran as root (no `User:`, no `USER` in the
+    // image), and on a Linux bind mount a directory it created was root-owned
+    // on the host too. `ensureBaselineGitignore` below then writes into that
     // directory through `writeFile`, which is host-side `fs`, as an
     // unprivileged user. The result is EACCES on every fresh workspace:
     //
@@ -723,7 +723,7 @@ export class DockerSandbox implements Sandbox {
       await this.exec("git init -b main", repo, 30_000);
     }
 
-    await this.#ensureBaselineGitignore();
+    await this.ensureBaselineGitignore();
   }
 
   /**
@@ -737,8 +737,13 @@ export class DockerSandbox implements Sandbox {
    * NUL byte.
    *
    * Only written when absent, so a cloned repository's own rules always win.
+   *
+   * Public because `prepareSource` calls it after a clone: a session that
+   * clones skips the repo half of `#bootstrapWorkspace` entirely (it must
+   * not create the empty repository the clone would then refuse to land in),
+   * so this is applied on the other side of the clone instead.
    */
-  async #ensureBaselineGitignore(): Promise<void> {
+  async ensureBaselineGitignore(): Promise<void> {
     const existing = await this.exec(
       "test -e .gitignore && echo present || echo absent",
       repoDir(this.#config.hostWorkspace),

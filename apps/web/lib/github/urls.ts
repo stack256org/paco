@@ -66,7 +66,19 @@ export function parseGitHubUrl(
   return null;
 }
 
+/**
+ * Where to send someone whose GitHub connection needs (re)making.
+ *
+ * `/settings/connections`, which is where the connection actually lives and
+ * where it can be inspected and disconnected as well as made. This used to
+ * point at a separate `/get-started` flow that existed only to wrap the same
+ * connect button in a numbered checklist; it has been removed, and one
+ * screen owning the connection is the point.
+ *
+ * `next` is preserved so the caller can be returned to whatever it was doing
+ * once the connection is made.
+ */
 export function buildGitHubReconnectUrl(next: string): string {
-  const params = new URLSearchParams({ step: "github", next });
-  return `/get-started?${params.toString()}`;
+  const params = new URLSearchParams({ next });
+  return `/settings/connections?${params.toString()}`;
 }

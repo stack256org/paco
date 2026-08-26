@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import useSWR from "swr";
 import type { GithubConnectionResponse } from "@/app/api/github/connection/route";
@@ -10,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GH_CLI_MISSING } from "@/lib/error-copy";
+import { sanitizeInternalRedirect } from "@/lib/redirect-safety";
 import { fetcher } from "@/lib/swr";
 import { toast } from "@/lib/toast";
 import { GitHubDisconnectDialog } from "./github-disconnect-dialog";
@@ -59,6 +61,7 @@ export function GitHubConnectionSection() {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const router = useRouter();
 
   if (isLoading) {
     return <GitHubConnectionSectionSkeleton />;
@@ -90,6 +93,32 @@ export function GitHubConnectionSection() {
       toast.success(
         `Connected as ${(body as GithubConnectionResponse).login ?? "GitHub"}`,
       );
+
+      /*
+       * Return whoever was sent here to reconnect mid-task.
+       *
+       * `buildGitHubReconnectUrl` carries a `next`, because the thing that
+       * needed GitHub — creating a repository, provisioning a workspace —
+       * is somewhere else entirely, and landing them in Settings with no way
+       * back is how a two-click fix turns into a hunt.
+       *
+       * Read off `window.location` rather than `useSearchParams`, which
+       * would put this whole section behind a Suspense boundary for a value
+       * only this handler ever reads. Sanitized, since it arrives in a URL:
+       * `sanitizeInternalRedirect` rejects anything off-origin.
+       */
+      const requestedNext = new URLSearchParams(window.location.search).get(
+        "next",
+      );
+      if (requestedNext) {
+        const destination = sanitizeInternalRedirect(
+          requestedNext,
+          "/settings/connections",
+        );
+        if (destination !== "/settings/connections") {
+          router.push(destination);
+        }
+      }
     } finally {
       setBusy(false);
     }
