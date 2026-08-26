@@ -68,7 +68,7 @@ mock.module("@paco/poolside-backend", () => ({
     binaryPath: string | null;
   }) => {
     configCalls.push(settings);
-    return (settings.binaryPath ? { executable: settings.binaryPath } : {});
+    return settings.binaryPath ? { executable: settings.binaryPath } : {};
   },
   PoolsideBackend: class {
     config: unknown;
