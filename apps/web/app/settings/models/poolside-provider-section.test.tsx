@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { BackendCapabilities } from "@paco/agent-backend";
+import { PoolsideBackend } from "@paco/poolside-backend";
 import { renderToStaticMarkup } from "react-dom/server";
 import { poolsideSchema } from "@/lib/admin/instance-settings-schemas";
 
@@ -15,27 +16,24 @@ mock.module("@/lib/toast", () => ({
 const modulePromise = import("./poolside-provider-section");
 
 /**
- * Poolside's real capability literal, as `PoolsideBackend.capabilities()`
- * ships it.
+ * Poolside's capabilities, read from the backend itself.
  *
- * Copied rather than imported because `@paco/poolside-backend` is a server
- * package that spawns processes; the value itself was confirmed against the
- * live `pool` 1.0.16 ACP handshake. If it ever drifts, the assertions below
- * are about the DERIVATION — which keys become copy — and stay meaningful,
- * because the component never sees this constant, only whatever the server
- * hands it.
+ * Not a hand-copied literal. The whole point of the section under test is
+ * that its copy is derived from this object rather than written out, and a
+ * transcribed fixture would reintroduce exactly the drift the derivation
+ * removes: the package could change what Poolside supports, its own tests
+ * would be updated to match, and the assertions below would keep passing
+ * against a shape that no longer exists. Reading the real object means a
+ * capability gained or lost turns into a failure here.
+ *
+ * Safe to construct in a test despite the package spawning processes — the
+ * constructor is side-effect-free and takes no required config; only
+ * `startTurn` spawns anything. `lib/agent/backend-capabilities.ts` relies on
+ * the same property for the same reason, and the OpenFX section's test did
+ * this before it.
  */
-const POOLSIDE_CAPABILITIES: BackendCapabilities = {
-  id: "poolside",
-  resume: true,
-  steering: "restart",
-  mcp: true,
-  effort: false,
-  subagents: true,
-  customAgents: false,
-  structuredOutput: false,
-  models: ["poolside/laguna-s-2.1", "poolside/laguna-xs-2.1"],
-};
+const POOLSIDE_CAPABILITIES: BackendCapabilities =
+  new PoolsideBackend().capabilities();
 
 const noop = () => {
   // no-op: only the rendered markup is asserted below

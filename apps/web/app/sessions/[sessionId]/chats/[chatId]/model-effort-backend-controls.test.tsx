@@ -45,6 +45,14 @@ const CLAUDE_CAPABILITIES: BackendCapabilities = {
  * `thought_level` that does not map onto Paco's effort levels, so the effort
  * control goes. A component that hid on the id rather than on the object
  * would now hide the wrong half.
+ *
+ * Written out rather than read from `PoolsideBackend`, and deliberately so:
+ * what is under test here is the SHAPE of the rule — effort off, models
+ * present — not Poolside's current answer, and half these tests mutate the
+ * object anyway to reach cases no real backend reports today. The place that
+ * is pinned to the live capabilities is
+ * `app/settings/models/poolside-provider-section.test.tsx`, which reads the
+ * real object because the copy it checks is derived from it.
  */
 const POOLSIDE_CAPABILITIES: BackendCapabilities = {
   id: "poolside",
