@@ -45,9 +45,7 @@ const spies = {
     }),
   ),
   computeAndCacheDiff: mock(() => Promise.resolve()),
-  performAutoCommit: mock(() =>
-    Promise.resolve({ committed: true, pushed: true }),
-  ),
+  snapshotTurn: mock(() => Promise.resolve({ sha: "snap1", dirty: true })),
   performAutoCreatePr: mock(() =>
     Promise.resolve({ created: true, syncedExisting: false, skipped: false }),
   ),
@@ -88,8 +86,8 @@ mock.module("@/lib/diff/compute-diff", () => ({
   computeAndCacheDiff: spies.computeAndCacheDiff,
 }));
 
-mock.module("@/lib/chat/auto-commit-direct", () => ({
-  performAutoCommit: spies.performAutoCommit,
+mock.module("@/lib/git/checkpoint", () => ({
+  snapshotTurn: spies.snapshotTurn,
 }));
 
 mock.module("@/lib/chat/auto-pr-direct", () => ({
@@ -137,9 +135,9 @@ const {
   persistSandboxState,
   clearActiveStream,
   refreshDiffCache,
-  hasAutoCommitChangesStep,
-  runAutoCommitStep,
+  hasCommitsToProposeStep,
   runAutoCreatePrStep,
+  runTurnSnapshotStep,
   distillTurnMemoryStep,
   runTaskCompletionStep,
 } = await import("./chat-post-finish");
@@ -410,92 +408,121 @@ describe("refreshDiffCache", () => {
   });
 });
 
-// ─── hasAutoCommitChangesStep ───────────────────────────────────────
+// ─── runTurnSnapshotStep ───────────────────────────────────────────
 
-describe("hasAutoCommitChangesStep", () => {
-  test("returns false when git status is clean", async () => {
+const SANDBOX_STATE = {
+  type: "docker",
+  sandboxName: "session_session-1",
+} as never;
+
+describe("runTurnSnapshotStep", () => {
+  test("snapshots the chat's worktree under the turn's id", async () => {
+    await runTurnSnapshotStep({
+      sandboxState: SANDBOX_STATE,
+      chatId: "chat-1",
+      turnId: "turn-9",
+    });
+
+    expect(spies.snapshotTurn).toHaveBeenCalledTimes(1);
+    const call = spies.snapshotTurn.mock.calls.at(-1) as unknown[];
+    // The chat's worktree, never the session repository: the branch and the
+    // work are in the worktree, and the repository would answer for the
+    // default branch instead — silently, and with nothing in it.
+    expect(call[1]).toBe("/tmp/paco-workspaces/session_session-1/chats/chat-1");
+    expect(call[2]).toBe("chat-1");
+    expect(call[3]).toBe("turn-9");
+  });
+
+  test("never throws: a turn that worked must not be reported as failed", async () => {
+    spies.snapshotTurn.mockImplementationOnce(() =>
+      Promise.reject(new Error("git exploded")),
+    );
+
+    await runTurnSnapshotStep({
+      sandboxState: SANDBOX_STATE,
+      chatId: "chat-1",
+      turnId: "turn-9",
+    });
+  });
+});
+
+// ─── hasCommitsToProposeStep ───────────────────────────────────────
+
+describe("hasCommitsToProposeStep", () => {
+  test("true when the branch is ahead of the remote base", async () => {
     sandboxExec.mockImplementationOnce(() =>
-      Promise.resolve({ success: true, stdout: "" }),
+      Promise.resolve({ success: true, stdout: "3\n" }),
     );
 
     await expect(
-      hasAutoCommitChangesStep({
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
         chatId: "chat-1",
-        sandboxState: {
-          type: "docker",
-          sandboxName: "session_session-1",
-        } as never,
+        baseBranch: "main",
+      }),
+    ).resolves.toBe(true);
+  });
+
+  test("false when nothing has been committed — the ordinary case now", async () => {
+    sandboxExec.mockImplementationOnce(() =>
+      Promise.resolve({ success: true, stdout: "0\n" }),
+    );
+
+    await expect(
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
+        chatId: "chat-1",
+        baseBranch: "main",
       }),
     ).resolves.toBe(false);
   });
 
-  test("falls back to true when preflight fails", async () => {
-    sandboxExec.mockImplementationOnce(() =>
+  test("falls back to the local base when the branch was never pushed", async () => {
+    // `origin/main` does not exist, so the first count fails; the local
+    // `main` answers instead rather than the step reporting "no commits".
+    sandboxExec
+      .mockImplementationOnce(() =>
+        Promise.resolve({ success: false, stdout: "" }),
+      )
+      .mockImplementationOnce(() =>
+        Promise.resolve({ success: true, stdout: "2\n" }),
+      );
+
+    await expect(
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
+        chatId: "chat-1",
+        baseBranch: "main",
+      }),
+    ).resolves.toBe(true);
+  });
+
+  test("errs towards not proposing when git cannot be read at all", async () => {
+    sandboxExec.mockImplementation(() =>
       Promise.resolve({ success: false, stdout: "" }),
     );
 
     await expect(
-      hasAutoCommitChangesStep({
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
         chatId: "chat-1",
-        sandboxState: {
-          type: "docker",
-          sandboxName: "session_session-1",
-        } as never,
+        baseBranch: "main",
       }),
-    ).resolves.toBe(true);
-  });
-});
+    ).resolves.toBe(false);
 
-// ─── runAutoCommitStep ─────────────────────────────────────────────
-
-describe("runAutoCommitStep", () => {
-  test("connects sandbox and performs auto-commit", async () => {
-    await runAutoCommitStep({
-      userId: "user-1",
-      sessionId: "session-1",
-      chatId: "chat-1",
-      sessionTitle: "My session",
-      push: true,
-      repoOwner: "acme",
-      repoName: "repo",
-      sandboxState: {
-        type: "docker",
-        sandboxName: "session_session-1",
-      } as never,
-    });
-
-    expect(spies.connectSandbox).toHaveBeenCalledTimes(1);
-    expect(spies.performAutoCommit).toHaveBeenCalledTimes(1);
-    expect(spies.performAutoCommit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: "user-1",
-        sessionId: "session-1",
-        sessionTitle: "My session",
-        push: true,
-        repoOwner: "acme",
-        repoName: "repo",
-      }),
+    sandboxExec.mockImplementation(() =>
+      Promise.resolve({ success: true, stdout: " M file.ts\n" }),
     );
   });
 
-  test("does not throw on error", async () => {
-    spies.performAutoCommit.mockImplementationOnce(() =>
-      Promise.reject(new Error("Git error")),
-    );
-
-    await runAutoCommitStep({
-      userId: "user-1",
-      sessionId: "session-1",
-      chatId: "chat-1",
-      sessionTitle: "My session",
-      push: true,
-      repoOwner: "acme",
-      repoName: "repo",
-      sandboxState: {
-        type: "docker",
-        sandboxName: "session_session-1",
-      } as never,
-    });
+  test("refuses a base branch name that is not one", async () => {
+    await expect(
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
+        chatId: "chat-1",
+        baseBranch: "main;rm -rf /",
+      }),
+    ).resolves.toBe(false);
   });
 });
 

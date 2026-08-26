@@ -9,8 +9,8 @@
  * characters `\` and `n`. A commit message of ``fix: use `printf hi` here`` was
  * therefore executed — the commit landed as `fix: use hi here` — and every
  * multi-line commit body arrived flattened onto the subject line with a literal
- * `\n` in it. In `auto-commit-direct.ts` that message is written by the model
- * and committed without a human reading it first.
+ * `\n` in it. That message can be written by the model and
+ * committed without a human reading it first.
  *
  * Single quotes suppress every expansion bash has. The one character that
  * cannot appear between them is the single quote itself, so it is closed,

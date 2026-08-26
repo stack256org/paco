@@ -29,7 +29,6 @@ import { getRun } from "workflow/api";
 import { assistantFileLinkPrompt } from "@/lib/assistant-file-links";
 import { addLanguageModelUsage } from "./usage-utils";
 import type {
-  WebAgentCommitData,
   WebAgentCommitDataPart,
   WebAgentDesignProgressDataPart,
   WebAgentMessageMetadata,
@@ -42,7 +41,7 @@ import {
   closeStream,
   clearActiveStream,
   distillTurnMemoryStep,
-  hasAutoCommitChangesStep,
+  hasCommitsToProposeStep,
   persistAssistantMessage,
   persistAssistantMessageWithToolResults,
   persistSandboxState,
@@ -50,8 +49,8 @@ import {
   recordWorkflowUsage,
   refreshDiffCache,
   refreshLifecycleActivity,
-  runAutoCommitStep,
   runAutoCreatePrStep,
+  runTurnSnapshotStep,
   runTaskCompletionStep,
   sendFinish,
 } from "./chat-post-finish";
@@ -336,68 +335,6 @@ function isStepTimingError(
     typeof error.stepTiming === "object" &&
     error.stepTiming !== null
   );
-}
-
-function buildGitHubCommitUrl(
-  repoOwner: string,
-  repoName: string,
-  commitSha: string,
-): string {
-  return `https://github.com/${encodeURIComponent(repoOwner)}/${encodeURIComponent(repoName)}/commit/${encodeURIComponent(commitSha)}`;
-}
-
-/**
- * The commit's page on GitHub, when there is one.
- *
- * A commit that was never pushed — because pushing is off, or because the
- * session has no repository at all — has no URL to link to, and linking to one
- * anyway would send the reader to a 404.
- */
-function commitUrlFor(
-  result: Awaited<ReturnType<typeof runAutoCommitStep>>,
-  repoOwner: string | undefined,
-  repoName: string | undefined,
-): string | undefined {
-  if (!(result.pushed && result.commitSha && repoOwner && repoName)) {
-    return undefined;
-  }
-
-  return buildGitHubCommitUrl(repoOwner, repoName, result.commitSha);
-}
-
-function buildCommitData(
-  result: Awaited<ReturnType<typeof runAutoCommitStep>>,
-  repoOwner: string | undefined,
-  repoName: string | undefined,
-): WebAgentCommitData {
-  if (result.error) {
-    return {
-      status: "error",
-      committed: result.committed,
-      pushed: result.pushed,
-      commitMessage: result.commitMessage,
-      commitSha: result.commitSha,
-      url: commitUrlFor(result, repoOwner, repoName),
-      error: result.error,
-    };
-  }
-
-  if (result.committed) {
-    return {
-      status: "success",
-      committed: result.committed,
-      pushed: result.pushed,
-      commitMessage: result.commitMessage,
-      commitSha: result.commitSha,
-      url: commitUrlFor(result, repoOwner, repoName),
-    };
-  }
-
-  return {
-    status: "skipped",
-    committed: false,
-    pushed: false,
-  };
 }
 
 function buildPrData(
@@ -1313,87 +1250,65 @@ export async function runAgentWorkflow(options: Options) {
       finalFinishReason !== undefined &&
       finalFinishReason !== "tool-calls" &&
       finalFinishReason !== "error";
-    const commitPartId = `${assistantId}:commit`;
     const prPartId = `${assistantId}:pr`;
     const repoOwner = runtime.repoOwner;
     const repoName = runtime.repoName;
     let didUpdateGitData = false;
 
-    let autoCommitResult: Awaited<ReturnType<typeof runAutoCommitStep>> | null =
-      null;
-
-    // No repository check: a local commit needs a worktree, not a remote.
-    const canAutoCommit =
-      finishedNaturally &&
-      (options.autoCommitEnabled ?? modelRuntime.autoCommitEnabled) &&
-      sandboxState != null;
-
-    const shouldPush =
-      (options.autoPushEnabled ?? modelRuntime.autoPushEnabled) &&
-      repoOwner != null &&
-      repoName != null;
-
-    if (canAutoCommit) {
-      const hasAutoCommitChanges = await hasAutoCommitChangesStep({
+    /*
+     * A turn no longer commits.
+     *
+     * It used to: `git add -A`, a model-written message, `git commit`, and —
+     * with pushing on — `git push`, every turn, automatically. The branch
+     * therefore filled with commits the operator had not written, not read,
+     * and could not un-choose. The operator commits now, from the Source
+     * Control panel, against git's own index.
+     *
+     * What the turn does instead is capture its result into a commit object
+     * under `refs/paco/turns/<chatId>/<turnId>`, which is not a branch and is
+     * invisible to everything that reads the branch. Nothing else the old step
+     * did is lost: the push it performed is now part of opening a pull
+     * request, and the diff cache is refreshed by whichever write tools ran,
+     * which is the honest trigger — a snapshot changes nothing on disk.
+     */
+    const lastTurnId = turnIds.at(-1);
+    if (finishedNaturally && sandboxState && lastTurnId) {
+      await runTurnSnapshotStep({
         sandboxState,
         chatId: options.chatId,
+        turnId: lastTurnId,
       });
-
-      if (hasAutoCommitChanges) {
-        const pendingCommitPart: WebAgentCommitDataPart = {
-          type: "data-commit",
-          id: commitPartId,
-          data: { status: "pending" },
-        };
-        pendingAssistantResponse = upsertAssistantDataPart(
-          pendingAssistantResponse,
-          pendingCommitPart,
-        );
-        await sendDataPart(writable, pendingCommitPart);
-        autoCommitResult = await runAutoCommitStep({
-          userId: options.userId,
-          sessionId: options.sessionId,
-          chatId: options.chatId,
-          sessionTitle: runtime.sessionTitle,
-          push: shouldPush,
-          ...(repoOwner ? { repoOwner } : {}),
-          ...(repoName ? { repoName } : {}),
-          sandboxState,
-        });
-
-        const resolvedCommitPart: WebAgentCommitDataPart = {
-          type: "data-commit",
-          id: commitPartId,
-          data: buildCommitData(autoCommitResult, repoOwner, repoName),
-        };
-        pendingAssistantResponse = upsertAssistantDataPart(
-          pendingAssistantResponse,
-          resolvedCommitPart,
-        );
-        await sendDataPart(writable, resolvedCommitPart);
-        didUpdateGitData = true;
-        shouldRefreshCachedDiff = true;
-      } else {
-        autoCommitResult = {
-          committed: false,
-          pushed: false,
-        };
-      }
     }
 
-    const canAutoCreatePr =
-      autoCommitResult != null &&
-      !autoCommitResult.error &&
-      (autoCommitResult.pushed || !autoCommitResult.committed);
-
-    // A pull request needs a branch on GitHub, so it rides on the push and not
-    // on the local commit.
+    /*
+     * A pull request needs commits, and after a turn there usually are none.
+     *
+     * The automatic path is kept rather than dropped, but it is now gated on
+     * the branch actually being ahead of its base — which, since turns do not
+     * commit, means gated on the operator having committed something. That
+     * keeps the behaviour someone switched auto-PR on for (commit, then it
+     * opens or updates the PR without being asked again) while making the
+     * empty-PR case impossible.
+     *
+     * When there is nothing to propose the turn says so in the transcript as a
+     * skipped pull-request card, rather than silently doing nothing: the
+     * setting is on, the operator expects a pull request, and "commit your
+     * changes first" is the answer.
+     */
     const autoCreatePrRequested =
-      shouldPush &&
+      (options.autoPushEnabled ?? modelRuntime.autoPushEnabled) &&
+      repoOwner != null &&
+      repoName != null &&
       (options.autoCreatePrEnabled ?? modelRuntime.autoCreatePrEnabled);
 
-    if (canAutoCommit && autoCreatePrRequested) {
-      if (canAutoCreatePr) {
+    if (finishedNaturally && sandboxState && autoCreatePrRequested) {
+      const hasCommitsToPropose = await hasCommitsToProposeStep({
+        sandboxState,
+        chatId: options.chatId,
+        baseBranch: runtime.baseBranch,
+      });
+
+      if (hasCommitsToPropose) {
         const pendingPrPart: WebAgentPrDataPart = {
           type: "data-pr",
           id: prPartId,
@@ -1434,8 +1349,7 @@ export async function runAgentWorkflow(options: Options) {
           data: {
             status: "skipped",
             skipReason:
-              autoCommitResult?.error ??
-              "Auto-commit did not leave origin in sync with HEAD",
+              "Nothing is committed yet. Commit your changes in the Source Control panel, and the next turn will open the pull request.",
           },
         };
         pendingAssistantResponse = upsertAssistantDataPart(

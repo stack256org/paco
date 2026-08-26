@@ -1,7 +1,6 @@
 import { isToolUIPart, type LanguageModelUsage, type UIMessageChunk } from "ai";
 import type { SandboxState, Sandbox } from "@paco/sandbox";
 import type { WebAgentUIMessage } from "@/app/types";
-import type { AutoCommitResult } from "@/lib/chat/auto-commit-direct";
 import type { AutoCreatePrResult } from "@/lib/chat/auto-pr-direct";
 import {
   claimChatActiveStreamId,
@@ -545,74 +544,104 @@ export async function sendFinish(
   }
 }
 
-export async function hasAutoCommitChangesStep(params: {
+/**
+ * Record what this turn produced, under a ref nobody sees.
+ *
+ * This replaces the end-of-turn auto-commit. A turn used to finish by running
+ * `git add -A && git commit` (and, with pushing on, `git push`) on the chat's
+ * own branch, so the branch filled up with commits the operator never wrote
+ * and never reviewed. The operator commits now, deliberately, from the Source
+ * Control panel.
+ *
+ * That leaves a hole this fills. While turns committed, every turn's result
+ * was reachable from the branch forever; with nothing committing, the only
+ * record of what a turn produced is the working tree, and the next turn
+ * overwrites it. So the tree is captured into a commit object under
+ * `refs/paco/turns/<chatId>/<turnId>` — a ref outside `refs/heads`, so it is
+ * not a branch, appears in no `git log`, in no diff against the base, in
+ * nothing `git status` reports to the Changes list, and matches no default
+ * push refspec. It captures untracked files and leaves the index and the
+ * working tree exactly as it found them. See `lib/git/checkpoint.ts`.
+ *
+ * Never throws. A snapshot is bookkeeping; a turn that already succeeded must
+ * not be reported as failed because bookkeeping did.
+ */
+export async function runTurnSnapshotStep(params: {
   sandboxState: SandboxState;
   chatId: string;
+  turnId: string;
+}): Promise<void> {
+  "use step";
+  try {
+    const { connectSandbox } = await import("@paco/sandbox");
+    const { snapshotTurn } = await import("@/lib/git/checkpoint");
+    const { resolveWorkCwd } = await import("@/lib/agent/workspace-paths");
+    const sandbox: Sandbox = await connectSandbox(params.sandboxState);
+    await snapshotTurn(
+      sandbox,
+      // The chat's worktree: the work is on its branch, not on the session
+      // repository's default branch.
+      resolveWorkCwd(params.sandboxState, params.chatId),
+      params.chatId,
+      params.turnId,
+    );
+  } catch (error) {
+    console.error("[workflow] Failed to snapshot the turn:", error);
+  }
+}
+
+/**
+ * Whether this branch has anything a pull request could be about.
+ *
+ * Asked before the pull-request step runs, not inside it, so the panel is
+ * never shown a "creating a pull request…" placeholder for a request that
+ * cannot go anywhere. Now that turns do not commit, the ordinary answer after
+ * a turn is *no* — the work is sitting uncommitted in the worktree, waiting
+ * for the operator — and a pull request opened anyway would be empty.
+ *
+ * Counts against the base branch as the remote sees it, falling back to the
+ * local base: `origin/<base>` is the ref GitHub would compare against, but a
+ * session whose branch has never been pushed has no `origin/<base>` at all,
+ * and answering "no commits" there would be wrong.
+ *
+ * Errs towards *not* proposing: an unreadable count is reported as zero, so
+ * the failure mode is a pull request the operator opens by hand rather than an
+ * empty one Paco opened for them.
+ */
+export async function hasCommitsToProposeStep(params: {
+  sandboxState: SandboxState;
+  chatId: string;
+  baseBranch: string;
 }): Promise<boolean> {
   "use step";
   try {
     const { connectSandbox } = await import("@paco/sandbox");
-    const { hostChatWorktree } = await import("@/lib/agent/workspace-paths");
-    const sandbox: Sandbox = await connectSandbox(params.sandboxState);
-    // The chat's worktree: uncommitted work lives on its branch, not on the
-    // session repository's default branch.
-    const statusResult = await sandbox.exec(
-      "git status --porcelain",
-      hostChatWorktree(params.sandboxState, params.chatId),
-      10000,
-    );
-
-    if (!statusResult.success) {
-      return true;
+    const { resolveWorkCwd } = await import("@/lib/agent/workspace-paths");
+    const { isSafeBranchName } = await import("@/lib/git/helpers");
+    if (!isSafeBranchName(params.baseBranch)) {
+      return false;
     }
 
-    return statusResult.stdout.trim().length > 0;
-  } catch (error) {
-    console.error("[workflow] Failed to preflight auto-commit changes:", error);
-    return true;
-  }
-}
+    const sandbox: Sandbox = await connectSandbox(params.sandboxState);
+    const cwd = resolveWorkCwd(params.sandboxState, params.chatId);
 
-export async function runAutoCommitStep(params: {
-  userId: string;
-  sessionId: string;
-  chatId: string;
-  sessionTitle: string;
-  /**
-   * Whether to publish the commit. A session with no repository can still
-   * commit, so the repo fields are optional and the push flag is not derived
-   * from them here — the workflow already decided.
-   */
-  push: boolean;
-  repoOwner?: string;
-  repoName?: string;
-  sandboxState: SandboxState;
-}): Promise<AutoCommitResult> {
-  "use step";
-  try {
-    const { connectSandbox } = await import("@paco/sandbox");
-    const { performAutoCommit } = await import("@/lib/chat/auto-commit-direct");
-    const { hostChatWorktree } = await import("@/lib/agent/workspace-paths");
-    const sandbox = await connectSandbox(params.sandboxState);
-    return await performAutoCommit({
-      sandbox,
-      userId: params.userId,
-      sessionId: params.sessionId,
-      chatId: params.chatId,
-      sessionTitle: params.sessionTitle,
-      push: params.push,
-      ...(params.repoOwner ? { repoOwner: params.repoOwner } : {}),
-      ...(params.repoName ? { repoName: params.repoName } : {}),
-      // The chat's worktree: its branch is the one being committed.
-      cwd: hostChatWorktree(params.sandboxState, params.chatId),
-    });
+    for (const base of [`origin/${params.baseBranch}`, params.baseBranch]) {
+      const count = await sandbox.exec(
+        `git rev-list --count ${base}..HEAD`,
+        cwd,
+        10_000,
+      );
+      if (!count.success) {
+        continue;
+      }
+      const ahead = Number.parseInt(count.stdout.trim(), 10);
+      return Number.isFinite(ahead) && ahead > 0;
+    }
+
+    return false;
   } catch (error) {
-    console.error("[workflow] Auto-commit failed:", error);
-    return {
-      committed: false,
-      pushed: false,
-      error: error instanceof Error ? error.message : "Auto-commit failed",
-    };
+    console.error("[workflow] Failed to count commits to propose:", error);
+    return false;
   }
 }
 

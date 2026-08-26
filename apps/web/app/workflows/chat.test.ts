@@ -159,11 +159,11 @@ const spies = {
     Promise.resolve(),
   ),
   refreshLifecycleActivity: mock(() => Promise.resolve()),
-  hasAutoCommitChangesStep: mock(() => Promise.resolve(true)),
-  // Typed loosely on purpose: the tests read `push` and `repoOwner` off the
-  // recorded call to check which of the three levels the workflow asked for.
-  runAutoCommitStep: mock((_params?: { push?: boolean; repoOwner?: string }) =>
-    Promise.resolve({ committed: false, pushed: false }),
+  hasCommitsToProposeStep: mock(() => Promise.resolve(true)),
+  // Typed loosely on purpose: the tests read `chatId` and `turnId` off the
+  // recorded call to check the snapshot is filed against the right turn.
+  runTurnSnapshotStep: mock((_params?: { chatId?: string; turnId?: string }) =>
+    Promise.resolve(),
   ),
   runAutoCreatePrStep: mock(() =>
     Promise.resolve({
@@ -1586,7 +1586,7 @@ describe("runAgentWorkflow", () => {
     expect(spies.refreshDiffCache).toHaveBeenCalledTimes(1);
   });
 
-  test("runs auto-commit when enabled and not aborted", async () => {
+  test("takes a turn snapshot instead of committing", async () => {
     await runAgentWorkflow(
       makeOptions({
         autoCommitEnabled: true,
@@ -1596,17 +1596,28 @@ describe("runAgentWorkflow", () => {
       }),
     );
 
-    expect(spies.runAutoCommitStep).toHaveBeenCalledTimes(1);
-    expect(spies.runAutoCommitStep).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: "user-1",
+    expect(spies.runTurnSnapshotStep).toHaveBeenCalledTimes(1);
+    expect(spies.runTurnSnapshotStep).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: "chat-1" }),
+    );
+  });
+
+  test("never streams a commit card, because nothing commits", async () => {
+    await runAgentWorkflow(
+      makeOptions({
+        autoCommitEnabled: true,
+        autoPushEnabled: true,
         repoOwner: "acme",
         repoName: "repo",
       }),
     );
+
+    expect(
+      writtenChunks.filter((chunk) => chunk.type === "data-commit"),
+    ).toEqual([]);
   });
 
-  test("runs auto PR creation when enabled and not aborted", async () => {
+  test("runs auto PR creation when enabled and the branch is ahead", async () => {
     await runAgentWorkflow(
       makeOptions({
         autoCommitEnabled: true,
@@ -1628,8 +1639,11 @@ describe("runAgentWorkflow", () => {
     );
   });
 
-  test("skips optimistic commit streaming when preflight finds no changes", async () => {
-    spies.hasAutoCommitChangesStep.mockImplementationOnce(() =>
+  test("refuses to open an empty pull request, and says why", async () => {
+    // The ordinary case now: the turn's work is uncommitted, so there is
+    // nothing for a pull request to propose. Silently doing nothing would
+    // leave someone who switched auto-PR on waiting for a link.
+    spies.hasCommitsToProposeStep.mockImplementationOnce(() =>
       Promise.resolve(false),
     );
 
@@ -1643,22 +1657,16 @@ describe("runAgentWorkflow", () => {
       }),
     );
 
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
-    expect(spies.runAutoCreatePrStep).toHaveBeenCalledTimes(1);
-    expect(
-      writtenChunks.filter((chunk) => chunk.type === "data-commit"),
-    ).toEqual([]);
+    expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
+    const prChunks = writtenChunks.filter(
+      (chunk) => chunk.type === "data-pr",
+    ) as Array<{ data: { status: string; skipReason?: string } }>;
+    expect(prChunks).toHaveLength(1);
+    expect(prChunks[0]?.data.status).toBe("skipped");
+    expect(prChunks[0]?.data.skipReason).toContain("Source Control");
   });
 
-  test("streams and persists resolved git data parts", async () => {
-    spies.runAutoCommitStep.mockImplementationOnce(() =>
-      Promise.resolve({
-        committed: true,
-        pushed: true,
-        commitMessage: "feat: add auto git status",
-        commitSha: "abc123",
-      }),
-    );
+  test("streams and persists the resolved pull-request part", async () => {
     spies.runAutoCreatePrStep.mockImplementationOnce(() =>
       Promise.resolve({
         created: true,
@@ -1679,27 +1687,6 @@ describe("runAgentWorkflow", () => {
       }),
     );
 
-    expect(
-      writtenChunks.filter((chunk) => chunk.type === "data-commit"),
-    ).toEqual([
-      {
-        type: "data-commit",
-        id: "gen-id-1:commit",
-        data: { status: "pending" },
-      },
-      {
-        type: "data-commit",
-        id: "gen-id-1:commit",
-        data: {
-          status: "success",
-          committed: true,
-          pushed: true,
-          commitMessage: "feat: add auto git status",
-          commitSha: "abc123",
-          url: "https://github.com/acme/repo/commit/abc123",
-        },
-      },
-    ]);
     expect(writtenChunks.filter((chunk) => chunk.type === "data-pr")).toEqual([
       {
         type: "data-pr",
@@ -1728,18 +1715,6 @@ describe("runAgentWorkflow", () => {
     expect(persistedMessage.parts).toEqual(
       expect.arrayContaining([
         {
-          type: "data-commit",
-          id: "gen-id-1:commit",
-          data: {
-            status: "success",
-            committed: true,
-            pushed: true,
-            commitMessage: "feat: add auto git status",
-            commitSha: "abc123",
-            url: "https://github.com/acme/repo/commit/abc123",
-          },
-        },
-        {
           type: "data-pr",
           id: "gen-id-1:pr",
           data: {
@@ -1752,29 +1727,6 @@ describe("runAgentWorkflow", () => {
         },
       ]),
     );
-  });
-
-  test("skips auto PR creation when auto-commit does not push the latest commit", async () => {
-    spies.runAutoCommitStep.mockImplementationOnce(() =>
-      Promise.resolve({
-        committed: true,
-        pushed: false,
-        error: "Commit succeeded but push failed",
-      }),
-    );
-
-    await runAgentWorkflow(
-      makeOptions({
-        autoCommitEnabled: true,
-        autoPushEnabled: true,
-        autoCreatePrEnabled: true,
-        repoOwner: "acme",
-        repoName: "repo",
-      }),
-    );
-
-    expect(spies.runAutoCommitStep).toHaveBeenCalledTimes(1);
-    expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
   });
 
   test("skips post-finish automation when the agent pauses for tool input", async () => {
@@ -1811,7 +1763,7 @@ describe("runAgentWorkflow", () => {
       }),
     );
 
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
+    expect(spies.runTurnSnapshotStep).not.toHaveBeenCalled();
     expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
   });
 
@@ -1828,19 +1780,8 @@ describe("runAgentWorkflow", () => {
     expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
   });
 
-  test("skips auto-commit when not enabled", async () => {
-    await runAgentWorkflow(
-      makeOptions({
-        autoCommitEnabled: false,
-      }),
-    );
-
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
-  });
-
-  test("still commits locally when the session has no repository", async () => {
-    // A local commit needs a worktree, not a remote. Requiring a repo here is
-    // what left work in a GitHub-less session unsaved.
+  test("snapshots even with a session that has no repository", async () => {
+    // A snapshot is local bookkeeping. It needs a worktree, not a remote.
     spies.resolveChatSandboxRuntime.mockImplementationOnce(() =>
       Promise.resolve(
         createResolvedChatSandboxRuntime({
@@ -1851,76 +1792,41 @@ describe("runAgentWorkflow", () => {
     );
     testSessionRecord.repoOwner = null;
     testSessionRecord.repoName = null;
-    testPreferences.autoCommitPush = true;
 
     await runAgentWorkflow(makeOptions());
 
-    expect(spies.runAutoCommitStep).toHaveBeenCalledTimes(1);
-    const call = spies.runAutoCommitStep.mock.calls.at(-1)?.[0];
-    // Push was asked for, but there is nowhere to push to.
-    expect(call?.push).toBe(false);
-    expect(call?.repoOwner).toBeUndefined();
+    expect(spies.runTurnSnapshotStep).toHaveBeenCalledTimes(1);
+    expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
   });
 });
 
 /**
- * Saving locally, publishing to GitHub, and asking a person to review are three
- * different amounts of exposure, so each is resolved from its own preference.
- * These read the resolution the workflow does for itself — no `autoCommitEnabled`
- * override in the options — because that is the path a real request takes.
+ * What survives the end of a turn.
+ *
+ * Nothing commits any more, so the only two questions left are whether the
+ * turn was snapshotted and whether a pull request was opened — and the second
+ * now depends on the operator having committed, not on the agent having run.
  */
-describe("auto-save levels", () => {
-  const pushFlagOfLastCommit = () =>
-    spies.runAutoCommitStep.mock.calls.at(-1)?.[0]?.push;
-
-  test("commits locally and pushes nothing, out of the box", async () => {
-    await runAgentWorkflow(makeOptions());
-
-    expect(spies.runAutoCommitStep).toHaveBeenCalledTimes(1);
-    expect(pushFlagOfLastCommit()).toBe(false);
-    expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
-  });
-
-  test("pushes as well once backing up to GitHub is on", async () => {
-    testPreferences.autoCommitPush = true;
+describe("end-of-turn automation", () => {
+  test("snapshots every finished turn, whatever the preferences say", async () => {
+    // Snapshots are how undo works. Making them conditional on a save
+    // preference would take undo away from anyone who turned saving off.
+    testPreferences.autoCommitLocal = false;
+    testPreferences.autoCommitPush = false;
 
     await runAgentWorkflow(makeOptions());
 
-    expect(pushFlagOfLastCommit()).toBe(true);
+    expect(spies.runTurnSnapshotStep).toHaveBeenCalledTimes(1);
     expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
   });
 
-  test("opens a pull request once all three are on", async () => {
+  test("opens a pull request once pushing and PR creation are both on", async () => {
     testPreferences.autoCommitPush = true;
     testPreferences.autoCreatePr = true;
-    spies.runAutoCommitStep.mockImplementationOnce(() =>
-      Promise.resolve({ committed: true, pushed: true }),
-    );
 
     await runAgentWorkflow(makeOptions());
 
-    expect(pushFlagOfLastCommit()).toBe(true);
     expect(spies.runAutoCreatePrStep).toHaveBeenCalledTimes(1);
-  });
-
-  test("saves nothing when every level is off", async () => {
-    testPreferences.autoCommitLocal = false;
-
-    await runAgentWorkflow(makeOptions());
-
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
-    expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
-  });
-
-  test("still commits when local saving is off but pushing is on", async () => {
-    // Nothing can be pushed that was not committed first.
-    testPreferences.autoCommitLocal = false;
-    testPreferences.autoCommitPush = true;
-
-    await runAgentWorkflow(makeOptions());
-
-    expect(spies.runAutoCommitStep).toHaveBeenCalledTimes(1);
-    expect(pushFlagOfLastCommit()).toBe(true);
   });
 
   test("does not open a pull request while pushing is off", async () => {
@@ -1928,49 +1834,27 @@ describe("auto-save levels", () => {
 
     await runAgentWorkflow(makeOptions());
 
-    expect(pushFlagOfLastCommit()).toBe(false);
     expect(spies.runAutoCreatePrStep).not.toHaveBeenCalled();
   });
 
-  test("lets a session override the user's default", async () => {
-    testSessionRecord.autoCommitLocalOverride = false;
-
-    await runAgentWorkflow(makeOptions());
-
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
-  });
-
-  test("does not save a turn the user stopped", async () => {
-    // A stopped turn is a half-written state; committing it would file it in
-    // the history as finished work.
+  test("does not snapshot a turn the user stopped", async () => {
+    // A stopped turn is a half-written state; filing it as this turn's result
+    // would make undo restore something that never finished.
     agentAbortsTurn = true;
 
     await runAgentWorkflow(makeOptions());
 
     // The turn ran and was cut short — not skipped before it started.
     expect(agentTurnCalls).toHaveLength(1);
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
+    expect(spies.runTurnSnapshotStep).not.toHaveBeenCalled();
   });
 
-  test("does not save a turn that errored", async () => {
+  test("does not snapshot a turn that errored", async () => {
     agentFinishReason = "error";
 
     await runAgentWorkflow(makeOptions());
 
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
-  });
-
-  test("does not commit when the worktree is clean", async () => {
-    spies.hasAutoCommitChangesStep.mockImplementationOnce(() =>
-      Promise.resolve(false),
-    );
-
-    await runAgentWorkflow(makeOptions());
-
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
-    expect(
-      writtenChunks.filter((chunk) => chunk.type === "data-commit"),
-    ).toEqual([]);
+    expect(spies.runTurnSnapshotStep).not.toHaveBeenCalled();
   });
 
   test("still clears stream and sends finish even on step error", async () => {
@@ -2463,7 +2347,7 @@ describe("design mode", () => {
     // design turn is a fully separate step (`runDesignTurnStep`), not a call
     // to the same per-chat `runAgentTurn`.
     expect(agentTurnCalls).toHaveLength(0);
-    expect(spies.runAutoCommitStep).not.toHaveBeenCalled();
+    expect(spies.runTurnSnapshotStep).not.toHaveBeenCalled();
     expect(spies.runTaskCompletionStep).not.toHaveBeenCalled();
     expect(spies.distillTurnMemoryStep).not.toHaveBeenCalled();
   });

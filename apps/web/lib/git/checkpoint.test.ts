@@ -2,7 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
-const { createCheckpoint, restoreCheckpoint } = await import("./checkpoint");
+const { createCheckpoint, restoreCheckpoint, snapshotTurn } =
+  await import("./checkpoint");
 
 type Reply = { success?: boolean; stdout?: string; stderr?: string };
 
@@ -59,6 +60,7 @@ describe("createCheckpoint", () => {
       dirty: false,
     });
     expect(ran.some((c) => c.includes("commit-tree"))).toBe(false);
+    expect(ran.some((c) => c.includes("update-ref"))).toBe(false);
   });
 
   test("never stages into the repository's own index", async () => {
@@ -81,15 +83,46 @@ describe("createCheckpoint", () => {
     // `git commit-tree` writes an object; `git commit` moves the branch.
     expect(ran.some((c) => /git commit(?!-tree)/.test(c))).toBe(false);
     expect(ran.some((c) => c.includes("git reset"))).toBe(false);
+    expect(ran.some((c) => c.includes("git checkout"))).toBe(false);
+    expect(ran.some((c) => c.includes("git stash"))).toBe(false);
+  });
+
+  test("reads the real index by copying it, never in place", async () => {
+    // `git write-tree` on a live index rewrites its cache-tree extension and
+    // takes index.lock to do it — so reading the staging area in place could
+    // collide with the operator staging a file at that moment.
+    const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
+
+    await createCheckpoint(sandbox, WORKTREE_CWD, "chat1");
+
+    const writeTrees = ran.filter((c) => c.includes("git write-tree"));
+    expect(writeTrees.length).toBe(2);
+    for (const command of writeTrees) {
+      expect(command).toContain("GIT_INDEX_FILE=");
+    }
+    expect(
+      ran.some(
+        (c) => c.startsWith("cp -f") && c.includes(`${REAL_GIT_DIR}/index`),
+      ),
+    ).toBe(true);
+  });
+
+  test("captures untracked files, so an undo can put a new file back", async () => {
+    // `git add -A` in the scratch index, not `git add -u`: a turn that creates
+    // a file and an undo that cannot remove it is worse than no undo.
+    const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
+
+    await createCheckpoint(sandbox, WORKTREE_CWD, "chat1");
+
+    expect(ran.some((c) => c.includes("git add -A"))).toBe(true);
   });
 
   test("puts the scratch index in the real git dir, not <cwd>/.git", async () => {
     /*
      * A chat's cwd is a linked worktree, where `.git` is a *file*. Writing the
-     * scratch index to `<cwd>/.git/paco-checkpoint-index` failed with
-     * "Not a directory", so `createCheckpoint` returned null on every dirty
-     * tree — which is every turn after the first — and Revert had nothing to
-     * restore.
+     * scratch index to `<cwd>/.git/…` failed with "Not a directory", so
+     * `createCheckpoint` returned null on every dirty tree — which is every
+     * turn after the first — and Revert had nothing to restore.
      */
     const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
 
@@ -98,7 +131,7 @@ describe("createCheckpoint", () => {
     const indexed = ran.filter((c) => c.includes("GIT_INDEX_FILE="));
     expect(indexed.length).toBeGreaterThan(0);
     for (const command of indexed) {
-      expect(command).toContain(`${REAL_GIT_DIR}/paco-checkpoint-index`);
+      expect(command).toContain(`${REAL_GIT_DIR}/paco-snapshot-`);
       expect(command).not.toContain(`${WORKTREE_CWD}/.git/`);
     }
     // The git dir has to be asked for, and asked for absolutely: git resolves
@@ -108,6 +141,8 @@ describe("createCheckpoint", () => {
   });
 
   test("keeps the checkpoint reachable so it is not garbage collected", async () => {
+    // More urgent than it used to be: while turns committed, a checkpoint's
+    // tree was reachable from the branch anyway. Nothing commits now.
     const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
 
     await createCheckpoint(sandbox, WORKTREE_CWD, "chat1");
@@ -116,10 +151,21 @@ describe("createCheckpoint", () => {
       ran.some(
         (c) =>
           c.includes("git update-ref") &&
-          c.includes("refs/paco/checkpoints/chat1") &&
+          c.includes("refs/paco/turns/chat1/") &&
           c.includes("chk777"),
       ),
     ).toBe(true);
+  });
+
+  test("writes only outside refs/heads, so it is never a branch", async () => {
+    const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
+
+    await createCheckpoint(sandbox, WORKTREE_CWD, "chat1");
+
+    for (const command of ran.filter((c) => c.includes("update-ref"))) {
+      expect(command).not.toContain("refs/heads");
+      expect(command).not.toContain("refs/remotes");
+    }
   });
 
   test("returns null when the git dir cannot be resolved", async () => {
@@ -141,6 +187,35 @@ describe("createCheckpoint", () => {
     });
 
     expect(await createCheckpoint(sandbox, "/w", "chat1")).toBeNull();
+  });
+});
+
+describe("snapshotTurn", () => {
+  test("files the post-turn tree under the turn's own ref", async () => {
+    const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
+
+    expect(
+      await snapshotTurn(sandbox, WORKTREE_CWD, "chat1", "turn-42"),
+    ).toEqual({ sha: "chk777", dirty: true });
+
+    expect(
+      ran.some(
+        (c) =>
+          c.includes("git update-ref") &&
+          c.includes("refs/paco/turns/chat1/turn-42"),
+      ),
+    ).toBe(true);
+  });
+
+  test("leaves the branch and the index alone, exactly as a checkpoint does", async () => {
+    const { sandbox, ran } = fakeSandbox(dirtyWorktreeReplies());
+
+    await snapshotTurn(sandbox, WORKTREE_CWD, "chat1", "turn-42");
+
+    expect(ran.some((c) => /git commit(?!-tree)/.test(c))).toBe(false);
+    for (const command of ran.filter((c) => c.includes("git add"))) {
+      expect(command).toContain("GIT_INDEX_FILE=");
+    }
   });
 });
 
@@ -167,6 +242,39 @@ describe("restoreCheckpoint", () => {
     await restoreCheckpoint(sandbox, "/w", "chk777");
 
     expect(ran).toContain("git clean -fd");
+    // Never `-x`: ignored files were never captured, so removing them would
+    // delete build output and dependencies nothing can put back.
+    expect(ran.some((c) => c.includes("git clean") && c.includes("x"))).toBe(
+      false,
+    );
+  });
+
+  test("puts the staging area back from the snapshot's second parent", async () => {
+    const { sandbox, ran } = fakeSandbox({
+      "git log -1 --format=%s": { stdout: "paco snapshot" },
+      "^2^{tree}": { stdout: "idxtree1" },
+    });
+
+    await restoreCheckpoint(sandbox, "/w", "chk777");
+
+    // Without `-u`: the working tree keeps what the reset restored, and only
+    // which files were staged is put back.
+    expect(ran).toContain("git read-tree idxtree1");
+  });
+
+  test("never reads ^2 off a commit Paco did not write", async () => {
+    // A clean-tree checkpoint *is* the branch's HEAD, and HEAD can be an
+    // ordinary merge commit — whose second parent is somebody's branch, not a
+    // staging area. Reading it would silently stage the wrong tree.
+    const { sandbox, ran } = fakeSandbox({
+      "git log -1 --format=%s": { stdout: "Merge pull request #12" },
+      "^2^{tree}": { stdout: "someones-branch-tree" },
+    });
+
+    await restoreCheckpoint(sandbox, "/w", "abc123");
+
+    expect(ran.some((c) => c.includes("^2^{tree}"))).toBe(false);
+    expect(ran.some((c) => c.includes("read-tree someones"))).toBe(false);
   });
 
   test("refuses when the checkpoint is not in this worktree", async () => {

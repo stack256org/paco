@@ -61,19 +61,30 @@ export async function performAutoCreatePr(
     };
   }
 
-  // Nothing to open a pull request about is the ordinary case after a turn
-  // that only answered a question.
+  /*
+   * Nothing to open a pull request about is now the *ordinary* case, not the
+   * exception: turns do not commit, so a branch is only ahead of its base once
+   * the operator has committed something themselves.
+   *
+   * An unreadable count skips too. It used to fall through and open the pull
+   * request anyway, on the theory that a failed check should not block a real
+   * proposal — but the check only fails when `origin/<base>` does not exist,
+   * and a base branch GitHub has never seen is not one a pull request can
+   * target. Falling through there produced an empty or impossible PR.
+   */
   const ahead = await sandbox.exec(
     `git rev-list --count origin/${params.baseBranch}..HEAD`,
     cwd,
     30_000,
   );
-  if (ahead.success && ahead.stdout.trim() === "0") {
+  if (!ahead.success || ahead.stdout.trim() === "0") {
     return {
       created: false,
       syncedExisting: false,
       skipped: true,
-      skipReason: "No commits to propose",
+      skipReason: ahead.success
+        ? "Nothing is committed yet, so there is nothing to propose. Commit your changes in the Source Control panel first."
+        : `We couldn't compare this branch with ${params.baseBranch} on GitHub.`,
     };
   }
 

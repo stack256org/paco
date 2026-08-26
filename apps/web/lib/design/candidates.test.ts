@@ -379,7 +379,7 @@ describe("acceptCandidate", () => {
     expect(branchList.trim()).toBe("");
   });
 
-  test("refuses when the chat worktree is dirty, naming it", async () => {
+  test("refuses when the chat worktree is dirty, and says how to fix it", async () => {
     const { root, chatId, chatBranch, chatWorktree } =
       await makeFixture("accept2");
     const candidates = await createCandidates({
@@ -410,8 +410,12 @@ describe("acceptCandidate", () => {
     if (result.ok) {
       throw new Error("expected acceptCandidate to refuse");
     }
-    expect(result.error).toContain(chatWorktree);
     expect(result.error.toLowerCase()).toContain("uncommitted");
+    // Names the remedy, not a host path. Since turns stopped committing, a
+    // dirty chat worktree is the normal state, so this refusal is something
+    // the person will actually read.
+    expect(result.error).toContain("Source Control");
+    expect(result.error).not.toContain(chatWorktree);
 
     // Refused, so nothing was cleaned up.
     expect(await exists(winner.worktreeDir)).toBe(true);

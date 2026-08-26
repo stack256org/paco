@@ -28,9 +28,9 @@ import {
 /**
  * Attachments live BESIDE the repository, never inside it.
  *
- * The chat's worktree is a git repository whose every finished turn may be
- * committed with `git add -A` (`lib/chat/auto-commit-direct.ts`,
- * `lib/design/design-turn.ts`). A staging directory inside it would land the
+ * The chat's worktree is a git repository whose contents the operator stages
+ * and commits with `git add` (the Source Control panel,
+ * `lib/git/source-control-actions.ts`). A staging directory inside it would land the
  * user's pasted log in their history and their diff. A sibling of the
  * repository under the session's own workspace is invisible to every `git`
  * command run in the worktree, needs no `.gitignore` entry in the user's

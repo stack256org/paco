@@ -423,7 +423,15 @@ export async function resolveCandidate(params: {
  *
  * Refuses when the chat's worktree has uncommitted changes: merging on top
  * of them would mix the candidate's commit with whatever was already there,
- * uncommitted and unreviewed.
+ * uncommitted and unreviewed. Git itself refuses too, for the same reason —
+ * a merge that would overwrite a local modification is aborted — so this is
+ * not a policy layered over git so much as git's own rule, checked early
+ * enough to say something useful about it.
+ *
+ * Since turns stopped committing, a dirty chat worktree is the *normal* state
+ * rather than the exception, so the refusal has to name the remedy the person
+ * actually has: the Source Control panel. The host path it used to print told
+ * whoever pressed the button nothing they could act on.
  *
  * A merge conflict also refuses: the merge is aborted, leaving the chat
  * worktree clean and still on `chatBranch`, and candidates are deliberately
@@ -450,7 +458,8 @@ export async function acceptCandidate(params: {
   if (status.stdout.trim().length > 0) {
     return {
       ok: false,
-      error: `The chat worktree at ${chatWorktree} has uncommitted changes; commit or discard them before accepting a design candidate.`,
+      error:
+        "This chat has uncommitted changes, and adopting a candidate merges a branch on top of them. Commit or discard them in the Source Control panel, then adopt the candidate.",
     };
   }
 
