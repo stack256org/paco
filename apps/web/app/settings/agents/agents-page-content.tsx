@@ -1,6 +1,7 @@
 "use client";
 
-import { AlertTriangle, Loader2, Plus } from "lucide-react";
+import type { BackendCapabilities } from "@paco/agent-backend";
+import { AlertTriangle, Info, Loader2, Plus } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/lib/toast";
 import {
@@ -12,6 +13,93 @@ import {
 } from "./actions";
 import { AgentEditorDialog } from "./agent-editor-dialog";
 import { AgentRow } from "./agent-row";
+import {
+  describeRosterBackendSupport,
+  formatList,
+} from "./roster-backend-support";
+
+export interface AgentsPageContentProps {
+  /** Every backend's own capability report — see `RosterBackendNoticeProps`. */
+  backends: readonly BackendCapabilities[];
+}
+
+export interface RosterBackendNoticeProps {
+  /**
+   * What every backend a chat can run on reports — `capabilitiesForBackend`
+   * for each `CHAT_BACKEND_IDS` entry, computed in `page.tsx` and handed
+   * down.
+   *
+   * Passed rather than imported because those modules are `server-only`
+   * (they construct backends that spawn processes), but the reason that
+   * matters is the same one `PoolsideProviderSection` gives: everything
+   * below is DERIVED from these objects, so this notice cannot claim a chat
+   * ignores the roster when the backend says it does not.
+   */
+  backends: readonly BackendCapabilities[];
+  /** The model ids the roster's rows carry; empty while it is still loading. */
+  rosterModelIds: readonly string[];
+}
+
+/**
+ * Say who this roster actually reaches.
+ *
+ * The page it sits on is an org-wide list of subagents with model tiers and
+ * tool sets, and until this existed it said nothing about backends at all —
+ * so an admin could tune the roster, switch a chat to a backend that cannot
+ * install one, and lose every bit of it with nothing on screen. That is the
+ * same silent downgrade `describeBackendLimitations` was written for on
+ * /settings/models, and it is derived the same way: off `customAgents`,
+ * never off a backend id.
+ *
+ * Renders nothing when every backend takes the roster — the honest state for
+ * a build where nothing is given up, and the reason this is a conditional
+ * notice rather than a permanent caption.
+ */
+export function RosterBackendNotice({
+  backends,
+  rosterModelIds,
+}: RosterBackendNoticeProps) {
+  const { honouring, ignoring } = describeRosterBackendSupport(
+    backends,
+    rosterModelIds,
+  );
+
+  if (ignoring.length === 0) {
+    return null;
+  }
+
+  const unknownModelIds = [
+    ...new Set(ignoring.flatMap((backend) => backend.unknownModelIds)),
+  ].sort();
+
+  return (
+    <div className="alert alert-info alert-soft mt-4" role="note">
+      <Info aria-hidden="true" className="size-4 shrink-0" />
+      <div className="min-w-0 text-sm">
+        <p>
+          This roster is passed to{" "}
+          {honouring.length > 0 ? (
+            <>{formatList(honouring)} chats</>
+          ) : (
+            <>no backend this build can run</>
+          )}
+          . A {formatList(ignoring.map((backend) => backend.label))} chat
+          delegates to its own agents instead — nothing on this page reaches it,
+          and a turn there is not running with fewer agents, it is running with
+          different ones.
+        </p>
+        {unknownModelIds.length > 0 ? (
+          <p className="mt-1 opacity-80">
+            Its per-agent model tiers below ({formatList(unknownModelIds)}) are
+            not ids {formatList(ignoring.map((backend) => backend.label))}{" "}
+            accepts either, so they would not survive the switch even if the
+            roster did.
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 /**
  * The interactive half of `/settings/agents`.
@@ -23,7 +111,7 @@ import { AgentRow } from "./agent-row";
  * still runs again on every server action regardless of what this component
  * assumes.
  */
-export function AgentsPageContent() {
+export function AgentsPageContent({ backends }: AgentsPageContentProps) {
   const [agents, setAgents] = useState<RosterAgentRow[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -123,6 +211,22 @@ export function AgentsPageContent() {
           New agent
         </button>
       </div>
+
+      {/*
+        Fed the roster's OWN model ids rather than a hardcoded tier list, so
+        the sentence about them describes what is actually in the table. It
+        is empty on the first paint (the rows are fetched below), which is
+        why the notice's second line appears only once there is a roster to
+        describe — it says less before it knows, instead of guessing.
+      */}
+      <RosterBackendNotice
+        backends={backends}
+        rosterModelIds={
+          agents
+            ?.map((agent) => agent.definition.model)
+            .filter((model): model is string => model !== undefined) ?? []
+        }
+      />
 
       {loadError ? (
         <div className="alert alert-error alert-soft mt-4" role="alert">

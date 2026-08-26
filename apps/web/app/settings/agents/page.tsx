@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
+import { CHAT_BACKEND_IDS } from "@/lib/agent/backend-factory";
 import { isAdmin } from "@/lib/admin/require-admin";
 import { getServerSession } from "@/lib/session/get-server-session";
 import { AgentsPageContent } from "./agents-page-content";
@@ -26,5 +28,9 @@ export default async function AgentsPage() {
     notFound();
   }
 
-  return <AgentsPageContent />;
+  return (
+    <AgentsPageContent
+      backends={CHAT_BACKEND_IDS.map((id) => capabilitiesForBackend(id))}
+    />
+  );
 }

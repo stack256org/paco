@@ -370,7 +370,9 @@ export class PoolsideBackend implements AgentBackend {
       // still reachable through `PoolsideBackendOptions.thoughtLevel`.
       effort: false,
       // Poolside delegates to its own subagents (usage `_meta` carries
-      // `poolside/subagentTotals`), so the UI should know they exist.
+      // `poolside/subagentTotals`), so the UI should know they exist. Its
+      // roster is exactly one entry — see `customAgents` below, where that
+      // was measured rather than assumed.
       subagents: true,
       /*
        * FALSE, measured — and the single most misleading `true` in the
@@ -399,11 +401,48 @@ export class PoolsideBackend implements AgentBackend {
        * PNG without shelling out.
        */
       images: false,
-      // ...but the client cannot INSTALL a roster.
-      // `_meta["poolside/session_agent_config"]` selects an already-defined
-      // agent — it demands an agent id and name — and nothing in the
-      // catalog carries agent definitions, so Paco's Section 3 roster and
-      // its per-agent model tiers have no way in.
+      /*
+       * ...but the client cannot INSTALL a roster. Probed against `pool`
+       * 1.0.16 rather than inferred, because the surface reads like it
+       * might allow one and every handle turns out to be something else.
+       *
+       * - The delegation tool is `subagent`, taking `{task, agent?}` where
+       *   `agent` is "Name of the configured subagent to use". Forcing a
+       *   call with `agent: "explorer"` on a live turn answers
+       *   `start subagent: subagent "explorer" is not configured;
+       *   available subagents: general`. So the roster this backend runs is
+       *   ONE agent, `general`, the tool's own default. The list exists
+       *   only inside the model's tool description; no ACP method
+       *   enumerates it, which is why that name had to be discovered from
+       *   a rejection.
+       * - `_meta["poolside/session_agent_config"]` is not the subagent
+       *   handle it looks like. Its shape is `{version: 1, agent: {id,
+       *   name, ...}}` (`unsupported version 0` without the version,
+       *   `agent id and name are required` without both), and it names a
+       *   TENANT-mode Poolside console agent for the whole SESSION — the
+       *   same thing `pool exec --agent-name` selects, which on a
+       *   standalone deployment refuses outright with `--agent-name is not
+       *   supported in standalone mode`. Handing it an id that resolves to
+       *   nothing does not error: it PANICS the `pool` process inside
+       *   `session/new`. Do not send it.
+       * - `pool acp --settings` cannot define subagents either. A
+       *   `subagents:` block, at the top level and under `tools:`, is
+       *   accepted in silence and changes nothing — a turn afterwards still
+       *   reports `available subagents: general`.
+       * - The one surface that DOES define them is the undocumented
+       *   `pool acp --agent-config-file`, a complete `AgentConfig` JSON
+       *   whose `tools.subagents` maps a name to `{command, args, env,
+       *   session_config_options, inherit_agent_config, description,
+       *   instructions, disabled}`. It is not a fit and not a small one:
+       *   an incomplete file panics the process rather than erroring, it
+       *   disables model switching for the session, and each entry is an
+       *   external ACP SERVER COMMAND to spawn — not a prompt plus a tool
+       *   set, which is what a Paco roster entry is.
+       *
+       * So Paco's Section 3 roster and its per-agent model tiers have no
+       * way in, and a chat here delegates to Poolside's own `general`
+       * agent. `/settings/agents` reads this field to say so.
+       */
       customAgents: false,
       // No JSON-Schema-constrained output anywhere: a turn returns a stop
       // reason, usage, and streamed text.
