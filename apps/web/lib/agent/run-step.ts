@@ -11,12 +11,12 @@ import {
   type ClaudeBackendOptions,
   DEFAULT_AGENTS,
 } from "@paco/claude-code";
-import type {
-  PoolsideBackendOptions,
-  PoolsideMcpServer,
+import {
+  allowAllPermissionHandler,
+  type PoolsideBackendOptions,
+  type PoolsideMcpServer,
 } from "@paco/poolside-backend";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
-import { createPoolsideApprovalHandler } from "./approvals/poolside-approval";
 import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
 import { buildAppendSystemPrompt } from "./system-prompt";
 import type { AgentCallOptions, SteerController } from "./types";
@@ -293,25 +293,26 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
            * until `BackendCapabilities` can express an accepted-values list
            * for effort the way it already does for `models`.
            *
-           * `permissionMode` is deliberately left unset so the session stays
-           * in ACP's `default` mode and every tool call comes back as a
-           * permission request. The package exposes an `always-allow` escape
-           * hatch; using it would take `decideApproval` out of the loop
-           * entirely, which is the one thing this handler exists to prevent.
+           * `permissionMode` is `always-allow` — pool's own equivalent of
+           * running the CLI with its prompts off, the mode Claude Code is
+           * already run in (`bypassPermissions`, below).
+           *
+           * This is a deliberate policy choice, and it is worth being precise
+           * about what it costs. The session stops sending
+           * `session/request_permission`, so `decideApproval` no longer sees
+           * pool's tool calls, and with it goes the check that a write stays
+           * inside the chat's worktree. The containment that remains is the
+           * sandbox: every turn runs in a container with only this session's
+           * workspace mounted, so "anything the agent likes" is bounded by
+           * that container rather than by the policy.
+           *
+           * The handler below is still passed, because the package's default
+           * is `denyPermissionHandler`: if a pool build ignored the config
+           * option, falling back to deny would strand a turn waiting on a
+           * prompt that never appears.
            */
-          // ACP delivers `session/request_permission` over the connection
-          // this backend already owns, so the same `decideApproval` policy
-          // Claude's PreToolUse hook uses is wired in-process here instead
-          // of through a spawned hook + HTTP round trip — see
-          // `poolside-approval.ts`'s doc.
-          ...(params.approval && params.chatId
-            ? {
-                onApprovalRequest: createPoolsideApprovalHandler({
-                  chatId: params.chatId,
-                  worktree: hostCwd,
-                }),
-              }
-            : {}),
+          permissionMode: "always-allow",
+          onApprovalRequest: allowAllPermissionHandler,
         } satisfies PoolsideBackendOptions)
       : ({
           ...(params.approval && params.chatId

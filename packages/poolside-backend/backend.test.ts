@@ -9,6 +9,7 @@ import type {
   PermissionRequestParams,
 } from "./acp-types.ts";
 import {
+  allowAllPermissionHandler,
   denyPermissionHandler,
   PoolsideBackend,
   type PoolsideBackendOptions,
@@ -165,6 +166,7 @@ describe("PoolsideBackend", () => {
       // in silence and `Read` on a staged PNG fails with "the configured
       // model does not support image inputs". See backend.ts.
       images: false,
+      compaction: false,
       customAgents: false,
       structuredOutput: false,
       models: ["poolside/laguna-s-2.1", "poolside/laguna-xs-2.1"],
@@ -796,6 +798,53 @@ describe("PoolsideBackend", () => {
         toolCall,
         options: [
           { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+        ],
+      }),
+    ).toEqual({ outcome: { outcome: "cancelled" } });
+  });
+
+  test("allowAllPermissionHandler prefers allow_always, falls back to allow_once", () => {
+    const toolCall = {
+      toolCallId: "t1",
+      title: "x",
+      kind: "edit",
+      status: "pending" as const,
+      rawInput: undefined,
+    };
+
+    // Both offered: the durable one, since the session is already
+    // allow-everything and re-asking for the same tool buys nothing.
+    expect(
+      allowAllPermissionHandler({
+        sessionId: "s",
+        toolCall,
+        options: [
+          { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+          { optionId: "allow_always", name: "Always", kind: "allow_always" },
+          { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+        ],
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow_always" } });
+
+    expect(
+      allowAllPermissionHandler({
+        sessionId: "s",
+        toolCall,
+        options: [
+          { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+          { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+        ],
+      }),
+    ).toEqual({ outcome: { outcome: "selected", optionId: "allow_once" } });
+
+    // Nothing allow-shaped on offer: it must never fall through to a
+    // rejection, which would contradict the configured mode.
+    expect(
+      allowAllPermissionHandler({
+        sessionId: "s",
+        toolCall,
+        options: [
+          { optionId: "reject_once", name: "Reject", kind: "reject_once" },
         ],
       }),
     ).toEqual({ outcome: { outcome: "cancelled" } });

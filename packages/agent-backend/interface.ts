@@ -47,6 +47,35 @@ export interface BackendCapabilities {
    */
   images: boolean;
   /**
+   * Can the CALLER ask this backend to compact the conversation on demand?
+   *
+   * A context-usage readout is only a button if something can act on it.
+   * Claude Code answers yes: `/compact` is a real command, and
+   * `compactSession` drives it.
+   *
+   * Poolside answers no, and the distinction is the same one `images` draws
+   * — a capability the handshake advertises is not the same as a capability
+   * the caller can invoke. `pool` 1.0.16 declares
+   * `poolside/compaction_update: true`, which says the AGENT compacts and
+   * tells the client afterwards; it does not put compaction under the
+   * client's control. Probed against the live binary: `session/compact`,
+   * `session/summarize` and `poolside/compact` all answer
+   * `-32601 Method not found`, `availableCommands` is null (so there is no
+   * slash command either), and the four session config options are `mode`,
+   * `agent_mode`, `thought_level` and `model` — none of them compaction.
+   *
+   * So a compact control on a Poolside chat has nothing to call. Offering
+   * one anyway is what this field prevents: the button used to render for
+   * every backend and POST to a Claude-only route, which answered a
+   * Poolside chat with "this chat has not run a turn yet" — an error about
+   * the wrong thing entirely.
+   *
+   * Required, not optional, for `images`' reason: a default of "yes" is
+   * exactly how a control ends up offered for a backend that cannot serve
+   * it.
+   */
+  compaction: boolean;
+  /**
    * Can the CALLER install its own subagent roster (Paco's Section 3
    * agents, with their per-agent model tiers)?
    *

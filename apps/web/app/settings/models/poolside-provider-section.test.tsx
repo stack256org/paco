@@ -289,7 +289,13 @@ describe("describeBackendLimitations", () => {
         ),
       ),
     ).toEqual(
-      new Set(["effort", "images", "customAgents", "structuredOutput"]),
+      new Set([
+        "effort",
+        "images",
+        "compaction",
+        "customAgents",
+        "structuredOutput",
+      ]),
     );
   });
 
@@ -376,6 +382,7 @@ describe("describeBackendLimitations", () => {
         effort: true,
         subagents: true,
         images: true,
+        compaction: true,
       }),
     ).toEqual([]);
   });

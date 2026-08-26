@@ -3,6 +3,7 @@ import {
   requireAuthenticatedUser,
   requireOwnedSessionChat,
 } from "@/app/api/sessions/_lib/session-context";
+import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById, resolveChatResumeToken } from "@/lib/db/sessions";
 import { WORKSPACE_ASLEEP } from "@/lib/error-copy";
@@ -42,6 +43,27 @@ export async function POST(_request: Request, context: RouteContext) {
   if (chatContext.chat.activeStreamId) {
     return Response.json(
       { error: "The agent is still working. Stop it first, then compact." },
+      { status: 409 },
+    );
+  }
+
+  /*
+   * Refuse a backend that cannot compact on demand, before touching resume
+   * tokens.
+   *
+   * Without this the next lines answer a Poolside chat with "this chat has
+   * not run a turn yet, so there is no context to compact" — technically
+   * true of its *Claude* token, and a completely misleading thing to tell
+   * someone whose chat has been running all afternoon. The UI already hides
+   * the control (`capabilities.compaction`); this is the same answer for a
+   * caller that reaches the route anyway.
+   */
+  if (!capabilitiesForBackend(chatContext.chat.backend).compaction) {
+    return Response.json(
+      {
+        error:
+          "This chat's backend compacts its own history automatically, so there is nothing to trigger.",
+      },
       { status: 409 },
     );
   }

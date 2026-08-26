@@ -196,6 +196,7 @@ function createPoolsideSpyBackend(): SpyBackend {
         effort: false,
         subagents: true,
         images: false,
+        compaction: false,
         customAgents: false,
         structuredOutput: false,
         models: POOLSIDE_MODELS,
@@ -241,6 +242,7 @@ function createSpyBackend(): SpyBackend {
         effort: false,
         subagents: false,
         images: false,
+        compaction: false,
       };
     },
     startTurn(ctx: TurnContext): TurnHandle {
@@ -433,14 +435,17 @@ describe("runAgentTurn", () => {
       unknown
     >;
     // Claude-only fields must not leak into a Poolside turn's options.
-    expect(backendOptions.permissionMode).toBeUndefined();
     expect(backendOptions.agents).toBeUndefined();
     expect(backendOptions.settings).toBeUndefined();
     expect(backendOptions.sessionId).toBeUndefined();
-    // The approval handler is wired in-process (see poolside-approval.ts),
-    // not via PACO_APPROVAL_URL/env vars.
-    expect(typeof backendOptions.onApprovalRequest).toBe("function");
     expect(backendOptions.env).toBeUndefined();
+
+    // Pool runs with its prompts off, the same posture Claude Code runs in.
+    // Both halves matter: the mode is what stops the agent asking, and the
+    // handler is what answers consistently if it asks anyway — the package
+    // default is deny, which would hang a turn on a prompt nobody sees.
+    expect(backendOptions.permissionMode).toBe("always-allow");
+    expect(typeof backendOptions.onApprovalRequest).toBe("function");
   });
 
   /**

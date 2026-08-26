@@ -3482,14 +3482,29 @@ export function SessionChatContent({
                                 }}
                               />
                             )}
+                            {/*
+                              The dial is a button only where something can
+                              act on it. `capabilities.compaction` is false
+                              for Poolside — `pool` compacts on its own
+                              schedule and has no client-callable way in (see
+                              that field's doc) — so the chat gets a readout
+                              that says so, rather than a control that POSTs
+                              to a Claude-only route and comes back with an
+                              error about the wrong thing.
+                            */}
                             <ContextUsageIndicator
                               isCompacting={isCompacting}
-                              {...(isChatInFlight
-                                ? {}
+                              {...(chatCapabilities.compaction
+                                ? isChatInFlight
+                                  ? {}
+                                  : {
+                                      onCompact: () => {
+                                        void handleCompact();
+                                      },
+                                    }
                                 : {
-                                    onCompact: () => {
-                                      void handleCompact();
-                                    },
+                                    compactUnavailableReason:
+                                      "This backend compacts its own history when it needs to, so there is nothing to trigger here.",
                                   })}
                               inputTokens={tokenUsage.inputTokens}
                               conversationInputTokens={

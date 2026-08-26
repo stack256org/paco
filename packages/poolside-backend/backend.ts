@@ -232,6 +232,39 @@ function abortError(): Error {
 }
 
 /**
+ * `permissionHandler` that approves everything the agent asks for.
+ *
+ * The counterpart to `denyPermissionHandler`, and what Paco actually runs:
+ * a pool session is configured `mode: always-allow`, so the agent should
+ * never send `session/request_permission` at all. This exists for the case
+ * where it does anyway — a build that does not honour the config option, or
+ * a permission request raised for something the mode does not cover — so
+ * that the answer matches the configured mode instead of contradicting it.
+ * Falling back to the deny handler there would strand a turn mid-way with
+ * no prompt on screen to release it, which is worse than either policy
+ * applied consistently.
+ *
+ * Prefers `allow_always` over `allow_once` when both are offered: in a
+ * session that is already allow-everything, re-asking for the same tool
+ * buys nothing.
+ */
+export function allowAllPermissionHandler(
+  request: PermissionRequestParams,
+): PermissionDecision {
+  const allowOption =
+    request.options.find((option) => option.optionId === "allow_always") ??
+    request.options.find((option) => option.optionId === "allow_once");
+  if (allowOption) {
+    return {
+      outcome: { outcome: "selected", optionId: allowOption.optionId },
+    };
+  }
+  // Nothing allow-shaped was offered, so there is nothing to select. ACP
+  // reads a missing selection as a cancel, which is the only answer left.
+  return { outcome: { outcome: "cancelled" } };
+}
+
+/**
  * Default `permissionHandler`: always denies.
  *
  * Selects the server's `reject_once` option when one is offered — an
@@ -401,6 +434,7 @@ export class PoolsideBackend implements AgentBackend {
        * PNG without shelling out.
        */
       images: false,
+      compaction: false,
       /*
        * ...but the client cannot INSTALL a roster. Probed against `pool`
        * 1.0.16 rather than inferred, because the surface reads like it

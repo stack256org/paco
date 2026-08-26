@@ -11,12 +11,14 @@ const SIGHTED: BackendCapabilities = {
   effort: true,
   subagents: true,
   images: true,
+  compaction: true,
 };
 
 const BLIND: BackendCapabilities = {
   ...SIGHTED,
   id: "poolside",
   images: false,
+  compaction: false,
 };
 
 describe("UnviewableImageNotice", () => {

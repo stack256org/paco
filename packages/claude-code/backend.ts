@@ -44,6 +44,7 @@ export class ClaudeCodeBackend implements AgentBackend {
       // on exactly that: an uploaded screenshot is staged to disk and named
       // in the prompt for `Read` to pick up.
       images: true,
+      compaction: true,
     };
   }
 

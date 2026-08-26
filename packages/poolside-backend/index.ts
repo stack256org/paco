@@ -23,6 +23,7 @@ export type {
   SystemPromptResult,
 } from "./acp-types.ts";
 export {
+  allowAllPermissionHandler,
   denyPermissionHandler,
   PoolsideBackend,
   type PoolsideBackendOptions,

@@ -16,6 +16,7 @@ function capabilities(
     effort: true,
     subagents: true,
     images: true,
+    compaction: true,
     ...overrides,
   };
 }

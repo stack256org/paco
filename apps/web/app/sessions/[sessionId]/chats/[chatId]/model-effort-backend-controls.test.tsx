@@ -34,6 +34,7 @@ const CLAUDE_CAPABILITIES: BackendCapabilities = {
   effort: true,
   subagents: true,
   images: true,
+  compaction: true,
 };
 
 /**
@@ -63,6 +64,7 @@ const POOLSIDE_CAPABILITIES: BackendCapabilities = {
   effort: false,
   subagents: true,
   images: false,
+  compaction: false,
   models: ["poolside/laguna-s-2.1"],
 };
 
