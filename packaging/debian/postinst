@@ -377,6 +377,30 @@ fi
 # ends up running the new version, not the old one left running from
 # before the package was replaced.
 systemctl daemon-reload
+
+# The unit's `After=docker.service` (packaging/paco.service) orders boot, and
+# nothing else: a manual `systemctl restart` — which is exactly what the next
+# line is — starts the unit immediately regardless of ordering, and `Wants=`
+# pulling docker.service in does not make this command wait for it either.
+#
+# That matters here specifically. This script runs during `apt install` and
+# `apt upgrade`, and an upgrade that includes docker.io restarts Docker in the
+# same apt run; restarting Paco in that window is precisely the race the
+# ordering above exists to remove, reintroduced by hand. So ask for Docker
+# first and give it a moment to be up before Paco starts talking to its socket.
+#
+# Best-effort throughout, because this script runs under `set -e` and none of
+# it is worth failing an install over: `is-enabled` is only consulted so a host
+# where the operator deliberately disabled Docker is not overridden, an absent
+# unit makes every branch a no-op, and a Docker that refuses to start still
+# leaves a working Paco whose chats explain themselves.
+if systemctl is-enabled docker.service >/dev/null 2>&1; then
+  if ! systemctl is-active docker.service >/dev/null 2>&1; then
+    echo "paco: waiting for docker.service before restarting paco."
+    systemctl start docker.service >/dev/null 2>&1 || true
+  fi
+fi
+
 systemctl enable paco.service
 systemctl restart paco.service
 

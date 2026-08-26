@@ -6,6 +6,7 @@ import {
   dockerPreflight,
   isRootlessInfo,
   readSecurityOptions,
+  resolveDockerSocket,
   assertDockerUsable,
 } from "./preflight.ts";
 
@@ -170,15 +171,24 @@ describe("dockerEndpoint", () => {
     ).toBe("unix:///run/user/1000/docker.sock");
   });
 
-  test("falls back to the system-wide socket", () => {
+  test("falls back to the system-wide socket when no per-user one exists", () => {
     // `docker-modem@5.0.7/lib/modem.js:80` probes `$HOME/.docker/run/docker.sock`
     // and then this. `$XDG_RUNTIME_DIR/docker.sock` — the rootless socket — is
     // never probed at all, which is why a rootless-only host reads as
     // "not running" rather than "rootless".
-    expect(dockerEndpoint({})).toBe("unix:///var/run/docker.sock");
-    expect(dockerEndpoint({ DOCKER_HOST: "   " })).toBe(
+    //
+    // Written through `resolveDockerSocket` with the probe injected. This used
+    // to assert `dockerEndpoint({})` directly and pass only by luck: it
+    // asserted the fallback on a machine that has no per-user socket, and
+    // failed the moment it was run on one that does — which is the same trap
+    // the message now diagnoses, arriving in the test suite first.
+    expect(resolveDockerSocket({}, () => false, "/home/paco").endpoint).toBe(
       "unix:///var/run/docker.sock",
     );
+    expect(
+      resolveDockerSocket({ DOCKER_HOST: "   " }, () => false, "/home/paco")
+        .endpoint,
+    ).toBe("unix:///var/run/docker.sock");
   });
 });
 
@@ -314,5 +324,254 @@ describe("assertDockerUsable", () => {
 
     expect(thrown).toBeInstanceOf(DockerUnusableError);
     expect((thrown as DockerUnusableError).state).toBe("docker-rootless");
+  });
+});
+
+/**
+ * The socket dockerode picks, and the trap in how it picks it.
+ *
+ * `resolveDockerSocket` is a reimplementation of another package's private
+ * behaviour, so these are written against
+ * `docker-modem@5.0.7/lib/modem.js` — `defaultOpts` and
+ * `findDefaultUnixSocket`, read, not remembered. If modem ever changes the
+ * rule, this is the test that should fail.
+ */
+describe("resolveDockerSocket", () => {
+  const nothingExists = () => false;
+  const everythingExists = () => true;
+
+  test("DOCKER_HOST wins outright, and nothing is probed", () => {
+    const resolved = resolveDockerSocket(
+      { DOCKER_HOST: "tcp://10.0.0.2:2375" },
+      () => {
+        throw new Error(
+          "must not probe the filesystem when DOCKER_HOST is set",
+        );
+      },
+      "/home/paco",
+    );
+
+    expect(resolved).toEqual({
+      endpoint: "tcp://10.0.0.2:2375",
+      fromEnv: true,
+    });
+  });
+
+  test("a bare unix:// is treated as unset, exactly as modem does", () => {
+    const resolved = resolveDockerSocket(
+      { DOCKER_HOST: "unix://" },
+      nothingExists,
+      "/home/paco",
+    );
+
+    expect(resolved.endpoint).toBe("unix:///var/run/docker.sock");
+    expect(resolved.fromEnv).toBe(false);
+  });
+
+  test("the system socket, on the host shape a packaged install has", () => {
+    const resolved = resolveDockerSocket({}, nothingExists, "/home/paco");
+
+    expect(resolved).toEqual({
+      endpoint: "unix:///var/run/docker.sock",
+      fromEnv: false,
+    });
+  });
+
+  test("a per-user socket wins on existence alone, and the shadowed one is named", () => {
+    // The reproduced developer-Mac trap: ~/.docker/run/docker.sock is a dead
+    // Docker Desktop leftover, /var/run/docker.sock is a live OrbStack daemon,
+    // and modem picks the dead one because the file is there.
+    const resolved = resolveDockerSocket({}, everythingExists, "/Users/dev");
+
+    expect(resolved).toEqual({
+      endpoint: "unix:///Users/dev/.docker/run/docker.sock",
+      fromEnv: false,
+      shadowed: "/var/run/docker.sock",
+    });
+  });
+
+  test("no shadow is reported when only the per-user socket exists", () => {
+    const resolved = resolveDockerSocket(
+      {},
+      (path) => path === "/Users/dev/.docker/run/docker.sock",
+      "/Users/dev",
+    );
+
+    expect(resolved.shadowed).toBeUndefined();
+  });
+
+  test("dockerEndpoint is that resolution, so the message names what was tried", () => {
+    expect(dockerEndpoint({ DOCKER_HOST: "unix:///custom/docker.sock" })).toBe(
+      "unix:///custom/docker.sock",
+    );
+  });
+});
+
+/**
+ * The tag is the carrier the sentence cannot be.
+ *
+ * `apps/web/lib/sandbox/provisioning-errors.ts` reads `[paco:setup-reason=…]`
+ * back out of whatever wrapped text reaches it; this package cannot import
+ * that module, so the literal is pinned on both sides. The web-side test
+ * (`setup-failure-copy.test.ts`) proves the round trip through a step failure.
+ */
+describe("every failure message carries its reason as a tag", () => {
+  const env = { DOCKER_HOST: "unix:///var/run/docker.sock" };
+
+  test.each([
+    [
+      "docker-not-running",
+      hostRejecting(socketError("ENOENT", "connect ENOENT")),
+    ],
+    [
+      "docker-permission",
+      hostRejecting(socketError("EACCES", "connect EACCES")),
+    ],
+    ["docker-rootless", hostReturning(ROOTLESS_INFO)],
+  ] as const)("%s", async (state, host) => {
+    const result = await dockerPreflight({ host, env });
+
+    expect(result.state).toBe(state);
+    expect(result.message).toContain(`[paco:setup-reason=${state}]`);
+  });
+
+  test("a healthy daemon is not tagged — there is no failure to carry", async () => {
+    const result = await dockerPreflight({
+      host: hostReturning(ROOTFUL_INFO),
+      env,
+    });
+
+    expect(result.message).not.toContain("paco:setup-reason");
+  });
+});
+
+describe("the message names the socket dockerode actually tried", () => {
+  test("DOCKER_HOST is quoted back, so the reader can check it", async () => {
+    const result = await dockerPreflight({
+      host: hostRejecting(socketError("ENOENT", "connect ENOENT")),
+      env: { DOCKER_HOST: "unix:///run/user/1000/docker.sock" },
+    });
+
+    expect(result.message).toContain("unix:///run/user/1000/docker.sock");
+  });
+});
+
+/**
+ * Counts calls so a retry is provable rather than inferred from timing.
+ */
+function hostFailingThenAnswering(
+  failures: number,
+  info: unknown,
+): { info: () => Promise<unknown>; calls: () => number } {
+  let calls = 0;
+  return {
+    info: () => {
+      calls += 1;
+      if (calls <= failures) {
+        return Promise.reject(socketError("ENOENT", "connect ENOENT"));
+      }
+      return Promise.resolve(info);
+    },
+    calls: () => calls,
+  };
+}
+
+function countingHost(result: () => Promise<unknown>): {
+  info: () => Promise<unknown>;
+  calls: () => number;
+} {
+  let calls = 0;
+  return {
+    info: () => {
+      calls += 1;
+      return result();
+    },
+    calls: () => calls,
+  };
+}
+
+/**
+ * The bounded retry, and — more importantly — what is excluded from it.
+ *
+ * Delays are passed as zeros here; the production bound lives in
+ * `TRANSIENT_RETRY_DELAYS_MS` and is argued at its definition. What these pin
+ * is the shape: three probes at most, and only for the one verdict that can
+ * change on its own.
+ */
+describe("assertDockerUsable retries only a socket that might come back", () => {
+  const noWait = { retryDelaysMs: [0, 0] };
+
+  test("a daemon that appears a moment late is not a failed turn", async () => {
+    const host = hostFailingThenAnswering(1, ROOTFUL_INFO);
+
+    const result = await assertDockerUsable({ host, ...noWait });
+
+    expect(result.state).toBe("ok");
+    expect(host.calls()).toBe(2);
+  });
+
+  test("the bound is three probes, and the third answer is final", async () => {
+    const host = countingHost(() =>
+      Promise.reject(socketError("ENOENT", "connect ENOENT")),
+    );
+
+    let thrown: unknown;
+    try {
+      await assertDockerUsable({ host, ...noWait });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(DockerUnusableError);
+    expect((thrown as DockerUnusableError).state).toBe("docker-not-running");
+    expect(host.calls()).toBe(3);
+  });
+
+  test("docker-permission fails on the first answer — retrying is pure latency", async () => {
+    // The daemon answered and refused. Supplementary groups are read once, at
+    // process start, so nothing here can change while this process runs.
+    const host = countingHost(() =>
+      Promise.reject(socketError("EACCES", "connect EACCES")),
+    );
+
+    let thrown: unknown;
+    try {
+      await assertDockerUsable({ host, ...noWait });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as DockerUnusableError).state).toBe("docker-permission");
+    expect(host.calls()).toBe(1);
+  });
+
+  test("docker-rootless fails on the first answer — the host will not stop being rootless", async () => {
+    const host = countingHost(() => Promise.resolve(ROOTLESS_INFO));
+
+    let thrown: unknown;
+    try {
+      await assertDockerUsable({ host, ...noWait });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as DockerUnusableError).state).toBe("docker-rootless");
+    expect(host.calls()).toBe(1);
+  });
+
+  test("a probe that timed out is not probed again", async () => {
+    // It already spent the whole timeout. Two more of those would add twenty
+    // seconds to a turn that is failing regardless.
+    const host = countingHost(() => new Promise<unknown>(() => undefined));
+
+    let thrown: unknown;
+    try {
+      await assertDockerUsable({ host, timeoutMs: 5, ...noWait });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as DockerUnusableError).state).toBe("docker-not-running");
+    expect(host.calls()).toBe(1);
   });
 });

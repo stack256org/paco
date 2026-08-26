@@ -1,5 +1,7 @@
+import { assertDockerUsable } from "@paco/sandbox";
 import { describe, expect, test } from "bun:test";
 import {
+  markSetupReason,
   ProvisioningError,
   type ProvisioningFailureReason,
 } from "./provisioning-errors";
@@ -312,5 +314,159 @@ describe("isSetupFailureRetryable", () => {
     expect(isSetupFailureRetryable("network")).toBe(true);
     expect(isSetupFailureRetryable("timed-out")).toBe(true);
     expect(isSetupFailureRetryable("unknown")).toBe(true);
+  });
+});
+
+/**
+ * What the durable workflow actually does to a thrown error.
+ *
+ * Not a guess at the wrapper's shape — this reproduces the one captured from a
+ * real failed chat on this repo, whose `console.error` in `chat.ts` read:
+ *
+ *   Error [FatalError]: Step "step//./app/workflows/chat-sandbox-runtime//
+ *   resolveChatSandboxRuntime" failed after 3 retries: Workflow run "wrun_…"
+ *   failed: Step "step//./app/workflows/sandbox-provisioning//runProvisioning"
+ *   failed after 3 retries: <the original message>
+ *
+ * Three separate reductions produce that, all in `@workflow/core`:
+ *
+ *   1. the step handler normalizes the throw to `{name, message, stack}`
+ *      (`dist/types.js`, `normalizeUnknownError`) — the class and every field
+ *      on it are gone from here on;
+ *   2. it writes only a string into the `step_failed` event, prefixed with
+ *      `Step "…" failed after N retries: ` (`dist/runtime/step-handler.js`);
+ *   3. the workflow side rebuilds a bare `FatalError` from that string
+ *      (`dist/step.js`), and awaiting a failed run's `returnValue` wraps it
+ *      once more as `Workflow run "…" failed: …` (`@workflow/errors`).
+ *
+ * So `provisioningFailureReason` cannot answer on the far side no matter what
+ * was thrown, and the message — nested two wrappers deep — is the only thing
+ * left to read.
+ */
+function acrossTheWorkflowBoundary(error: unknown): Error {
+  const normalized = error instanceof Error ? error.message : String(error);
+  const inProvisioningStep = new Error(
+    `Step "step//./app/workflows/sandbox-provisioning//runProvisioning" failed after 3 retries: ${normalized}`,
+  );
+  const inRun = new Error(
+    `Workflow run "wrun_01M0YMP2YAA8BQ3Y5P5DMRJ9S6" failed: ${inProvisioningStep.message}`,
+  );
+  const atTheReadSite = new Error(
+    `Step "step//./app/workflows/chat-sandbox-runtime//resolveChatSandboxRuntime" failed after 3 retries: ${inRun.message}`,
+  );
+  atTheReadSite.name = "FatalError";
+  return atTheReadSite;
+}
+
+describe("a Docker preflight failure survives the workflow boundary", () => {
+  async function dockerUnusable(host: {
+    info(): Promise<unknown>;
+  }): Promise<unknown> {
+    try {
+      // `retryDelaysMs: []` because the bounded retry is `assertDockerUsable`'s
+      // own concern and is tested in `packages/sandbox/docker/preflight.test.ts`.
+      // What matters here is the error it ends up throwing.
+      await assertDockerUsable({ host, retryDelaysMs: [] });
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected assertDockerUsable to throw");
+  }
+
+  test("an unreachable daemon reaches the user as DOCKER_NOT_RUNNING, not the generic copy", async () => {
+    const thrown = await dockerUnusable({
+      info: () =>
+        Promise.reject(
+          Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }),
+        ),
+    });
+
+    // In-process, the class still answers.
+    expect(classifySetupFailure(thrown)).toBe("docker-not-running");
+
+    // And on the far side, where it does not.
+    const arrived = acrossTheWorkflowBoundary(thrown);
+    expect(classifySetupFailure(arrived)).toBe("docker-not-running");
+    expect(setupFailureMessage(classifySetupFailure(arrived))).toBe(
+      DOCKER_NOT_RUNNING,
+    );
+    expect(setupFailureMessage(classifySetupFailure(arrived))).not.toBe(
+      GENERIC,
+    );
+  });
+
+  test("a refused socket still says permission, three wrappers deep", async () => {
+    const thrown = await dockerUnusable({
+      info: () =>
+        Promise.reject(
+          Object.assign(new Error("connect EACCES"), { code: "EACCES" }),
+        ),
+    });
+
+    expect(classifySetupFailure(acrossTheWorkflowBoundary(thrown))).toBe(
+      "docker-permission",
+    );
+  });
+
+  test("a rootless daemon still says rootless", async () => {
+    const thrown = await dockerUnusable({
+      info: () =>
+        Promise.resolve({
+          ServerVersion: "29.1.3",
+          SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"],
+        }),
+    });
+
+    expect(classifySetupFailure(acrossTheWorkflowBoundary(thrown))).toBe(
+      "docker-rootless",
+    );
+  });
+});
+
+/**
+ * The tag, and why it is allowed to exist in a file that warns against
+ * matching our own words.
+ *
+ * The prose above it is Docker's, and matching it is a heuristic over text
+ * three layers of somebody else's code have concatenated. The tag is not text
+ * anyone reads: it exists to be read back, and it is the only part of an error
+ * that a rewrite of the sentence cannot silently break.
+ */
+describe("the reason tag outranks the text", () => {
+  test("a reworded Docker sentence still classifies, because the tag remains", () => {
+    // The failure mode this prevents: someone improves the wording, every
+    // matcher misses, and the user gets "try again in a moment" forever.
+    const reworded = markSetupReason(
+      "docker-not-running",
+      "The daemon could not be reached at unix:///var/run/docker.sock.",
+    );
+
+    expect(classifySetupFailureText(reworded)).toBe("docker-not-running");
+  });
+
+  test("it survives being buried under the workflow's wrapper prefixes", () => {
+    const persisted = markSetupReason("image-missing", "the pull did not work");
+
+    expect(
+      classifySetupFailure(acrossTheWorkflowBoundary(new Error(persisted))),
+    ).toBe("image-missing");
+  });
+
+  test("a ProvisioningError carries its reason into the string it becomes", () => {
+    // `runProvisioning` persists `error.message` into `sessions.lifecycleError`
+    // and `chat-sandbox-runtime.ts` reads it back in a later run with no object
+    // to consult. This is that round trip.
+    const original = new ProvisioningError("archived", "Session is archived");
+    const persisted = original.message;
+
+    expect(classifySetupFailureText(persisted)).toBe("archived");
+  });
+
+  test("an unknown tag is ignored rather than trusted", () => {
+    // Nothing writes this, but the decoder reads text that has been through
+    // three concatenations and must not invent a reason from it.
+    expect(classifySetupFailureText("[paco:setup-reason=made-up]")).toBe(
+      "unknown",
+    );
   });
 });

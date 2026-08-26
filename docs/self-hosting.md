@@ -226,6 +226,83 @@ inherent to running containers on behalf of an agent, and it is the reason
 rootless is an attractive idea here — it simply cannot be made to work with a
 shared-uid bind mount.
 
+### "We couldn't set up a workspace", but only sometimes
+
+If chats fail right after a reboot or right after an `apt upgrade`, and then
+start working again on their own, this is what it was.
+
+`paco.service` used to be ordered only against the network and PostgreSQL. It
+had no `After=docker.service` at all, so on a boot where systemd happened to
+start Paco first, Paco came up before `/var/run/docker.sock` existed and every
+chat failed with `Cannot connect to the Docker daemon` until something
+retried. A race, which is exactly why it was intermittent rather than
+constant. The unit now carries:
+
+```ini
+After=network-online.target postgresql.service docker.socket docker.service
+Wants=docker.service
+```
+
+`Wants=`, not `Requires=`, and the difference matters if you edit this file.
+`Requires=` couples the two lifecycles: systemd would stop Paco whenever
+Docker stopped, so upgrading `docker.io` — which restarts the daemon — would
+take the whole web UI down and leave it down, and a host where Docker failed
+to start would refuse to start Paco at all. `Wants=` + `After=` gets the
+ordering without any of that. PostgreSQL keeps `Requires=` for the opposite
+reason: migrations run against it before the server starts and every page
+reads from it, so Paco genuinely cannot run without it, whereas Docker is
+needed per chat and a chat that cannot start now explains itself.
+
+`postinst` also asks for `docker.service` before it restarts Paco. Unit
+ordering governs boot; a manual `systemctl restart` — which is what the
+package script does — starts the unit immediately regardless, so an upgrade
+that restarts Docker in the same apt run would otherwise recreate the same
+race by hand.
+
+Two smaller changes go with it. A preflight that finds no daemon now re-probes
+twice, 250 ms and then 750 ms later, before failing the turn — enough for a
+daemon restart landing mid-session, not enough to make a host whose Docker is
+simply switched off feel slow. A daemon that *answers* and refuses (the
+`docker` group) or reports itself rootless fails immediately: retrying those
+is pure latency in front of an answer that is already correct.
+
+### Paco says Docker is not running, but `docker version` works
+
+Almost always one of two things, and the error message now names which.
+
+The first is the rootless case above. The second happens on developer machines
+more than servers: `dockerode` picks its socket by **existence**, not by
+whether anything is listening. `docker-modem`'s `findDefaultUnixSocket` checks
+`$HOME/.docker/run/docker.sock` first and uses it if the file is there,
+falling back to `/var/run/docker.sock` only when it is not. A Docker Desktop
+install that has since been replaced leaves that per-user socket behind, dead,
+and every Docker client that reads `DOCKER_HOST` or looks at `/var/run` keeps
+working while Paco addresses the corpse. Reproduced exactly that way on a Mac
+running OrbStack:
+
+```text
+~/.docker/run/docker.sock   present, dead (Docker Desktop leftover)
+/var/run/docker.sock        alive, OrbStack, server 29.4.0
+```
+
+Paco's error now names the socket it tried and, when a system-wide socket also
+exists, says so. It deliberately does **not** fall back to the other socket on
+its own. `dockerode` resolves the socket on every connection, so a preflight
+that quietly succeeded against a socket the sandbox will not use would trade a
+clear failure at the door for an obscure one halfway through creating a
+container — and on a host that really is running two daemons, silently
+preferring the one you did not name would put Paco's containers where your own
+`docker ps` cannot see them.
+
+The fix is one line, and it is yours to choose: either remove the stale socket,
+or point Paco at the daemon you meant by adding
+
+```ini
+DOCKER_HOST=unix:///var/run/docker.sock
+```
+
+to `/etc/paco/paco.env` (`dockerode` honours it) and restarting `paco`.
+
 ---
 
 ## 2. The file layout

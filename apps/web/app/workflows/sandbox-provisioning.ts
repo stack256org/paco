@@ -9,6 +9,8 @@ import {
   provisionSessionSandbox,
   SessionArchivedDuringProvisioningError,
 } from "@/lib/sandbox/provisioning";
+import { markSetupReason } from "@/lib/sandbox/provisioning-errors";
+import { classifySetupFailure } from "@/lib/sandbox/setup-failure-copy";
 
 async function runProvisioning(sessionId: string, runId: string) {
   "use step";
@@ -60,10 +62,22 @@ async function runProvisioning(sessionId: string, runId: string) {
       return { skipped: true, reason: "session-archived" };
     }
 
+    // Classified here, where the error object still exists, and written into
+    // the string that is persisted. This column is the far side of a durable
+    // boundary: `chat-sandbox-runtime.ts` reads it in a different workflow run
+    // and has nothing but the text to go on, and `@workflow/core` has by then
+    // discarded the class and every field on it (see `provisioning-errors.ts`
+    // for what it actually keeps). Deciding the reason on this side, while a
+    // `DockerUnusableError` is still a `DockerUnusableError`, is strictly
+    // better than re-deriving it from prose over there.
+    //
+    // `markSetupReason` is a no-op when the message already carries the tag,
+    // which every `ProvisioningError` and every preflight failure does — so
+    // this only adds one for errors that never knew their own reason.
     const message = error instanceof Error ? error.message : String(error);
     await updateSession(sessionId, {
       lifecycleState: "failed",
-      lifecycleError: message,
+      lifecycleError: markSetupReason(classifySetupFailure(error), message),
     });
     await clearSessionSandboxProvisioningRunIdIfOwned(sessionId, runId);
     throw error;

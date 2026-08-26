@@ -1,8 +1,47 @@
 [Unit]
 Description=Paco
-After=network-online.target postgresql.service
-Wants=network-online.target
+# docker.socket and docker.service are ordered against, and docker.service is
+# pulled in, because every chat opens /var/run/docker.sock and that socket does
+# not exist until Docker has started. Without this Paco could win the boot race
+# and come up first, and then every chat failed with "Cannot connect to the
+# Docker daemon" until something happened to retry — intermittent precisely
+# because it was a race. docker.socket is listed as well as docker.service
+# because on a socket-activated install it is the unit that creates the socket
+# file.
+After=network-online.target postgresql.service docker.socket docker.service
+Wants=network-online.target docker.service
 Requires=postgresql.service
+
+# Wants=, not Requires=, and the difference is deliberate rather than an
+# oversight next to postgresql.service's Requires= below.
+#
+# Requires= is a lifecycle coupling, not an ordering: systemd stops this unit
+# whenever the required one stops. `apt upgrade` of docker.io restarts
+# docker.service, and a Requires= would take Paco down with it — including the
+# web UI, Settings, and every page that has nothing to do with a container —
+# and leave it down, because a restart of the required unit does not bring the
+# dependent one back. Requires= also refuses to start Paco at all on a host
+# where Docker failed to start, turning "chats fail with a clear message" into
+# "the product does not come up".
+#
+# Wants= + After= buys the whole of what is needed: docker.service is started
+# alongside Paco, Paco is ordered after it, and neither a Docker restart nor a
+# Docker that is missing entirely (docker is Recommends, not Depends — see
+# packaging/debian/control) can stop Paco from running. A missing unit makes
+# Wants= a no-op rather than an error, which is what makes this safe to state
+# unconditionally here.
+#
+# postgresql.service keeps Requires= for the opposite reason: Postgres is not
+# a per-feature dependency. paco-entrypoint.sh runs migrations against it
+# before the server starts and every page reads from it, so a Paco without
+# Postgres has nothing to serve. Docker is needed per chat, and a chat that
+# cannot start already explains itself (apps/web/lib/sandbox/setup-failure-copy.ts
+# turns an unreachable daemon into "start it with sudo systemctl start docker").
+#
+# NOTE: unverified by systemd itself. `systemd-analyze verify` is not available
+# on the macOS host this was written on; what it is reasoned from is
+# systemd.unit(5)'s definitions of After=/Wants=/Requires=, and the behaviour
+# above is the documented one, not a guess about an implementation.
 
 [Service]
 Type=simple

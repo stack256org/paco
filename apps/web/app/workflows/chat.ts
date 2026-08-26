@@ -303,13 +303,28 @@ function withModelMetadata(
  * `classifySetupFailure` closes that gap by reading the reason back out of the
  * text when the field is gone. The raw text still goes to the log; it never
  * reaches the user.
+ *
+ * What actually arrives here, captured from a real failure rather than
+ * assumed, is a `FatalError` the workflow rebuilt from a string:
+ *
+ *   Error [FatalError]: Step "…//resolveChatSandboxRuntime" failed after 3
+ *   retries: Workflow run "wrun_…" failed: Step "…//runProvisioning" failed
+ *   after 3 retries: <the original message>
+ *
+ * Two wrappers deep, no class, no fields. That is why the reason is now
+ * written into the message itself as a tag (`provisioning-errors.ts`), and why
+ * the reason is logged next to the error below: when this line and the copy
+ * the user saw disagree, the classifier is the thing to look at, and there is
+ * currently no other way to tell which of the two happened.
  */
 function getSetupErrorMessage(error: unknown): string {
+  const reason = classifySetupFailure(error);
+
   // Surface the cause: a swallowed setup failure is otherwise undiagnosable
   // from the client, which only ever sees the message below.
-  console.error("[chat] workspace setup failed:", error);
+  console.error(`[chat] workspace setup failed (${reason}):`, error);
 
-  return setupFailureMessage(classifySetupFailure(error));
+  return setupFailureMessage(reason);
 }
 
 function isStepTimingError(

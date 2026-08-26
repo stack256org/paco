@@ -2,8 +2,10 @@
 // dependencies, and the workflow tests import it directly.
 
 import {
+  isProvisioningFailureReason,
   type ProvisioningFailureReason,
   provisioningFailureReason,
+  readMarkedSetupReason,
 } from "./provisioning-errors";
 
 /**
@@ -262,6 +264,21 @@ export function classifySetupFailureText(
 ): ProvisioningFailureReason {
   const haystack = text.toLowerCase();
 
+  // Checked before the matchers, and it is the only pattern here that keys on
+  // something Paco wrote. `markSetupReason` stamps it onto every message that
+  // already knew its own reason, and it is the one part of an error that
+  // survives the durable workflow intact — see `provisioning-errors.ts` for
+  // what the boundary actually does to a thrown object, and for why matching
+  // a purpose-built token is not the same mistake as matching our own prose.
+  //
+  // It wins over the text matchers because the thrower knew more than the
+  // reader can infer: a wrapper prefix can easily contain a word one of the
+  // patterns below keys on, and the tag is immune to that.
+  const marked = readMarkedSetupReason(haystack);
+  if (marked) {
+    return marked;
+  }
+
   for (const matcher of MATCHERS) {
     if (matcher.test.test(haystack)) {
       return matcher.reason;
@@ -269,6 +286,33 @@ export function classifySetupFailureText(
   }
 
   return "unknown";
+}
+
+/**
+ * A `DockerUnusableError` that has not crossed a boundary yet.
+ *
+ * `@paco/sandbox` cannot import this module and this module must not import
+ * the sandbox package, so the class is recognised by `name` and its `state`
+ * field is validated against the reason list rather than trusted. Name-based
+ * duck typing rather than `instanceof` for the same reason `@workflow/core`
+ * uses it: the workflow half of this app runs in a separate `vm` realm, where
+ * `instanceof` against a host-realm class is false for an object that is
+ * unmistakably one.
+ *
+ * This only fires in-process — inside the provisioning step itself, and in the
+ * `/api/sandbox` route, which calls `classifySetupFailure` on an error it
+ * caught directly. Once the workflow has flattened the throw there is no
+ * object left to read, and the tag in the message is what answers.
+ */
+function dockerUnusableState(error: unknown): ProvisioningFailureReason | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  if ((error as { name?: unknown }).name !== "DockerUnusableError") {
+    return null;
+  }
+  const state = (error as { state?: unknown }).state;
+  return isProvisioningFailureReason(state) ? state : null;
 }
 
 /**
@@ -290,6 +334,11 @@ export function classifySetupFailure(
   const explicit = provisioningFailureReason(error);
   if (explicit) {
     return explicit;
+  }
+
+  const preflight = dockerUnusableState(error);
+  if (preflight) {
+    return preflight;
   }
 
   return classifySetupFailureText(
