@@ -218,6 +218,14 @@ auth_poolside() {
   # Extra arguments go through to `pool login` verbatim — `--api-url` for an
   # enterprise tenant, `--api-key` for a key you would rather not paste into
   # Settings. Re-quoted one at a time because this crosses a `su -c` shell.
+  #
+  # Verified on Debian (systemd 257 image, real `su`), against a service user
+  # shaped like the packaged one — system account, `/usr/sbin/nologin` shell:
+  # `su -s /bin/sh -l` still reaches that user's own PATH, `pool` runs as
+  # `paco`, `--api-url https://tenant.example.com` arrives intact, and an
+  # argument of `$(id -un)x` arrives as those literal characters rather than
+  # being executed. macOS `su` has no `-s`, which is why this could not be
+  # checked on the host it was written on.
   pool_args=""
   for pool_arg in "$@"; do
     reject_quote "$pool_arg" \

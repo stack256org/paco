@@ -70,6 +70,54 @@ function resolveHostWorkspace(state: DockerState, name: string): string {
  * leaving the init in place and cloning anyway was never an option: the
  * directory has to still be absent when we get here.
  */
+/**
+ * What `repo/` currently holds.
+ *
+ * Three answers, because the middle one is a workspace this code itself
+ * broke. Before the bootstrap learned to stand aside for a clone, every
+ * repo-backed session got a `git init`'d `repo/` and no clone — so there are
+ * workspaces in the wild whose `repo/` IS a git repository and contains
+ * nothing. Those must be distinguished from a real clone, which is left
+ * strictly alone, and from an absent directory, which is the clean case.
+ *
+ * "Empty" is deliberately narrow: no commits, no remotes, and no files other
+ * than the baseline `.gitignore` the bootstrap wrote. Anything else — a
+ * commit, a remote, a file someone or something created — fails the test and
+ * is treated as a real repository, because the recovery below deletes what it
+ * finds and being wrong about that costs someone their work.
+ */
+async function classifyRepoDir(
+  sandbox: DockerSandbox,
+  repo: string,
+): Promise<"absent" | "repository" | "empty-bootstrap"> {
+  const isRepo = await sandbox.exec("git rev-parse --git-dir", repo, 10_000);
+  if (!isRepo.success) {
+    return "absent";
+  }
+
+  const head = await sandbox.exec("git rev-parse --verify HEAD", repo, 10_000);
+  if (head.success) {
+    return "repository";
+  }
+
+  const remotes = await sandbox.exec("git remote", repo, 10_000);
+  if (remotes.stdout.trim() !== "") {
+    return "repository";
+  }
+
+  // `-A` so dotfiles count; `.gitignore` is the one file the bootstrap wrote
+  // itself, so it alone does not make the directory worth keeping.
+  const listing = await sandbox.exec("ls -A", repo, 10_000);
+  const entries = listing.stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(
+      (entry) => entry !== "" && entry !== ".git" && entry !== ".gitignore",
+    );
+
+  return entries.length === 0 ? "empty-bootstrap" : "repository";
+}
+
 async function prepareSource(
   sandbox: DockerSandbox,
   state: DockerState,
@@ -82,9 +130,31 @@ async function prepareSource(
 
   const repo = repoDir(sandbox.hostWorkspace);
 
-  const existing = await sandbox.exec("git rev-parse --git-dir", repo, 10_000);
-  if (existing.success) {
+  const existing = await classifyRepoDir(sandbox, repo);
+  if (existing === "repository") {
     return;
+  }
+
+  if (existing === "empty-bootstrap") {
+    /*
+     * Recover a workspace this code broke.
+     *
+     * Sessions provisioned before the ordering fix have an empty `git init`'d
+     * `repo/` and no clone, and the guard above used to read that as "already
+     * cloned" — so they stayed broken on every resume, forever. `git clone`
+     * refuses a non-empty target, so the empty repository has to go before
+     * the real one can land.
+     *
+     * Narrow by construction: `classifyRepoDir` has already established there
+     * are no commits, no remotes and no files here beyond the baseline
+     * `.gitignore`. Anything with content is classified `repository` and this
+     * branch is never reached.
+     */
+    await sandbox.exec(
+      `rm -rf ${JSON.stringify(repo)}`,
+      CONTAINER_WORKDIR,
+      30_000,
+    );
   }
 
   // The token is scoped to this clone and cleared immediately after, so it

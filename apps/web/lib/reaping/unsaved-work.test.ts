@@ -124,3 +124,31 @@ describe("probeUnsavedWork", () => {
     expect(await probeUnsavedWork(root)).toBeNull();
   });
 });
+
+describe("counting uncommitted files", () => {
+  test("counts every file in an untracked directory, not the directory", async () => {
+    const { root, repo } = await makeWorkspace();
+
+    // Plain `git status --porcelain` reports this as a single `?? src/`
+    // line. An operator deciding whether to delete this workspace would have
+    // been told it held one uncommitted file when it holds three.
+    await fs.mkdir(path.join(repo, "src", "nested"), { recursive: true });
+    await fs.writeFile(path.join(repo, "src", "a.ts"), "a");
+    await fs.writeFile(path.join(repo, "src", "b.ts"), "b");
+    await fs.writeFile(path.join(repo, "src", "nested", "c.ts"), "c");
+
+    const work = await probeUnsavedWork(root);
+
+    expect(work?.uncommittedFiles).toBe(3);
+  });
+
+  test("still counts a plain modified file once", async () => {
+    const { root, repo } = await makeWorkspace();
+
+    await fs.writeFile(path.join(repo, "loose.txt"), "one");
+
+    const work = await probeUnsavedWork(root);
+
+    expect(work?.uncommittedFiles).toBe(1);
+  });
+});

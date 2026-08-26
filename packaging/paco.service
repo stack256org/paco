@@ -38,10 +38,14 @@ Requires=postgresql.service
 # cannot start already explains itself (apps/web/lib/sandbox/setup-failure-copy.ts
 # turns an unreachable daemon into "start it with sudo systemctl start docker").
 #
-# NOTE: unverified by systemd itself. `systemd-analyze verify` is not available
-# on the macOS host this was written on; what it is reasoned from is
-# systemd.unit(5)'s definitions of After=/Wants=/Requires=, and the behaviour
-# above is the documented one, not a guess about an implementation.
+# Verified by systemd itself: `systemd-analyze verify` on systemd 257
+# (debian:stable-slim, in a container, with stub postgresql/docker units and
+# the entrypoint present) exits 0 with no diagnostics. That covers the syntax
+# and every directive name here. The RUNTIME ordering claimed above is
+# reasoned from systemd.unit(5)'s definitions of After=/Wants=/Requires=,
+# which verify does not exercise — it is the documented behaviour, not a
+# guess about an implementation, but it has not been watched happen on a
+# real boot.
 
 [Service]
 Type=simple

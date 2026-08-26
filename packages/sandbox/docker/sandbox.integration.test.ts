@@ -415,3 +415,104 @@ describeDocker("connectDocker with a source", () => {
     expect(gitignore).toContain("node_modules");
   }, 60_000);
 });
+
+/**
+ * Recovery for workspaces the ordering bug already broke, and the guard that
+ * keeps that recovery from eating real work.
+ *
+ * Sessions provisioned before the fix have an empty `git init`'d `repo/`.
+ * The old guard read that as "already cloned", so they stayed broken on every
+ * resume. `prepareSource` now deletes that specific artifact and clones — and
+ * must never do so to a directory holding anything of value, which is what
+ * the second and third tests are here to prove.
+ */
+describeDocker("connectDocker recovering a broken workspace", () => {
+  const workspaces: string[] = [];
+  const sandboxes: Array<{ stop?: () => Promise<unknown> }> = [];
+
+  async function connect(workspace: string, name: string, withSource: boolean) {
+    const sandbox = await connectDocker(
+      {
+        sandboxName: name,
+        hostWorkspace: workspace,
+        ...(withSource
+          ? {
+              source: {
+                repo: "https://github.com/octocat/Hello-World",
+                branch: "master",
+              },
+            }
+          : {}),
+      },
+      {
+        gitUser: { name: "Paco Test", email: "test@example.com" },
+        timeout: 120_000,
+      },
+    );
+    sandboxes.push(sandbox);
+    return sandbox;
+  }
+
+  async function freshWorkspace(label: string): Promise<[string, string]> {
+    const stamp = `${label}-${Date.now()}`;
+    const workspace = path.join(os.tmpdir(), `paco-sbx-${stamp}`);
+    workspaces.push(workspace);
+    return [workspace, `test-${stamp}`];
+  }
+
+  afterAll(async () => {
+    await Promise.all(sandboxes.map((sandbox) => sandbox.stop?.()));
+    await Promise.all(
+      workspaces.map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  }, 180_000);
+
+  test("clones into the empty repository the old bootstrap left behind", async () => {
+    const [workspace, name] = await freshWorkspace("recover");
+
+    // Exactly the broken state: connecting with no source bootstraps an
+    // empty `git init`'d repo/, which is what the buggy path produced.
+    await connect(workspace, name, false);
+    const repo = repoDir(workspace);
+    expect(await fs.readdir(repo)).not.toContain("README");
+
+    // Resuming WITH a source, the way a real session does.
+    await connect(workspace, name, true);
+    expect(await fs.readdir(repo)).toContain("README");
+  }, 300_000);
+
+  test("leaves a repository that has commits completely alone", async () => {
+    const [workspace, name] = await freshWorkspace("keep-commits");
+    const sandbox = await connect(workspace, name, false);
+    const repo = repoDir(workspace);
+
+    await sandbox.exec("echo mine > mine.txt", repo, 30_000);
+    await sandbox.exec("git add -A", repo, 30_000);
+    await sandbox.exec('git commit -m "my work"', repo, 30_000);
+
+    await connect(workspace, name, true);
+
+    // Not re-cloned over: the commit and its file are still here, and the
+    // upstream repository was never fetched into it.
+    const entries = await fs.readdir(repo);
+    expect(entries).toContain("mine.txt");
+    expect(entries).not.toContain("README");
+  }, 300_000);
+
+  test("leaves an untracked file alone, even with no commits", async () => {
+    const [workspace, name] = await freshWorkspace("keep-untracked");
+    const sandbox = await connect(workspace, name, false);
+    const repo = repoDir(workspace);
+
+    // No commit, no remote — the recovery's other two conditions hold. A
+    // single uncommitted file is the only thing standing between this
+    // directory and `rm -rf`, which is precisely the case worth pinning.
+    await sandbox.exec("echo draft > draft.txt", repo, 30_000);
+
+    await connect(workspace, name, true);
+
+    const entries = await fs.readdir(repo);
+    expect(entries).toContain("draft.txt");
+    expect(entries).not.toContain("README");
+  }, 300_000);
+});

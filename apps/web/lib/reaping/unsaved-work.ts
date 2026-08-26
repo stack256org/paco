@@ -34,6 +34,25 @@ const GIT_TIMEOUT_MS = 30_000;
  * Returns null when this is not a git repository at all, or when git could not
  * be run. Callers treat null as "assume there is work here".
  */
+/**
+ * `git status` arguments for counting uncommitted FILES.
+ *
+ * `--untracked-files=all` is the load-bearing half. Plain `--porcelain`
+ * collapses an untracked directory into a single line — `?? src/` stands for
+ * every file beneath it — so a workspace holding an entire uncommitted
+ * project counted as one file. The gate still fired (any count above zero
+ * warns), but the number it showed an operator deciding whether to delete
+ * the workspace was wrong by orders of magnitude, and that number is the
+ * whole basis for the decision.
+ *
+ * The cost is enumerating untracked trees rather than stopping at their root.
+ * Bounded in practice: a workspace gets a baseline `.gitignore` covering
+ * `node_modules` and build output when it has none of its own, and every call
+ * runs under `GIT_TIMEOUT_MS`, whose failure is already treated as "cannot
+ * tell" rather than "nothing here".
+ */
+const STATUS_ARGS = ["status", "--porcelain", "--untracked-files=all"];
+
 export async function probeUnsavedWork(
   workspacePath: string,
 ): Promise<UnsavedWork | null> {
@@ -51,13 +70,13 @@ export async function probeUnsavedWork(
     // legitimate answer of zero rather than an error.
     git(repo, ["rev-list", "--branches", "--not", "--remotes", "--count"]),
     git(repo, ["ls-files"]),
-    git(repo, ["status", "--porcelain"]),
+    git(repo, STATUS_ARGS),
   ]);
 
   let uncommittedFiles = repoStatus.ok ? countLines(repoStatus.stdout) : 0;
 
   for (const worktree of await listWorktrees(workspacePath)) {
-    const status = await git(worktree, ["status", "--porcelain"]);
+    const status = await git(worktree, STATUS_ARGS);
     if (status.ok) {
       uncommittedFiles += countLines(status.stdout);
     }
@@ -82,14 +101,14 @@ function git(cwd: string, args: string[]) {
 }
 
 /**
- * Directory holding design-candidate worktrees, relative to the workspace
- * root.
+ * Directory that design mode used to put candidate worktrees in
+ * (`designs/<chatId>/<n>/`, a sibling of `chats/<chatId>/`).
  *
- * A local literal rather than an import: `@paco/sandbox`'s layout module
- * exports `REPO_DIRNAME` and `CHATS_DIRNAME` but has never had a name for
- * this one, and `lib/preview/nginx-reload.ts` already keeps its own copy for
- * the same reason. The layout (`designs/<chatId>/<n>/`, a sibling of
- * `chats/<chatId>/`) is fixed by the workspace-layout doc.
+ * The feature is gone and nothing creates these any more. The scan stays
+ * because an instance that ran design mode before it was removed can still
+ * have those worktrees on disk holding work nobody committed, and this module
+ * is what stands between an idle workspace and being reclaimed. On a
+ * workspace that never had them the `readdir` simply finds nothing.
  */
 const DESIGNS_DIRNAME = "designs";
 
@@ -108,11 +127,11 @@ async function subdirectories(parent: string): Promise<string[]> {
 /**
  * Every worktree directory in a workspace, whichever kind it is.
  *
- * Chat worktrees sit one level under `chats/`; design-candidate worktrees sit
+ * Chat worktrees sit one level under `chats/`; design mode's leftovers sit
  * two levels under `designs/` (`designs/<chatId>/<n>/`), which is why this
- * cannot be one `readdir`. A candidate's directory is only reported when it
- * looks like a real worktree — `git status` in a stray empty directory would
- * answer for the repository it happens to be inside and double-count it.
+ * cannot be one `readdir`. Such a directory is only reported when it looks
+ * like a real worktree — `git status` in a stray empty directory would answer
+ * for the repository it happens to be inside and double-count it.
  */
 async function listWorktrees(workspacePath: string): Promise<string[]> {
   const chatWorktrees = await subdirectories(
