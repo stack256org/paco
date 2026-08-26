@@ -16,16 +16,35 @@ on:
   # package by hand on a machine of the right architecture, which tests the
   # machine as much as the package.
   #
-  # A dispatch build produces the same artefact through the same script and
-  # publishes none of it: `publishing` below is false, so the release and the
-  # image push are both skipped. Nothing an operator installs can come from
-  # here, so a throwaway version string costs nothing.
+  # A dispatch build produces the same artefact through the same script and,
+  # by default, publishes none of it: `publishing` below is false, so the
+  # release and the image push are both skipped. Nothing an operator installs
+  # comes from a default dispatch, so a throwaway version string costs
+  # nothing.
+  #
+  # `publish: true` is the escape hatch for when the tag trigger does not
+  # fire. That is not hypothetical: pushing v0.2.0 created the tag on GitHub
+  # and no workflow run, three times over, while a dispatch of this same
+  # workflow ran normally — so the repository was left with a tag, a merged
+  # main, and no way to cut the release the tag was for.
+  #
+  # It grants no new privilege. Publishing already required push access, and
+  # dispatching this workflow requires the same write access that pushing a
+  # tag does, so the set of people who can publish is unchanged. What it
+  # changes is that publishing is now an explicit, audited choice in the run's
+  # own inputs rather than something only a tag can express. Point it at a tag
+  # that already exists (`--ref`), because `gh release create` needs one.
   workflow_dispatch:
     inputs:
       version:
         description: "Version for the .deb (no leading v), e.g. 0.2.0-test1"
         required: true
         type: string
+      publish:
+        description: "Publish it: GHCR image, GitHub release, apt dispatch. Leave off for a throwaway build."
+        required: false
+        default: false
+        type: boolean
 
 # Read-only by default; each job that needs to write (the release, the
 # package registry) asks for exactly that scope itself.
@@ -54,13 +73,20 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
-            # A dispatch has no tag. It publishes nothing, so it needs only a
-            # version for the .deb's own Version: field and its filename.
+            # A dispatch has no tag of its own, so the version comes from the
+            # input. It publishes only when asked to, and then against the tag
+            # that version names — which must already exist, since
+            # `gh release create` will not invent one.
             version="${INPUT_VERSION#v}"
             tag="v$version"
-            publishing=false
+            if [ "$INPUT_PUBLISH" = "true" ]; then
+              publishing=true
+            else
+              publishing=false
+            fi
           else
             tag="$REF_NAME"
             version="${tag#v}"

@@ -3,17 +3,29 @@ name: CI
 on:
   pull_request:
     branches: ["*"]
+  # main was never actually guarded. Every green run in this repo's history is
+  # a pull_request or a tag build, so a commit that reached main directly —
+  # which is how this repo is usually worked — ran no checks at all. A push
+  # here is the last point where a break is cheap to find.
+  push:
+    branches: ["main"]
 
 jobs:
   lint-and-typecheck:
     runs-on: ubuntu-latest
 
     steps:
+      # Both halves are empty on a `push`, and an empty `repository`/`ref` is
+      # not an error — checkout quietly falls back to this repo at the pushed
+      # commit, which is exactly right there. They are still named because a
+      # `pull_request` checks out the MERGE commit by default, and a fork's PR
+      # would otherwise resolve to the base repository: the head repo and sha
+      # are what actually gets reviewed.
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
