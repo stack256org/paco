@@ -232,28 +232,6 @@ importers:
         specifier: ^22
         version: 22.20.1
 
-  packages/openfx-backend:
-    dependencies:
-      '@paco/agent-backend':
-        specifier: workspace:*
-        version: link:../agent-backend
-      ai:
-        specifier: 'catalog:'
-        version: 6.0.236(zod@4.4.3)
-      typescript:
-        specifier: ^7
-        version: 7.0.2
-    devDependencies:
-      '@paco/tsconfig':
-        specifier: workspace:*
-        version: link:../tsconfig
-      '@types/bun':
-        specifier: 1.3.14
-        version: 1.3.14
-      '@types/node':
-        specifier: ^22
-        version: 22.20.1
-
   packages/plugin-host:
     dependencies:
       '@paco/plugin-kit':
