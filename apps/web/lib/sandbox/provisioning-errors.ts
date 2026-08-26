@@ -20,6 +20,10 @@ export type ProvisioningFailureReason =
   /** The host cannot run a workspace at all. */
   | "docker-missing"
   | "docker-not-running"
+  /** The daemon answered and refused this process — usually a group, not a fault. */
+  | "docker-permission"
+  /** Rootless Docker. Paco cannot share a workspace across its user namespace. */
+  | "docker-rootless"
   | "image-missing"
   /** The project could not be fetched. */
   | "repo-not-found"

@@ -29,8 +29,31 @@ import {
 export const DOCKER_MISSING =
   "Paco runs your app inside Docker, and Docker isn't installed on this computer. Install Docker Desktop from docker.com, then start it and try again.";
 
+// Deliberately does not guess which machine the reader is on. Paco ships as a
+// .deb for Debian/Ubuntu with systemd, and it is also run locally on a Mac
+// while developing; naming one and being wrong costs the reader the fix.
 export const DOCKER_NOT_RUNNING =
-  "Docker is installed but isn't running, so there's nowhere to build your app. Start Docker Desktop, wait for it to say it's running, then try again.";
+  "Docker is installed but isn't running, so there's nowhere to build your app. On a Linux server, start it with `sudo systemctl start docker`; on a Mac, open the Docker app and wait for it to say it's running. Then try again.";
+
+// The daemon answered — this is not a stopped Docker, and telling the reader to
+// start one wastes their afternoon. On the packaged install Paco runs as the
+// `paco` system user, and `/var/run/docker.sock` is owned by root:docker.
+//
+// The restart is load-bearing and the sentence says why: a process's
+// supplementary groups are read once, when it starts. `usermod` alone changes
+// nothing for the already-running service, so a reader who runs half of this
+// fix sees exactly the same failure and concludes it did not work.
+export const DOCKER_PERMISSION =
+  "Docker is running, but it refused to talk to Paco: the user Paco runs as isn't allowed to use the Docker socket. On the server, run `sudo usermod -aG docker paco && sudo systemctl restart paco`. The restart isn't optional — a process only picks up its group membership when it starts, so until Paco restarts it will keep being refused.";
+
+// Rootless is a reasonable thing for a careful admin to have set up, so this
+// says plainly that it cannot work rather than implying they misconfigured it.
+// The sandbox bind-mounts the workspace and runs as the host's own uid;
+// rootless remaps every id through a user namespace (`/etc/subuid`), so uid 106
+// inside the container writes files owned by uid 100106 outside it and Paco
+// cannot read back its own workspace.
+export const DOCKER_ROOTLESS =
+  "This computer runs Docker in rootless mode, which Paco doesn't support. Paco's workspace is a folder shared between the server and the container, so the container has to run as the same user as the server — and rootless Docker remaps every user id, which means files written in the workspace come back owned by a user Paco can't read or write. Install the normal system-wide Docker daemon on this host, the one that runs as root, then try again.";
 
 // Paco downloads this image itself now, so reaching here means the download
 // failed rather than that somebody forgot a build step. The old copy told the
@@ -72,6 +95,8 @@ const REASON_COPY: Record<ProvisioningFailureReason, string> = {
   "github-not-connected": GITHUB_NOT_CONNECTED,
   "docker-missing": DOCKER_MISSING,
   "docker-not-running": DOCKER_NOT_RUNNING,
+  "docker-permission": DOCKER_PERMISSION,
+  "docker-rootless": DOCKER_ROOTLESS,
   "image-missing": IMAGE_MISSING,
   "repo-not-found": REPO_NOT_FOUND,
   "repo-auth-failed": REPO_AUTH_FAILED,
@@ -142,6 +167,35 @@ const MATCHERS: ReadonlyArray<{
     // and "start Docker Desktop" is useless advice when it is not installed.
     test: /spawn docker enoent|docker: (command )?not found|enoent.*\bdocker\b/,
     reason: "docker-missing",
+  },
+  {
+    // Rootless first, because a rootless daemon refuses other users in the
+    // *same* words as the group problem below, and the two fixes are opposite:
+    // adding a group would not help, and nothing the reader does to this
+    // daemon will. Measured on Ubuntu 24.04 — the socket lives under
+    // `/run/user/<uid>/`, the shim is `rootlesskit`, the unit is
+    // `dockerd-rootless.sh`.
+    test: /rootlesskit|dockerd-rootless|\/run\/user\/\d+\/[\w.-]*docker[\w.-]*\.sock/,
+    reason: "docker-rootless",
+  },
+  {
+    // MUST stay ahead of the daemon matcher below. Docker names the socket in
+    // its permission error, the daemon matcher matches any mention of
+    // `docker.sock`, and the result was that the single most common
+    // self-hosting failure — a user who is not in the `docker` group — told
+    // people to start a daemon that was already running.
+    //
+    // Verified on Docker 29.6 / Ubuntu 24.04:
+    //
+    //   permission denied while trying to connect to the Docker daemon socket
+    //     at unix:///var/run/docker.sock
+    //   Got permission denied while trying to connect to the Docker daemon socket
+    //   error during connect: dial unix /var/run/docker.sock: connect: permission denied
+    //
+    // Not a bare `permission denied`: that also arrives from git as
+    // `Permission denied (publickey)`, which is a `repo-auth-failed`.
+    test: /permission denied while trying to connect|dial unix [^\s]*docker\.sock: connect: permission denied/,
+    reason: "docker-permission",
   },
   {
     test: /cannot connect to the docker daemon|is the docker daemon running|failed to connect to the docker api|docker\.sock|econnrefused|dial unix/,

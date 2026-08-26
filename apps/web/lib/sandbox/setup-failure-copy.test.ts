@@ -8,6 +8,8 @@ import {
   classifySetupFailureText,
   DOCKER_MISSING,
   DOCKER_NOT_RUNNING,
+  DOCKER_PERMISSION,
+  DOCKER_ROOTLESS,
   GENERIC,
   isSetupFailureRetryable,
   setupFailureMessage,
@@ -32,6 +34,43 @@ describe("classifySetupFailureText", () => {
       "daemon down over a unix socket",
       "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
       "docker-not-running",
+    ],
+    [
+      // Measured on Ubuntu 24.04: the daemon is up, the socket is there, and
+      // the calling user is simply not in the `docker` group. The socket path
+      // in this sentence used to drag it into "docker-not-running", which told
+      // a Linux self-hoster to start something that was already started.
+      "daemon reachable but the user is not in the docker group",
+      'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.51/version": dial unix /var/run/docker.sock: connect: permission denied',
+      "docker-permission",
+    ],
+    [
+      "the same refusal as the CLI prints it",
+      "Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+      "docker-permission",
+    ],
+    [
+      "the bare dial line, with no sentence around it",
+      "error during connect: dial unix /var/run/docker.sock: connect: permission denied",
+      "docker-permission",
+    ],
+    [
+      // Rootless puts the container in a user namespace, so the workspace bind
+      // mount comes back owned by a uid Paco cannot use. Paco does not support
+      // it, and saying so is more useful than any retry.
+      "rootless daemon, named by its socket",
+      "Cannot connect to the Docker daemon at unix:///run/user/1000/docker.sock. Is the docker daemon running?",
+      "docker-rootless",
+    ],
+    [
+      "rootless daemon, named by rootlesskit",
+      'docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: error mounting "/home/paco/workspaces/app" to rootfs: rootlesskit: permission denied',
+      "docker-rootless",
+    ],
+    [
+      "rootless daemon, named by its launcher",
+      "dockerd-rootless.sh: exiting; the daemon is not running as root",
+      "docker-rootless",
     ],
     [
       // Nothing emits this any more — Paco pulls the image rather than refusing
@@ -107,10 +146,44 @@ describe("classifySetupFailureText", () => {
   });
 
   test("a missing binary outranks the daemon it would have talked to", () => {
-    // "Start Docker Desktop" is useless when Docker is not installed.
+    // "Start Docker" is useless when Docker is not installed.
     expect(classifySetupFailureText("spawn docker ENOENT")).not.toBe(
       "docker-not-running",
     );
+  });
+
+  test("a refused socket is never reported as a stopped daemon", () => {
+    // The ordering bug this file exists to prevent. The daemon patterns match
+    // any mention of `docker.sock`, and Docker's permission error names the
+    // socket — so unless the permission matcher runs first, the single most
+    // likely self-hosting failure tells the reader to start a daemon that is
+    // already running. Nothing else in the file stops a reorder.
+    expect(
+      classifySetupFailureText(
+        "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock",
+      ),
+    ).not.toBe("docker-not-running");
+  });
+
+  test("rootless outranks the refusal it causes", () => {
+    // A rootless daemon refuses another user's connection in exactly the same
+    // words, and "add yourself to the docker group" would not fix it: Paco
+    // cannot use a rootless daemon at all.
+    expect(
+      classifySetupFailureText(
+        "permission denied while trying to connect to the Docker daemon socket at unix:///run/user/1000/docker.sock",
+      ),
+    ).toBe("docker-rootless");
+  });
+
+  test("a refused socket is not mistaken for a rejected git credential", () => {
+    // `repo-auth-failed` matches `permission denied (publickey)`. Docker's
+    // refusal must not drift into it.
+    expect(
+      classifySetupFailureText(
+        "Got permission denied while trying to connect to the Docker daemon socket",
+      ),
+    ).toBe("docker-permission");
   });
 });
 
@@ -147,6 +220,8 @@ describe("setupFailureMessage", () => {
       "github-not-connected",
       "docker-missing",
       "docker-not-running",
+      "docker-permission",
+      "docker-rootless",
       "image-missing",
       "repo-not-found",
       "repo-auth-failed",
@@ -170,6 +245,38 @@ describe("setupFailureMessage", () => {
     expect(setupFailureMessage("docker-not-running")).toBe(DOCKER_NOT_RUNNING);
   });
 
+  test("distinguishes a stopped daemon from a refused one", () => {
+    expect(DOCKER_PERMISSION).not.toBe(DOCKER_NOT_RUNNING);
+    expect(setupFailureMessage("docker-permission")).toBe(DOCKER_PERMISSION);
+    expect(setupFailureMessage("docker-rootless")).toBe(DOCKER_ROOTLESS);
+  });
+
+  test("no Docker copy sends a Linux self-hoster to Docker Desktop", () => {
+    // The packaged install is Debian/Ubuntu plus systemd. There is no Docker
+    // Desktop on that machine, and the whole point of these three sentences is
+    // that they name a fix the reader can actually run.
+    for (const message of [
+      DOCKER_NOT_RUNNING,
+      DOCKER_PERMISSION,
+      DOCKER_ROOTLESS,
+    ]) {
+      expect(message).not.toMatch(/docker desktop/i);
+    }
+  });
+
+  test("the permission fix restarts Paco, because groups are read at start", () => {
+    // Adding the group without restarting leaves the running process with its
+    // old group list, so the next attempt fails identically. The restart is
+    // part of the fix, and the copy has to say so.
+    expect(DOCKER_PERMISSION).toContain("usermod -aG docker paco");
+    expect(DOCKER_PERMISSION).toContain("systemctl restart paco");
+  });
+
+  test("the rootless message says Paco does not support it", () => {
+    expect(DOCKER_ROOTLESS).toMatch(/rootless/i);
+    expect(DOCKER_ROOTLESS).toMatch(/does(n't| not) support/i);
+  });
+
   test("the generic message is reached only by the unknown reason", () => {
     expect(setupFailureMessage("unknown")).toBe(GENERIC);
     expect(setupFailureMessage("disk-full")).not.toBe(GENERIC);
@@ -180,6 +287,8 @@ describe("isSetupFailureRetryable", () => {
   test("does not offer a retry for anything a retry cannot fix", () => {
     expect(isSetupFailureRetryable("docker-missing")).toBe(false);
     expect(isSetupFailureRetryable("docker-not-running")).toBe(false);
+    expect(isSetupFailureRetryable("docker-permission")).toBe(false);
+    expect(isSetupFailureRetryable("docker-rootless")).toBe(false);
     expect(isSetupFailureRetryable("image-missing")).toBe(false);
     expect(isSetupFailureRetryable("repo-auth-failed")).toBe(false);
     expect(isSetupFailureRetryable("archived")).toBe(false);
