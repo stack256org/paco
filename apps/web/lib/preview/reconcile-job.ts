@@ -13,7 +13,7 @@ import {
   CANDIDATE_INDEXES,
   stopCandidateDevServersForSandbox,
 } from "./candidate-dev-server";
-import { syncPreviewRoutes } from "./nginx-reload";
+import { previewStackStatus, syncPreviewRoutes } from "./nginx-reload";
 
 /**
  * The periodic reconciliation the rest of the preview stack was written
@@ -64,6 +64,71 @@ const INITIAL_DELAY_MS = 15_000;
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let initialTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Whether the nginx step of the sweep is worth attempting on this host.
+ *
+ * `unchecked` until the first sweep probes the filesystem; the answer is then
+ * final for the lifetime of the process, because neither input can change
+ * under a running instance without the package being installed or removed
+ * underneath it — and either of those restarts the service.
+ */
+let routeSync: "unchecked" | "armed" | "disarmed" = "unchecked";
+
+/**
+ * Reconcile nginx's routes, unless this host has no nginx to reconcile.
+ *
+ * A development checkout has no `/etc/paco/nginx` and no way to create one, so
+ * `syncPreviewRoutes` threw `EACCES` every 60 seconds forever, in the middle
+ * of `next dev`'s own output. The fix is not a `catch` — that would hide the
+ * identical `EACCES` a real server produces when `postinst`'s `chown paco`
+ * did not take, which is a fault an operator has to see. It is to ask, once,
+ * whether there is an nginx preview stack here at all (`previewStackStatus`,
+ * whose doc comment carries the reasoning for the two signals it reads):
+ *
+ * - No stack — say so once and never attempt the sync again in this process.
+ * - A stack — attempt it every sweep, and let every failure through to the
+ *   caller's `console.error`, every time.
+ *
+ * Only this one step is disarmed, not the timer: the other two things the
+ * sweep does — reclaiming candidate ports and orphaned candidate worktrees —
+ * are pure Docker and filesystem work that is just as necessary, and just as
+ * correct, on a development checkout.
+ */
+async function syncPreviewRoutesWhereInstalled(): Promise<void> {
+  if (routeSync === "disarmed") {
+    return;
+  }
+
+  if (routeSync === "unchecked") {
+    const status = await previewStackStatus();
+
+    if (status.kind === "not-installed") {
+      routeSync = "disarmed";
+      // Not an error: an environment without previews is a fact about the
+      // environment, and `next dev` has enough red in it already.
+      console.log(
+        `[preview-reconcile] ${status.reason}. Preview route syncing is off for this process; the rest of the sweep still runs.`,
+      );
+      return;
+    }
+
+    if (status.kind === "incomplete") {
+      routeSync = "disarmed";
+      // A fault, so `console.error` — but printed once rather than every
+      // minute, because no amount of retrying re-creates a directory this
+      // process is not allowed to create.
+      console.error(
+        `[preview-reconcile] ${status.reason}. Preview route syncing is off for this process; restart Paco once it is fixed.`,
+      );
+      return;
+    }
+
+    routeSync = "armed";
+  }
+
+  await syncPreviewRoutes();
+}
 
 /**
  * Reclaim the candidate ports held by dev servers whose worktree is gone.
@@ -187,7 +252,7 @@ export async function reclaimOrphanedCandidateWorktrees(): Promise<OrphanedCandi
 /** One full sweep. Never throws — a failed sweep must not stop the next one. */
 export async function reconcilePreviewState(): Promise<void> {
   try {
-    await syncPreviewRoutes();
+    await syncPreviewRoutesWhereInstalled();
   } catch (error) {
     console.error("[preview-reconcile] preview route sync failed:", error);
   }
@@ -237,8 +302,15 @@ export function startPreviewReconciliation(): void {
   console.log("[jobs] preview reconciliation started");
 }
 
-/** Stop the sweep. Exists for tests and for a clean shutdown. */
+/**
+ * Stop the sweep. Exists for tests and for a clean shutdown.
+ *
+ * Also forgets what the last run learned about this host's nginx, so a
+ * stop/start pair behaves like the fresh process it is pretending to be —
+ * including printing the "no preview stack here" line again.
+ */
 export function stopPreviewReconciliation(): void {
+  routeSync = "unchecked";
   if (initialTimer) {
     clearTimeout(initialTimer);
     initialTimer = null;

@@ -48,7 +48,8 @@ mock.module("@/lib/sandbox/utils", () => ({
   isSandboxActive: () => true,
 }));
 
-const { collectActivePreviewRoutes } = await import("./nginx-reload");
+const { classifyPreviewStack, collectActivePreviewRoutes } =
+  await import("./nginx-reload");
 
 const BASE_DOMAIN = "previews.example.com";
 
@@ -207,5 +208,50 @@ describe("collectActivePreviewRoutes", () => {
 
     expect(routes).toHaveLength(1);
     expect(routes[0]?.hostname).toBe(`chat-abc.${BASE_DOMAIN}`);
+  });
+});
+
+describe("classifyPreviewStack", () => {
+  test("no nginx binary means this host has no preview stack at all", () => {
+    // A development checkout, or macOS. `/etc/paco/nginx` is missing for the
+    // same reason the binary is: nothing ever installed the package here.
+    const status = classifyPreviewStack({
+      nginxBinary: false,
+      confDir: false,
+    });
+
+    expect(status.kind).toBe("not-installed");
+    expect(status.kind === "not-installed" && status.reason).toContain(
+      "/usr/sbin/nginx",
+    );
+  });
+
+  test("a leftover config directory with no nginx is still 'not installed'", () => {
+    // An uninstall that left `/etc/paco` behind, or a developer who created
+    // it by hand. Without an nginx to reload, there is nothing to reconcile.
+    expect(
+      classifyPreviewStack({ nginxBinary: false, confDir: true }).kind,
+    ).toBe("not-installed");
+  });
+
+  test("nginx present but Paco's config directory missing is a broken install", () => {
+    // `postinst` creates `/etc/paco/nginx`; nginx being here without it means
+    // the package is half-installed, which is a fault, not an environment.
+    const status = classifyPreviewStack({ nginxBinary: true, confDir: false });
+
+    expect(status.kind).toBe("incomplete");
+    expect(status.kind === "incomplete" && status.reason).toContain(
+      "/etc/paco/nginx",
+    );
+  });
+
+  test("both present is ready — every failure past this point is a real fault", () => {
+    // Deliberately says nothing about whether the directory is *writable*: a
+    // root-owned `/etc/paco/nginx` is a broken packaged install, and it has to
+    // fail loudly on every sweep rather than be classified away as "this
+    // environment has no previews".
+    expect(classifyPreviewStack({ nginxBinary: true, confDir: true })).toEqual({
+      kind: "ready",
+    });
   });
 });
