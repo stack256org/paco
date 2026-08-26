@@ -1,0 +1,14 @@
+{
+  "extends": "../../../packages/tsconfig/bun.json",
+  "include": ["./**/*"],
+  "exclude": ["node_modules"],
+  "compilerOptions": {
+    "strictNullChecks": true,
+    "typeRoots": ["../../../packages/plugin-host/node_modules/@types"],
+    "paths": {
+      "@paco/plugin-host": ["../../../packages/plugin-host/index.ts"],
+      "@paco/plugin-kit": ["../../../packages/plugin-kit/index.ts"],
+      "zod": ["../../../packages/plugin-kit/node_modules/zod"]
+    }
+  }
+}

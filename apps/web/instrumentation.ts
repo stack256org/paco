@@ -5,8 +5,25 @@
  * cannot run on the edge runtime:
  *
  * - the Workflow SDK's world, which drives durable workflow runs
- * - the pg-boss workers, which deliver queued email out of band
+ * - the pg-boss workers, which deliver queued email, fire cron
+ *   schedules (`lib/db/schema.ts`'s `schedules` table), and run the daily
+ *   reflection job (`lib/memory/reflect.ts`) out of band
  *
+ * A third thing is started here too: every enabled plugin's worker host
+ * (`ensurePluginsStarted`, `lib/plugins/registry.ts`) — so a plugin with
+ * `events:subscribe` is already registered with the session-event fan-out,
+ * and one with `tools:register` is already running, by the time the first
+ * request or turn needs it, rather than paying that startup cost inline on
+ * whichever turn happens to ask first. `ensurePluginsStarted` never throws
+ * (see its own doc comment), so a plugin failing to start here can never
+ * take server boot down with it.
+ *
+ * And a fourth: the preview reconciliation sweep
+ * (`lib/preview/reconcile-job.ts`), which keeps nginx's generated preview
+ * routing in step with what is actually running. An in-process timer rather
+ * than a pg-boss job, because everything it reconciles is state on THIS
+ * host — see its own doc comment. Nothing here awaits it: it schedules
+ * itself and swallows its own failures.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") {
@@ -28,4 +45,17 @@ export async function register() {
 
   const { startWorkers } = await import("@/lib/jobs/workers");
   await startWorkers();
+
+  const { startScheduleJob } = await import("@/lib/jobs/schedule-job");
+  await startScheduleJob();
+
+  const { startReflectionJob } = await import("@/lib/jobs/reflection-job");
+  await startReflectionJob();
+
+  const { ensurePluginsStarted } = await import("@/lib/plugins/registry");
+  await ensurePluginsStarted();
+
+  const { startPreviewReconciliation } =
+    await import("@/lib/preview/reconcile-job");
+  startPreviewReconciliation();
 }

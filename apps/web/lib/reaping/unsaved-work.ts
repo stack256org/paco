@@ -17,10 +17,14 @@ const GIT_TIMEOUT_MS = 30_000;
  *
  * Three things are asked, in the session repository:
  *
- * - **Uncommitted files**, summed over the repository *and* every chat
- *   worktree. A chat's branch is checked out in its own directory, so a
- *   `git status` in the repository is blind to it — that is the mistake this
- *   sums over rather than avoids.
+ * - **Uncommitted files**, summed over the repository *and* every worktree
+ *   under it — chat worktrees (`chats/<chatId>/`) and any worktree left
+ *   behind by design mode (`designs/<chatId>/<n>/`) alike. A branch checked
+ *   out in its own directory is invisible to a `git status` in the
+ *   repository, so each one is asked directly. The second kind was missed
+ *   here at first, which meant a worktree holding the only copy of what the
+ *   user asked for read as a clean workspace and the delete-session safety
+ *   gate let it go.
  * - **Unpushed commits**, as commits on any branch that no remote-tracking ref
  *   contains. With no remote configured, that is every commit, which is
  *   correct: nothing is backed up.
@@ -30,6 +34,25 @@ const GIT_TIMEOUT_MS = 30_000;
  * Returns null when this is not a git repository at all, or when git could not
  * be run. Callers treat null as "assume there is work here".
  */
+/**
+ * `git status` arguments for counting uncommitted FILES.
+ *
+ * `--untracked-files=all` is the load-bearing half. Plain `--porcelain`
+ * collapses an untracked directory into a single line — `?? src/` stands for
+ * every file beneath it — so a workspace holding an entire uncommitted
+ * project counted as one file. The gate still fired (any count above zero
+ * warns), but the number it showed an operator deciding whether to delete
+ * the workspace was wrong by orders of magnitude, and that number is the
+ * whole basis for the decision.
+ *
+ * The cost is enumerating untracked trees rather than stopping at their root.
+ * Bounded in practice: a workspace gets a baseline `.gitignore` covering
+ * `node_modules` and build output when it has none of its own, and every call
+ * runs under `GIT_TIMEOUT_MS`, whose failure is already treated as "cannot
+ * tell" rather than "nothing here".
+ */
+const STATUS_ARGS = ["status", "--porcelain", "--untracked-files=all"];
+
 export async function probeUnsavedWork(
   workspacePath: string,
 ): Promise<UnsavedWork | null> {
@@ -47,13 +70,13 @@ export async function probeUnsavedWork(
     // legitimate answer of zero rather than an error.
     git(repo, ["rev-list", "--branches", "--not", "--remotes", "--count"]),
     git(repo, ["ls-files"]),
-    git(repo, ["status", "--porcelain"]),
+    git(repo, STATUS_ARGS),
   ]);
 
   let uncommittedFiles = repoStatus.ok ? countLines(repoStatus.stdout) : 0;
 
-  for (const worktree of await listChatWorktrees(workspacePath)) {
-    const status = await git(worktree, ["status", "--porcelain"]);
+  for (const worktree of await listWorktrees(workspacePath)) {
+    const status = await git(worktree, STATUS_ARGS);
     if (status.ok) {
       uncommittedFiles += countLines(status.stdout);
     }
@@ -77,14 +100,60 @@ function git(cwd: string, args: string[]) {
   return runHostCommand("git", ["-C", cwd, ...args], GIT_TIMEOUT_MS);
 }
 
-async function listChatWorktrees(workspacePath: string): Promise<string[]> {
-  const chatsDir = path.join(workspacePath, CHATS_DIRNAME);
+/**
+ * Directory that design mode used to put candidate worktrees in
+ * (`designs/<chatId>/<n>/`, a sibling of `chats/<chatId>/`).
+ *
+ * The feature is gone and nothing creates these any more. The scan stays
+ * because an instance that ran design mode before it was removed can still
+ * have those worktrees on disk holding work nobody committed, and this module
+ * is what stands between an idle workspace and being reclaimed. On a
+ * workspace that never had them the `readdir` simply finds nothing.
+ */
+const DESIGNS_DIRNAME = "designs";
+
+/** Every immediate subdirectory of `parent`, as absolute paths. */
+async function subdirectories(parent: string): Promise<string[]> {
   try {
-    const entries = await fs.readdir(chatsDir, { withFileTypes: true });
+    const entries = await fs.readdir(parent, { withFileTypes: true });
     return entries
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(chatsDir, entry.name));
+      .map((entry) => path.join(parent, entry.name));
   } catch {
     return [];
   }
+}
+
+/**
+ * Every worktree directory in a workspace, whichever kind it is.
+ *
+ * Chat worktrees sit one level under `chats/`; design mode's leftovers sit
+ * two levels under `designs/` (`designs/<chatId>/<n>/`), which is why this
+ * cannot be one `readdir`. Such a directory is only reported when it looks
+ * like a real worktree — `git status` in a stray empty directory would answer
+ * for the repository it happens to be inside and double-count it.
+ */
+async function listWorktrees(workspacePath: string): Promise<string[]> {
+  const chatWorktrees = await subdirectories(
+    path.join(workspacePath, CHATS_DIRNAME),
+  );
+
+  const candidateWorktrees: string[] = [];
+  for (const chatDesigns of await subdirectories(
+    path.join(workspacePath, DESIGNS_DIRNAME),
+  )) {
+    for (const candidate of await subdirectories(chatDesigns)) {
+      // A worktree's `.git` is a pointer *file* back into
+      // `repo/.git/worktrees/<id>`, not a directory — either way, its
+      // presence is what distinguishes a worktree from a leftover directory.
+      try {
+        await fs.stat(path.join(candidate, ".git"));
+        candidateWorktrees.push(candidate);
+      } catch {
+        // Not a worktree (half-removed, or never created properly).
+      }
+    }
+  }
+
+  return [...chatWorktrees, ...candidateWorktrees];
 }

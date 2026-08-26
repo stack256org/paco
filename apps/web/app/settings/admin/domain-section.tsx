@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Globe, Loader2 } from "lucide-react";
+import { AlertTriangle, Globe, Info, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -58,6 +58,26 @@ const RESTART_POLL_INTERVAL_MS = 1000;
 const RESTART_POLL_REQUEST_TIMEOUT_MS = 3000;
 const RESTART_NEVER_WENT_DOWN_TIMEOUT_MS = 30_000;
 const RESTART_NOT_BACK_TIMEOUT_MS = 60_000;
+
+/*
+ * Guidance for someone running Paco from a checkout rather than the packaged
+ * install, which is the case these two fields read least well for.
+ *
+ * The preview hint says "leave it blank" rather than offering a localhost
+ * value, because there is no localhost value that works: previews are served
+ * by nginx, from config Paco writes into `/etc/paco/nginx` and applies with
+ * `nginx -t` + `systemctl reload nginx` (`lib/preview/nginx-reload.ts`). A
+ * development checkout has none of that, so any preview domain entered here
+ * would produce links that resolve to nothing. Saying so is more useful than
+ * a value that looks like it should work.
+ */
+const LOCAL_ADDRESS_HINT =
+  "Developing locally? Use http://localhost:3000 (or whatever port you run on).";
+const LOCAL_PREVIEW_HINT =
+  "Developing locally? Leave this blank. Previews are served by nginx, which a development checkout does not have, so no value here will work.";
+
+/** The record an operator actually has to create, in the shape a DNS panel asks for. */
+const PREVIEW_DNS_EXAMPLE = "*.previews.example.com.   A   203.0.113.10";
 
 /** A single liveness check, bounded so a hanging socket can't stall the poll. */
 async function pingServerAlive(): Promise<boolean> {
@@ -353,6 +373,13 @@ export function DomainSection({
           >
             <label className="label" htmlFor="app-domain">
               Address
+              <span
+                className="tooltip tooltip-right"
+                data-tip={LOCAL_ADDRESS_HINT}
+              >
+                <Info aria-hidden="true" className="size-3.5 opacity-60" />
+                <span className="sr-only">{LOCAL_ADDRESS_HINT}</span>
+              </span>
             </label>
             <input
               className="input input-sm w-full"
@@ -367,12 +394,21 @@ export function DomainSection({
               type="text"
               value={form?.appDomain ?? ""}
             />
-            <p className="label">
-              The full origin, including <code>https://</code>.
+            <p className="text-base-content/60 text-xs">
+              The full origin people use to reach Paco, including{" "}
+              <code>https://</code>. This is what invitation and sign-in links
+              are built from.
             </p>
 
             <label className="label" htmlFor="preview-base-domain">
               Preview domain
+              <span
+                className="tooltip tooltip-right"
+                data-tip={LOCAL_PREVIEW_HINT}
+              >
+                <Info aria-hidden="true" className="size-3.5 opacity-60" />
+                <span className="sr-only">{LOCAL_PREVIEW_HINT}</span>
+              </span>
             </label>
             <input
               className="input input-sm w-full"
@@ -389,8 +425,19 @@ export function DomainSection({
               type="text"
               value={form?.previewBaseDomain ?? ""}
             />
-            <p className="label">
-              A bare domain, with no scheme, used for preview links.
+            <p className="text-base-content/60 text-xs">
+              A bare domain, no scheme. Every chat gets its own subdomain of it
+              — <code>a1b2c3.previews.example.com</code> — so this needs a{" "}
+              <strong>wildcard</strong> DNS record pointing at this host, not a
+              single one:
+            </p>
+            <pre className="overflow-x-auto rounded bg-base-200 px-3 py-2 text-xs">
+              <code>{PREVIEW_DNS_EXAMPLE}</code>
+            </pre>
+            <p className="text-base-content/60 text-xs">
+              Without the wildcard the domain itself resolves but every preview
+              link does not, which looks like previews being broken rather than
+              a record being missing. Leave this blank to turn previews off.
             </p>
 
             <label className="label mt-2">
@@ -407,7 +454,7 @@ export function DomainSection({
               />
               Serve previews over HTTPS
             </label>
-            <p className="label">
+            <p className="text-base-content/60 text-xs">
               Only turn this on once each preview hostname has a certificate in{" "}
               <code>/etc/paco/preview-certs</code>. Previews without one stay on
               HTTP rather than breaking.

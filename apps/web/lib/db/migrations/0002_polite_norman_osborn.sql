@@ -1,0 +1,1 @@
+ALTER TABLE "chats" ADD COLUMN "turn_policy" text DEFAULT 'steer' NOT NULL;

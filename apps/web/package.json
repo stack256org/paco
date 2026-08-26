@@ -20,7 +20,11 @@
   "dependencies": {
     "@ai-sdk/react": "catalog:",
     "@base-ui/react": "1.6.0",
+    "@paco/agent-backend": "workspace:*",
     "@paco/claude-code": "workspace:*",
+    "@paco/plugin-host": "workspace:*",
+    "@paco/plugin-kit": "workspace:*",
+    "@paco/poolside-backend": "workspace:*",
     "@paco/sandbox": "workspace:*",
     "@paco/shared": "workspace:*",
     "@pierre/diffs": "^1.0.10",
@@ -32,6 +36,7 @@
     "ai": "catalog:",
     "better-auth": "^1.6.25",
     "clsx": "^2.1.1",
+    "cron-parser": "^5.7.0",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "lucide-react": "^1.27.0",
@@ -46,6 +51,7 @@
     "streamdown": "^2.5.0",
     "swr": "^2.4.2",
     "tailwind-merge": "^3.4.0",
+    "undici": "7.28.0",
     "workflow": "4.8.0",
     "zod": "catalog:"
   },

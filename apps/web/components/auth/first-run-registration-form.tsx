@@ -142,7 +142,9 @@ export function FirstRunRegistrationForm({
         type="text"
         value={organizationName}
       />
-      <p className="label">Optional — defaults to &ldquo;Paco&rdquo;.</p>
+      <p className="text-base-content/60 text-xs">
+        Optional — defaults to &ldquo;Paco&rdquo;.
+      </p>
 
       <button
         className="btn mt-4 w-full"

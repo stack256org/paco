@@ -502,8 +502,13 @@ export function useSessionChats(
       title: "New chat",
       modelId: data?.defaultModelId ?? null,
       effort: null,
+      turnPolicy: "steer",
+      // Mirrors the schema default: a new chat always starts on the
+      // default backend, matching what the server will actually return.
+      backend: "claude-code",
       activeStreamId: null,
       claudeSessionId: null,
+      resumeTokens: {},
       lastAssistantMessageAt: null,
       // A new chat's preview starts private regardless of where it came
       // from — see the column comment in schema.ts. A fork must not inherit
@@ -605,8 +610,11 @@ export function useSessionChats(
       title: `Fork of ${sourceChat.title}`,
       modelId: sourceChat.modelId,
       effort: sourceChat.effort,
+      turnPolicy: sourceChat.turnPolicy,
+      backend: sourceChat.backend,
       activeStreamId: null,
       claudeSessionId: null,
+      resumeTokens: {},
       lastAssistantMessageAt: null,
       // A new chat's preview starts private regardless of where it came
       // from — see the column comment in schema.ts. A fork must not inherit

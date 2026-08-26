@@ -1,0 +1,29 @@
+{
+  "name": "@paco/agent-backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./events.js": "./events.ts",
+    "./interface.js": "./interface.ts",
+    "./fake-backend.js": "./fake-backend.ts",
+    "./conformance.js": "./conformance.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ai": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@paco/tsconfig": "workspace:*",
+    "@types/bun": "1.3.14",
+    "@types/node": "^22"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  }
+}

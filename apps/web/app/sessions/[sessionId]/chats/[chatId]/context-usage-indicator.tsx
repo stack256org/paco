@@ -69,6 +69,7 @@ export function ContextUsageIndicator({
   contextLimit,
   onCompact,
   isCompacting = false,
+  compactUnavailableReason,
 }: {
   inputTokens: number;
   conversationInputTokens: number;
@@ -79,6 +80,15 @@ export function ContextUsageIndicator({
   /** Ask the CLI to compact this chat's history. Omitted when unavailable. */
   onCompact?: () => void;
   isCompacting?: boolean;
+  /**
+   * Why there is no compact control, when there is none.
+   *
+   * "Unavailable" has two very different causes and they must not read the
+   * same. A turn in flight is temporary and needs no explanation; a backend
+   * that cannot compact on demand is permanent and does, or the dial just
+   * looks broken on that chat.
+   */
+  compactUnavailableReason?: string;
 }) {
   if (inputTokens === 0) {
     return null;
@@ -178,7 +188,7 @@ export function ContextUsageIndicator({
           ) : null}
         </div>
 
-        {onCompact && (
+        {onCompact ? (
           <>
             <div className="h-px bg-current opacity-10" />
             <p className="p-3 text-xs opacity-60">
@@ -187,7 +197,12 @@ export function ContextUsageIndicator({
                 : "Click to compact — Claude summarises the older history and frees context."}
             </p>
           </>
-        )}
+        ) : compactUnavailableReason ? (
+          <>
+            <div className="h-px bg-current opacity-10" />
+            <p className="p-3 text-xs opacity-60">{compactUnavailableReason}</p>
+          </>
+        ) : null}
       </TooltipContent>
     </Tooltip>
   );

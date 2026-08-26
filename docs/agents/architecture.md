@@ -30,15 +30,57 @@ chat's worktree, which is mounted into the container. So:
 - The agent has the operator's privileges, which is why tool calls are gated
   (below).
 
+### Docker is the sandbox, not one option among several
+
+`Sandbox` is an interface and `SandboxState` is a discriminated union, which
+makes this look pluggable. It is not: `"docker"` is the only variant either
+one has ever had, `connectSandbox` has one branch, and the two things that
+make the design work — the container running as the host's own uid, and the
+workspace bind-mounted twice at the same absolute path — are Docker bind-mount
+semantics rather than anything an interface could abstract. Treat the
+interface as a seam for testing, not as a backend contract.
+
+It has to be a **rootful** daemon, and that is load-bearing rather than a
+default. A rootless daemon puts the container in a user namespace, so
+`User: hostContainerUser()` no longer means what it says: measured on Ubuntu
+24.04 with `/etc/subuid` at `ubuntu:100000:65536`, a container claiming
+`uid=106` wrote files owned by `uid=100106` on the host, and the service —
+uid 106 — could not read back its own workspace. There is no uid that maps
+back correctly and no privilege Paco holds to repair it afterwards, so
+`packages/sandbox/docker/preflight.ts` asks the daemon (`docker info`'s
+`SecurityOptions`) and refuses up front instead. `docs/self-hosting.md` §1
+states the same limitation for operators.
+
 ## Workspace layout
 
 A session is one git repository. A chat is one worktree of it.
 
 ```text
-~/.paco/workspaces/session_<id>/     mounted at /workspace *and* at this path
-  repo/                              the clone, or `git init`, on its default branch
-  chats/<chatId>/                    a worktree, on branch chat/<chatId>
+~/.paco/                             Paco's data dir (PACO_HOME, else ~/.paco)
+  plugins/<pluginId>/                installed plugin trees (PACO_PLUGINS_DIR)
+  memory/users/<userId>/             user-scope memory, as markdown files
+  memory/orgs/<orgId>/               org-scope memory, written only by promotion
+  workspaces/session_<id>/           mounted at /workspace *and* at this path
+    repo/                            the clone, or `git init`, on its default branch
+      .paco/memory/                  project-scope memory — see the warning below
+    chats/<chatId>/                  a worktree, on branch chat/<chatId>
+    designs/<chatId>/<n>/            a design candidate's worktree, on design/<chatId>/<n>
 ```
+
+**Project memory is not versioned.** It is written into a real git repository,
+which is what makes the path misleading: nothing in this codebase ever stages
+or commits `.paco/memory`, `.paco/` is not in the baseline `.gitignore`, and it
+sits in `repo/` rather than in any chat's worktree — so it never appears in a
+chat's diff or its pull request either. It is untracked files in one
+server-side checkout, and it dies with the workspace. That is deliberate rather
+than an oversight — the session repo is checked out on the default branch,
+which Paco never pushes, and committing from a chat's worktree instead would
+put distilled notes into the diff a human reviews on every turn. Commit
+`.paco/memory` yourself if you want it shared; nothing will do it for you.
+
+Design-candidate worktrees are siblings of `chats/` for the same reason chat
+worktrees are: a worktree's `.git` points back into `repo/.git/worktrees/<id>`,
+so every worktree has to live under the same mount as `repo/`.
 
 Two details are load-bearing:
 
@@ -69,6 +111,31 @@ cannot inject anything — fires before every tool call and blocks the CLI until
 Paco answers. `decideApproval` decides: reads, in-worktree writes, and ordinary
 development commands proceed; destructive or out-of-tree actions raise a prompt
 in the chat and wait for the user.
+
+`Bash` is decided the same way `Write` is, rather than by pattern-matching the
+command string. The line is tokenized and split on control operators, and every
+write target is resolved against the worktree; anything the parse cannot
+statically understand asks. The command head must be on a short allowlist, and
+heads that take another program as an argument (`sh`, `python3`, `xargs`,
+`sudo`, `npx`, …) always ask, because half-checking one of those is precisely
+how the previous regex denylist failed.
+
+### What this does not stop
+
+The agent may write a file inside its worktree without asking and then run it —
+`node script.js`, `./scripts/x.sh` and `pnpm build` are all allowed, because
+that is the product. So a deliberately hostile agent can still reach the host
+in two steps, including overwriting the hook itself at
+`~/.paco/hooks/pre-tool-use.mjs`; the hook is verified once per turn, not once
+per step, and a turn is up to 500 steps.
+
+Nothing inside this process closes that, and it is worth being plain about why:
+the agent runs as the same OS user as Paco, so any protection Paco applies to
+its own files is protection the agent can remove. The real boundary is
+OS-level — a separate user, or running the CLI itself inside the container
+rather than on the host. What the current design buys is that the escape is no
+longer one unremarkable `Bash` call, and that both steps appear in the
+transcript.
 
 ## GitHub
 

@@ -36,7 +36,52 @@ Browser  ->  Next.js + durable workflow  ->  Claude Code (host)  ->  Docker sand
   cancelled.
 - **Work is tiered across models.** An Opus-class model orchestrates while
   Sonnet and Haiku subagents do the mechanical work, which is where most of the
-  token volume goes.
+  token volume goes. The roster of subagents — who they are, what model tier
+  and tools each gets — is editable per organisation in **Settings → Agents**.
+- **A second backend, chosen per chat.** A chat runs on the Claude Code CLI by
+  default, or on Poolside over ACP (`pool acp`) if you install that `pool`
+  binary yourself and configure it in **Settings → Models**. Memory, skills,
+  project instructions and plugin MCP servers all reach a Poolside turn, and it
+  resumes its own sessions and publishes its own model list. What it does not
+  take is Paco's effort setting — its thinking control has two positions where
+  Paco's picker has five, so the instruction is not passed on — or Paco's
+  subagent roster, and turns that need a schema-shaped answer (the task board's
+  review gate) cannot run there. The composer hides exactly the controls that
+  do not apply, so the trade is visible rather than silent.
+
+## Beyond one chat
+
+The same instance runs five things that outlive a single conversation. Each
+one is documented for operators in
+[docs/self-hosting.md](docs/self-hosting.md).
+
+- **A task board.** `/tasks` is an organisation-wide backlog. A task runs
+  unattended in its own chat and moves `todo → running → review → done`,
+  gated by a `reviewer` subagent that can send work back — twice, then it
+  blocks for a human. Hand it a large goal instead and a planner decomposes it
+  into a tree first.
+- **Schedules.** A cron expression, a session, and a goal: **Settings →
+  Schedules** files and starts a task on every tick. UTC, no catch-up for
+  missed windows, admin-only to create or run.
+- **Memory.** Notes distilled out of chat turns and fed back into later ones,
+  in three scopes — yours, the organisation's, and the project's. Plain
+  markdown you can read and edit in **Settings → Memory**. A daily reflection
+  pass looks for friction that repeats and *proposes* encoding it as a skill;
+  it never writes one itself.
+- **Design mode.** A per-message toggle in the composer that runs two or three
+  designer turns side by side, each in its own worktree and branch, each with
+  its own live preview URL — so you compare running alternatives instead of
+  one. Needs a preview domain configured; without one the candidates run but
+  there is nothing to look at.
+- **Plugins.** Third-party code, running in a separate hardened OS process,
+  that can contribute model-facing tools, receive session events, post
+  messages, create tasks, or accept an inbound webhook. Nothing is granted
+  until an admin reviews what the manifest asks for, capability by capability.
+  See
+  [docs/plugins.md](docs/plugins.md), which walks the first-party Slack
+  plugin — `@`-mention the bot and it files a task — end to end.
+  **Plugin workers require Node >= 24**; the packaged install bundles it, a
+  development checkout on an older Node does not.
 
 ## Installing
 
@@ -52,7 +97,14 @@ afterwards:
 
 - **Docker**, installed and started, and the service account put in the
   `docker` group. Chats run in containers, so this is not optional; the
-  installer does it rather than telling you to.
+  installer does it rather than telling you to. It has to be the ordinary
+  **rootful** daemon: a sandbox runs as the host's own uid and shares the
+  workspace directory with it, and a rootless daemon remaps every uid through
+  a user namespace, so the files it writes come back owned by an id the
+  service cannot read. Paco detects that and refuses rather than failing
+  halfway; if this host already runs Docker rootless, read
+  [docs/self-hosting.md](docs/self-hosting.md) §1 before installing — the
+  installer sees a working `docker` and will not replace it.
 - **PostgreSQL and nginx** as ordinary host packages. Postgres is reached over
   a Unix socket, with no TCP listener at all.
 - **Its own bundled Node and Claude Code CLI**, pinned — no system Node, no npm.
@@ -70,8 +122,9 @@ sudo paco auth
 
 Then open the URL it printed and create your account.
 
-**What it needs:** a Linux host running systemd, root access, and ports 80 and
-443 free — nginx owns both, and there's no flag to move them.
+**What it needs:** a Linux host running systemd, root access, ports 80 and
+443 free — nginx owns both, and there's no flag to move them — and, if Docker
+is already installed here, a rootful daemon rather than a rootless one.
 
 ### About the domain
 
@@ -166,7 +219,9 @@ A few things happen outside that flow:
 [docs/self-hosting.md](docs/self-hosting.md) covers the rest of what an
 operator needs: the file layout, upgrading, what `apt remove` keeps versus
 what `apt purge` destroys, the DNS records for the app and for previews, the
-full `paco` command reference, backup and restore, and troubleshooting.
+full `paco` command reference, backup and restore, every environment variable,
+one section each for plugins, memory, tasks, the agent roster, design mode,
+schedules and the Poolside backend, and troubleshooting.
 [docs/README.md](docs/README.md) indexes the rest of the documentation.
 
 ## Contributing

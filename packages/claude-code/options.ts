@@ -1,3 +1,9 @@
+import {
+  MCP_CONFIG_FLAG,
+  type McpServerSpec,
+  writeMcpConfigFile,
+} from "./mcp-config-file.ts";
+
 /**
  * Model tier used to route work.
  *
@@ -97,6 +103,25 @@ export interface ClaudeCodeOptions {
   settings?: Record<string, unknown>;
 
   /**
+   * MCP servers to expose to this session, keyed by server name.
+   *
+   * Written to a private `0600` file outside the user's repository and
+   * passed to `--mcp-config` by path — NOT inline, and not into
+   * `.claude/mcp.json`. Both halves of that matter and for different
+   * reasons: a file in the workspace would put Paco's configuration inside
+   * the user's repository and show up in their diff (the rationale
+   * {@link settings} gives), while inline JSON would put every server's
+   * `env` — bearer tokens included — into this process's argument vector,
+   * which `ps auxww` shows to every account on the machine and which the
+   * agent's own `Bash` tool can read. See `mcp-config-file.ts`.
+   *
+   * `--strict-mcp-config` (see {@link buildArgs}) is what makes this safe to
+   * add: only servers named here reach the session, never anything already
+   * configured on the host.
+   */
+  mcpServers?: Record<string, McpServerSpec>;
+
+  /**
    * Keep the CLI's built-in slash commands available.
    *
    * Normal turns disable them, which also disables `/compact` — the CLI
@@ -142,6 +167,12 @@ export function buildArgs(options: ClaudeCodeOptions): string[] {
 
   if (options.settings) {
     args.push("--settings", JSON.stringify(options.settings));
+  }
+
+  if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
+    // By path, never inline: see `ClaudeCodeOptions.mcpServers`. `run.ts`
+    // removes the file once the run is over (`cleanupMcpConfigFile`).
+    args.push(MCP_CONFIG_FLAG, writeMcpConfigFile(options.mcpServers));
   }
 
   if (options.model) {

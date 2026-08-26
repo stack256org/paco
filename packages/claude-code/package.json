@@ -10,12 +10,14 @@
     "./options.js": "./options.ts",
     "./run.js": "./run.ts",
     "./ui-stream.js": "./ui-stream.ts",
-    "./agent.js": "./agent.ts"
+    "./agent.js": "./agent.ts",
+    "./backend.js": "./backend.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@paco/agent-backend": "workspace:*",
     "ai": "catalog:"
   },
   "devDependencies": {

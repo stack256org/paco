@@ -4,9 +4,13 @@ import {
   Activity,
   ChartLine,
   ArrowLeft,
+  Bot,
+  Brain,
   Cable,
+  Clock,
   LogOut,
   Menu,
+  Puzzle,
   Settings as SettingsIcon,
   ShieldAlert,
   SlidersHorizontal,
@@ -100,6 +104,28 @@ const baseSidebarItems = [
     href: "/settings/usage",
     icon: ChartLine,
   },
+  {
+    /*
+     * Sits with the base items, not the admin-only ones below: every user
+     * has their own memory to read, edit, and delete here, even though the
+     * page's second section (organisation memory) is admin only.
+     */
+    id: "memory",
+    label: "Memory",
+    href: "/settings/memory",
+    icon: Brain,
+  },
+  {
+    /*
+     * Member-viewable like Memory: every member sees the organisation's
+     * cron schedules, even though creating, editing, and firing one is
+     * admin only (enforced in `./schedules/actions.ts`, not here).
+     */
+    id: "schedules",
+    label: "Schedules",
+    href: "/settings/schedules",
+    icon: Clock,
+  },
 ];
 
 /*
@@ -117,10 +143,27 @@ const adminSidebarItems = [
     icon: Users,
   },
   {
+    id: "agents",
+    label: "Agents",
+    href: "/settings/agents",
+    icon: Bot,
+  },
+  {
     id: "health",
     label: "Health",
     href: "/settings/health",
     icon: Activity,
+  },
+  {
+    /*
+     * Admin-only, like Agents and Health above: installing a plugin and
+     * granting it capabilities is an administrative act (`./plugins/actions.ts`
+     * enforces this itself, regardless of what this nav shows).
+     */
+    id: "plugins",
+    label: "Plugins",
+    href: "/settings/plugins",
+    icon: Puzzle,
   },
   {
     id: "admin",

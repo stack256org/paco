@@ -11,6 +11,7 @@ import {
 } from "drizzle-orm";
 import { db } from "./client";
 import {
+  type Chat,
   chatMessages,
   chatReads,
   chats,
@@ -480,6 +481,26 @@ export async function getChatById(chatId: string) {
 }
 
 /**
+ * Every chat whose owning session has not been archived.
+ *
+ * Backs the plugin event fan-out's (`lib/plugins/event-fanout.ts`)
+ * no-filter registration: a plugin host registered without an explicit
+ * `chatFilter` receives events for every chat still "live" in this sense,
+ * re-enumerated on each poll tick rather than cached, so a session archived
+ * mid-run drops out on the very next tick instead of lingering until the
+ * host restarts.
+ */
+export async function listActiveChatIds(): Promise<string[]> {
+  const rows = await db
+    .select({ id: chats.id })
+    .from(chats)
+    .innerJoin(sessions, eq(chats.sessionId, sessions.id))
+    .where(ne(sessions.status, "archived"));
+
+  return rows.map((row) => row.id);
+}
+
+/**
  * Get all chats for a session, ordered by most recent activity first.
  * Activity is tracked on chats.updatedAt and updated when new messages arrive.
  */
@@ -515,8 +536,11 @@ export async function getChatSummariesBySessionId(
       title: chats.title,
       modelId: chats.modelId,
       effort: chats.effort,
+      turnPolicy: chats.turnPolicy,
+      backend: chats.backend,
       activeStreamId: chats.activeStreamId,
       claudeSessionId: chats.claudeSessionId,
+      resumeTokens: chats.resumeTokens,
       lastAssistantMessageAt: chats.lastAssistantMessageAt,
       previewVisibility: chats.previewVisibility,
       previewSlug: chats.previewSlug,
@@ -590,29 +614,72 @@ export async function updateChatActiveStreamId(
 }
 
 /**
- * Read the Claude Code session backing this chat.
+ * Resolve which resume token a turn on `backend` should use, from a chat's
+ * per-backend `resumeTokens` map.
  *
- * Returns null on the first turn, which tells the caller to create a session
- * rather than resume one.
+ * `chats.backend` is a mutable, per-chat choice, and each backend's resume
+ * token means something only to that backend's own session store — Claude
+ * Code's `--resume` id and Poolside's `pool` session id are not
+ * interchangeable (handing one to the other backend either fails outright
+ * or, worse, resumes the wrong conversation). Reading the token under the
+ * *current* backend's key, rather than one shared column, is what makes
+ * switching a chat's backend and switching it back resume correctly on both
+ * sides instead of one clobbering the other.
+ *
+ * A key for a backend that no longer exists is never resurrected here: it
+ * is deleted from the map by migration (0015 did this for the removed
+ * `"openfx"` key), so this only ever answers for backends that can run.
+ *
+ * Falls back to the legacy single-column `claudeSessionId` only for
+ * `"claude-code"`, and only when `resumeTokens` has nothing under that key
+ * — the shape of a row written before this column existed. Migration 0012
+ * backfills it, so this fallback only ever matters for a row that backfill
+ * missed; nothing writes to `claudeSessionId` anymore (see
+ * `setChatResumeToken`).
+ *
+ * Pure and DB-free on purpose: given a chat row (already fetched by the
+ * caller — this reads nothing itself), it just answers "what does this
+ * backend resume from". Returns `undefined`, not `null`, to match
+ * `TurnContext.resumeToken`'s own optional-string shape (`AgentBackend`'s
+ * `interface.ts`) — the field callers actually spread this into.
  */
-export async function getChatClaudeSessionId(
-  chatId: string,
-): Promise<string | null> {
-  const [row] = await db
-    .select({ claudeSessionId: chats.claudeSessionId })
-    .from(chats)
-    .where(eq(chats.id, chatId))
-    .limit(1);
-
-  return row?.claudeSessionId ?? null;
+export function resolveChatResumeToken(
+  chat: Pick<Chat, "resumeTokens" | "claudeSessionId">,
+  backend: string,
+): string | undefined {
+  const scoped = chat.resumeTokens[backend];
+  if (scoped) {
+    return scoped;
+  }
+  if (backend === "claude-code" && chat.claudeSessionId) {
+    return chat.claudeSessionId;
+  }
+  return undefined;
 }
 
-/** Persist the Claude Code session id so later turns can resume it. */
-export async function setChatClaudeSessionId(
+/**
+ * Persist this turn's resume token under the backend that produced it.
+ *
+ * A jsonb merge (Postgres's `||` operator on two jsonb objects, shallow,
+ * right side wins) rather than a read-modify-write from the caller's own
+ * in-memory copy of `resumeTokens`: two writes racing — a steer/queue
+ * continuation, a retried workflow step — must not have the second one
+ * overwrite the whole map from a copy that predates the first write and
+ * silently drop its key.
+ */
+export async function setChatResumeToken(
   chatId: string,
-  claudeSessionId: string,
-) {
-  await db.update(chats).set({ claudeSessionId }).where(eq(chats.id, chatId));
+  backend: string,
+  resumeToken: string,
+): Promise<void> {
+  await db
+    .update(chats)
+    .set({
+      resumeTokens: sql`${chats.resumeTokens} || ${JSON.stringify({
+        [backend]: resumeToken,
+      })}::jsonb`,
+    })
+    .where(eq(chats.id, chatId));
 }
 
 /**

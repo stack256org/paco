@@ -39,3 +39,25 @@ export const FORK_CONVERSATION_CONFIRM: DestructiveConfirmRequest = {
   destructive: false,
   title: "Fork this conversation?",
 };
+
+/**
+ * Reverting a turn restores the whole worktree to the snapshot taken just
+ * before it ran (`refs/paco/turns/<chatId>/<turnId>`), so it is a state, not a
+ * patch: everything after that instant goes with it.
+ *
+ * Two things this has to say that the old wording did not, both consequences
+ * of turns no longer auto-committing. It discards **staged** work, because the
+ * restore replaces the index as well as the tree — and staging is now
+ * deliberate, so silently throwing it away would be the worst surprise here.
+ * And it cannot touch **commits**: the branch never moves, so anything already
+ * committed survives. That second half is the reassuring one and belongs in
+ * the dialog for the same reason the file's header gives — a warning that only
+ * says "this cannot be undone" makes someone anxious without telling them what
+ * they are actually risking.
+ */
+export const REVERT_TURN_CONFIRM: DestructiveConfirmRequest = {
+  confirmLabel: "Revert this turn",
+  description:
+    "Your files go back to exactly how they were just before this turn ran. Every change made since is discarded — by the agent and by you — including anything you have staged in Changes but not yet committed. Commits are safe: anything you already committed stays, and this cannot reach it. The turn itself stays in the transcript. This cannot be undone.",
+  title: "Revert this turn?",
+};

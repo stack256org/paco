@@ -19,9 +19,9 @@ import {
 import {
   ProviderIcon,
   getProviderFromModelId,
-  getProviderDisplayName,
   stripProviderPrefix,
 } from "@/components/provider-icons";
+import { groupModelsByProvider } from "@/lib/model-provider-groups";
 
 interface ModelComboboxItem {
   id: string;
@@ -47,37 +47,6 @@ interface ModelComboboxProps {
   onChange: (value: string) => void;
 }
 
-/** Providers pinned to the top. */
-const PRIORITY_PROVIDERS = ["anthropic", "openai"];
-
-function groupByProvider(items: ModelComboboxItem[]) {
-  const groups: Record<string, ModelComboboxItem[]> = {};
-  const providers: string[] = [];
-  for (const item of items) {
-    const provider = item.provider ?? getProviderFromModelId(item.id);
-    if (!groups[provider]) {
-      groups[provider] = [];
-      providers.push(provider);
-    }
-    groups[provider].push(item);
-  }
-
-  providers.sort((a, b) => {
-    const aIdx = PRIORITY_PROVIDERS.indexOf(a);
-    const bIdx = PRIORITY_PROVIDERS.indexOf(b);
-    if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
-    if (aIdx !== -1) return -1;
-    if (bIdx !== -1) return 1;
-    return a.localeCompare(b);
-  });
-
-  return providers.map((provider) => ({
-    provider,
-    label: getProviderDisplayName(provider),
-    options: groups[provider],
-  }));
-}
-
 export function ModelCombobox({
   value,
   items,
@@ -99,7 +68,7 @@ export function ModelCombobox({
     ? stripProviderPrefix(selectedItem.label, selectedProvider ?? "")
     : placeholder;
 
-  const groups = useMemo(() => groupByProvider(items), [items]);
+  const groups = useMemo(() => groupModelsByProvider(items), [items]);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>

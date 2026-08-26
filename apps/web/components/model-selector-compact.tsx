@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckIcon, ChevronDown } from "lucide-react";
+import { ChevronDown, TriangleAlert } from "lucide-react";
 import type { ModelOption } from "@/lib/model-options";
-import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
 import { cn } from "@/lib/utils";
 import {
   Popover,
@@ -13,11 +12,10 @@ import {
 import {
   Command,
   CommandEmpty,
-  CommandGroup,
   CommandInput,
-  CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { ModelOptionList } from "@/components/model-option-list";
 import { ProviderIcon } from "@/components/provider-icons";
 
 interface ModelSelectorCompactProps {
@@ -91,7 +89,24 @@ export function ModelSelectorCompact({
   };
 
   const selectedOption = modelOptions.find((option) => option.id === value);
+  /*
+   * The value is not one of the options — the chat holds a model this
+   * backend does not accept.
+   *
+   * The row's data is reconciled where it is written (the chat PATCH route
+   * moves a stranded `modelId` onto the new backend's default), so this is
+   * the belt to that braces: whatever reaches the trigger, it must not read
+   * as a working selection. The raw id is still shown rather than nothing —
+   * "opus" tells you what is wrong, an empty button does not — but it is
+   * shown as a warning, with the provider icon replaced (a Claude glyph
+   * beside "opus" on a Poolside chat is precisely the lie being fixed) and
+   * the tooltip saying so.
+   */
+  const isUnavailableSelection = selectedOption === undefined;
   const displayText = selectedOption?.shortLabel ?? value;
+  const triggerTitle = isUnavailableSelection
+    ? `${value} isn't available on this backend — pick a model (⌘⌥/)`
+    : "Change model (⌘⌥/)";
 
   return (
     <Popover
@@ -107,12 +122,26 @@ export function ModelSelectorCompact({
         <button
           type="button"
           disabled={disabled}
-          aria-label="Change model"
+          // The warning is carried by colour and an icon, so the accessible
+          // name has to carry it too — a screen reader otherwise hears
+          // "Change model, opus" and nothing about why it is flagged.
+          aria-label={
+            isUnavailableSelection
+              ? `Change model — ${value} isn't available on this backend`
+              : "Change model"
+          }
           aria-keyshortcuts="Meta+Alt+/"
-          title="Change model (⌘⌥/)"
-          className="flex min-w-0 shrink items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-base-content/60 transition-colors hover:bg-base-content/5 hover:text-base-content/70 disabled:pointer-events-none disabled:opacity-60"
+          title={triggerTitle}
+          className={cn(
+            "flex min-w-0 shrink items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm transition-colors hover:bg-base-content/5 disabled:pointer-events-none disabled:opacity-60",
+            isUnavailableSelection
+              ? "text-warning hover:text-warning"
+              : "text-base-content/60 hover:text-base-content/70",
+          )}
         >
-          {selectedOption && (
+          {isUnavailableSelection ? (
+            <TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" />
+          ) : (
             <ProviderIcon
               provider={selectedOption.provider}
               className="size-3.5 shrink-0"
@@ -143,33 +172,11 @@ export function ModelSelectorCompact({
           />
           <CommandList>
             <CommandEmpty>No models found.</CommandEmpty>
-            <CommandGroup heading="Anthropic">
-              {modelOptions.map((option) => (
-                <CommandItem
-                  key={option.id}
-                  value={`${option.label} ${option.id}`}
-                  onSelect={() => handleSelect(option.id)}
-                  className="flex items-center"
-                >
-                  <ProviderIcon
-                    provider={option.provider}
-                    className="mr-1.5 size-3.5 shrink-0 opacity-70"
-                  />
-                  <span className="min-w-0 truncate">{option.shortLabel}</span>
-                  {option.id === APP_DEFAULT_MODEL_ID && (
-                    <span className="ml-auto shrink-0 text-xs text-base-content/60">
-                      default
-                    </span>
-                  )}
-                  <CheckIcon
-                    className={cn(
-                      "ml-auto size-4 shrink-0",
-                      value === option.id ? "opacity-100" : "opacity-0",
-                    )}
-                  />
-                </CommandItem>
-              ))}
-            </CommandGroup>
+            <ModelOptionList
+              onSelect={handleSelect}
+              options={modelOptions}
+              value={value}
+            />
           </CommandList>
         </Command>
       </PopoverContent>

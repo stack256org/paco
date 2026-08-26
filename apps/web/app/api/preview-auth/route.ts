@@ -136,8 +136,8 @@ export async function GET(req: NextRequest) {
   }
 
   const settings = await readInstanceSettings();
-  const slug = previewSlugFromHost(forwardedHost, settings.previewBaseDomain);
-  if (!slug) {
+  const label = previewSlugFromHost(forwardedHost, settings.previewBaseDomain);
+  if (!label) {
     return deny();
   }
 
@@ -154,7 +154,7 @@ export async function GET(req: NextRequest) {
 
   let chat: Awaited<ReturnType<typeof findChatOwnerByPreviewSlug>>;
   try {
-    chat = await findChatOwnerByPreviewSlug(slug);
+    chat = await findChatOwnerByPreviewSlug(label);
   } catch {
     // The auth check itself failing must fail closed, not leak a stack
     // trace to an unauthenticated caller or — worse — let a thrown error

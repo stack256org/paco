@@ -18,6 +18,15 @@ import {
 } from "@/lib/sandbox/utils";
 import { readInstanceSettings } from "@/lib/settings/instance-settings";
 
+async function pathExists(candidatePath: string): Promise<boolean> {
+  try {
+    await fs.access(candidatePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Reconcile nginx's preview routing against every session with a live
  * sandbox — the replacement for Traefik's Docker-label auto-discovery.
@@ -53,12 +62,86 @@ import { readInstanceSettings } from "@/lib/settings/instance-settings";
 const NGINX_CONF_DIR = "/etc/paco/nginx";
 const FILE_PREFIX = "paco-preview-";
 
+/**
+ * nginx's own binary, and the exact path the sudoers rule `postinst` installs
+ * authorises. Named once so the probe below and the `nginx -t` call at the
+ * bottom of this file cannot drift apart: when the probe says "there is an
+ * nginx on this host", it means the very binary `syncPreviewRoutes` is
+ * permitted to test and reload, not some other nginx on `PATH`.
+ */
+const NGINX_BINARY = "/usr/sbin/nginx";
+
+/**
+ * Whether this host has the nginx preview stack `syncPreviewRoutes` needs.
+ *
+ * - `ready` — reconcile normally. Everything that fails from here on is a
+ *   genuine fault and must be reported every time it happens.
+ * - `not-installed` — there is no nginx here at all: a development checkout,
+ *   or macOS. Nothing to reconcile, ever, in this process.
+ * - `incomplete` — nginx is here but Paco's own config directory is not. That
+ *   is a broken packaged install, not an environment without previews.
+ */
+export type PreviewStackStatus =
+  | { kind: "ready" }
+  | { kind: "not-installed"; reason: string }
+  | { kind: "incomplete"; reason: string };
+
+/**
+ * The decision, separated from the two `fs.access` calls that feed it.
+ *
+ * Two signals, because one cannot tell the two failure modes apart:
+ *
+ * - **The nginx binary.** The package depends on nginx and the sudoers rule
+ *   names `/usr/sbin/nginx` by absolute path, so no packaged install can
+ *   exist without it. Its absence is positive proof this is not a machine
+ *   that serves previews — the dev-checkout and macOS case.
+ * - **`/etc/paco/nginx`.** `postinst` creates it (see this file's header for
+ *   why previews live there rather than in `/etc/nginx/conf.d`). nginx being
+ *   installed while it is missing means the package is half-installed.
+ *
+ * Note what is deliberately *not* consulted: whether the directory is
+ * writable. A `/etc/paco/nginx` that exists but is root-owned is exactly the
+ * broken packaged install an operator must hear about, so it classifies as
+ * `ready` and lets the write fail loudly on every sweep. Folding "cannot
+ * write there" into "this environment has no previews" is the bug this whole
+ * probe exists to avoid.
+ */
+export function classifyPreviewStack(probe: {
+  nginxBinary: boolean;
+  confDir: boolean;
+}): PreviewStackStatus {
+  if (!probe.nginxBinary) {
+    return {
+      kind: "not-installed",
+      reason: `no nginx on this host (${NGINX_BINARY} does not exist), so there are no preview routes to reconcile — expected on a development checkout or on macOS, where previews are not served at all`,
+    };
+  }
+
+  if (!probe.confDir) {
+    return {
+      kind: "incomplete",
+      reason: `nginx is installed but ${NGINX_CONF_DIR} does not exist — the package's postinst creates it, so previews cannot be routed until it is restored (\`sudo apt install --reinstall paco\`)`,
+    };
+  }
+
+  return { kind: "ready" };
+}
+
+/** `classifyPreviewStack` against this host's filesystem. */
+export async function previewStackStatus(): Promise<PreviewStackStatus> {
+  const [nginxBinary, confDir] = await Promise.all([
+    pathExists(NGINX_BINARY),
+    pathExists(NGINX_CONF_DIR),
+  ]);
+  return classifyPreviewStack({ nginxBinary, confDir });
+}
+
 interface ActivePreviewRoute {
   hostname: string;
   upstreamPort: number;
 }
 
-async function collectActivePreviewRoutes(
+export async function collectActivePreviewRoutes(
   previewBaseDomain: string | null,
 ): Promise<ActivePreviewRoute[]> {
   const sessions = (await getSessionsWithActiveSandbox()).filter((session) =>
@@ -70,6 +153,7 @@ async function collectActivePreviewRoutes(
   }
 
   const portsByContainer = await listSandboxPreviewPorts(PREVIEW_PORT);
+
   const routes: ActivePreviewRoute[] = [];
 
   for (const session of sessions) {
@@ -96,11 +180,9 @@ async function collectActivePreviewRoutes(
     }
 
     const hostname = previewHostname(previewChat.id, previewBaseDomain);
-    if (!hostname) {
-      continue;
+    if (hostname) {
+      routes.push({ hostname, upstreamPort });
     }
-
-    routes.push({ hostname, upstreamPort });
   }
 
   return routes;
@@ -225,7 +307,7 @@ export async function syncPreviewRoutes(): Promise<void> {
   // Gated: nginx is never reloaded with a config that fails its own test,
   // and never left holding one either — a failure here restores exactly
   // what was in place before this function ran.
-  const test = await runHostCommand("sudo", ["-n", "/usr/sbin/nginx", "-t"]);
+  const test = await runHostCommand("sudo", ["-n", NGINX_BINARY, "-t"]);
   if (!test.ok) {
     await restore(backup);
     throw new Error(

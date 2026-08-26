@@ -45,9 +45,7 @@ const spies = {
     }),
   ),
   computeAndCacheDiff: mock(() => Promise.resolve()),
-  performAutoCommit: mock(() =>
-    Promise.resolve({ committed: true, pushed: true }),
-  ),
+  snapshotTurn: mock(() => Promise.resolve({ sha: "snap1", dirty: true })),
   performAutoCreatePr: mock(() =>
     Promise.resolve({ created: true, syncedExisting: false, skipped: false }),
   ),
@@ -88,12 +86,46 @@ mock.module("@/lib/diff/compute-diff", () => ({
   computeAndCacheDiff: spies.computeAndCacheDiff,
 }));
 
-mock.module("@/lib/chat/auto-commit-direct", () => ({
-  performAutoCommit: spies.performAutoCommit,
+mock.module("@/lib/git/checkpoint", () => ({
+  snapshotTurn: spies.snapshotTurn,
 }));
 
 mock.module("@/lib/chat/auto-pr-direct", () => ({
   performAutoCreatePr: spies.performAutoCreatePr,
+}));
+
+let distillTurnResult: Promise<void> | Error = Promise.resolve();
+
+const distillTurnSpy = mock(() => {
+  if (distillTurnResult instanceof Error) {
+    return Promise.reject(distillTurnResult);
+  }
+  return distillTurnResult;
+});
+
+mock.module("@/lib/memory/distill", () => ({
+  distillTurn: distillTurnSpy,
+}));
+
+let taskByChatIdResult: unknown;
+const getTaskByChatIdSpy = mock(() => Promise.resolve(taskByChatIdResult));
+const transitionTaskStatusSpy = mock(() => Promise.resolve({}));
+
+mock.module("@/lib/db/tasks", () => ({
+  getTaskByChatId: getTaskByChatIdSpy,
+  transitionTaskStatus: transitionTaskStatusSpy,
+}));
+
+let reviewerGateResult: Promise<string> | Error = Promise.resolve("pass");
+const runReviewerGateSpy = mock(() => {
+  if (reviewerGateResult instanceof Error) {
+    return Promise.reject(reviewerGateResult);
+  }
+  return reviewerGateResult;
+});
+
+mock.module("@/lib/tasks/reviewer-gate", () => ({
+  runReviewerGate: runReviewerGateSpy,
 }));
 
 const {
@@ -103,9 +135,11 @@ const {
   persistSandboxState,
   clearActiveStream,
   refreshDiffCache,
-  hasAutoCommitChangesStep,
-  runAutoCommitStep,
+  hasCommitsToProposeStep,
   runAutoCreatePrStep,
+  runTurnSnapshotStep,
+  distillTurnMemoryStep,
+  runTaskCompletionStep,
 } = await import("./chat-post-finish");
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -143,6 +177,13 @@ beforeEach(() => {
   createChatMessageIfNotExistsResult = { id: "msg-1" };
   isFirstChatMessageResult = false;
   upsertChatMessageScopedResult = { status: "inserted" };
+  distillTurnSpy.mockClear();
+  distillTurnResult = Promise.resolve();
+  getTaskByChatIdSpy.mockClear();
+  transitionTaskStatusSpy.mockClear();
+  runReviewerGateSpy.mockClear();
+  taskByChatIdResult = undefined;
+  reviewerGateResult = Promise.resolve("pass");
 });
 
 // ─── persistUserMessage ────────────────────────────────────────────
@@ -367,92 +408,121 @@ describe("refreshDiffCache", () => {
   });
 });
 
-// ─── hasAutoCommitChangesStep ───────────────────────────────────────
+// ─── runTurnSnapshotStep ───────────────────────────────────────────
 
-describe("hasAutoCommitChangesStep", () => {
-  test("returns false when git status is clean", async () => {
+const SANDBOX_STATE = {
+  type: "docker",
+  sandboxName: "session_session-1",
+} as never;
+
+describe("runTurnSnapshotStep", () => {
+  test("snapshots the chat's worktree under the turn's id", async () => {
+    await runTurnSnapshotStep({
+      sandboxState: SANDBOX_STATE,
+      chatId: "chat-1",
+      turnId: "turn-9",
+    });
+
+    expect(spies.snapshotTurn).toHaveBeenCalledTimes(1);
+    const call = spies.snapshotTurn.mock.calls.at(-1) as unknown[];
+    // The chat's worktree, never the session repository: the branch and the
+    // work are in the worktree, and the repository would answer for the
+    // default branch instead — silently, and with nothing in it.
+    expect(call[1]).toBe("/tmp/paco-workspaces/session_session-1/chats/chat-1");
+    expect(call[2]).toBe("chat-1");
+    expect(call[3]).toBe("turn-9");
+  });
+
+  test("never throws: a turn that worked must not be reported as failed", async () => {
+    spies.snapshotTurn.mockImplementationOnce(() =>
+      Promise.reject(new Error("git exploded")),
+    );
+
+    await runTurnSnapshotStep({
+      sandboxState: SANDBOX_STATE,
+      chatId: "chat-1",
+      turnId: "turn-9",
+    });
+  });
+});
+
+// ─── hasCommitsToProposeStep ───────────────────────────────────────
+
+describe("hasCommitsToProposeStep", () => {
+  test("true when the branch is ahead of the remote base", async () => {
     sandboxExec.mockImplementationOnce(() =>
-      Promise.resolve({ success: true, stdout: "" }),
+      Promise.resolve({ success: true, stdout: "3\n" }),
     );
 
     await expect(
-      hasAutoCommitChangesStep({
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
         chatId: "chat-1",
-        sandboxState: {
-          type: "docker",
-          sandboxName: "session_session-1",
-        } as never,
+        baseBranch: "main",
+      }),
+    ).resolves.toBe(true);
+  });
+
+  test("false when nothing has been committed — the ordinary case now", async () => {
+    sandboxExec.mockImplementationOnce(() =>
+      Promise.resolve({ success: true, stdout: "0\n" }),
+    );
+
+    await expect(
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
+        chatId: "chat-1",
+        baseBranch: "main",
       }),
     ).resolves.toBe(false);
   });
 
-  test("falls back to true when preflight fails", async () => {
-    sandboxExec.mockImplementationOnce(() =>
+  test("falls back to the local base when the branch was never pushed", async () => {
+    // `origin/main` does not exist, so the first count fails; the local
+    // `main` answers instead rather than the step reporting "no commits".
+    sandboxExec
+      .mockImplementationOnce(() =>
+        Promise.resolve({ success: false, stdout: "" }),
+      )
+      .mockImplementationOnce(() =>
+        Promise.resolve({ success: true, stdout: "2\n" }),
+      );
+
+    await expect(
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
+        chatId: "chat-1",
+        baseBranch: "main",
+      }),
+    ).resolves.toBe(true);
+  });
+
+  test("errs towards not proposing when git cannot be read at all", async () => {
+    sandboxExec.mockImplementation(() =>
       Promise.resolve({ success: false, stdout: "" }),
     );
 
     await expect(
-      hasAutoCommitChangesStep({
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
         chatId: "chat-1",
-        sandboxState: {
-          type: "docker",
-          sandboxName: "session_session-1",
-        } as never,
+        baseBranch: "main",
       }),
-    ).resolves.toBe(true);
-  });
-});
+    ).resolves.toBe(false);
 
-// ─── runAutoCommitStep ─────────────────────────────────────────────
-
-describe("runAutoCommitStep", () => {
-  test("connects sandbox and performs auto-commit", async () => {
-    await runAutoCommitStep({
-      userId: "user-1",
-      sessionId: "session-1",
-      chatId: "chat-1",
-      sessionTitle: "My session",
-      push: true,
-      repoOwner: "acme",
-      repoName: "repo",
-      sandboxState: {
-        type: "docker",
-        sandboxName: "session_session-1",
-      } as never,
-    });
-
-    expect(spies.connectSandbox).toHaveBeenCalledTimes(1);
-    expect(spies.performAutoCommit).toHaveBeenCalledTimes(1);
-    expect(spies.performAutoCommit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: "user-1",
-        sessionId: "session-1",
-        sessionTitle: "My session",
-        push: true,
-        repoOwner: "acme",
-        repoName: "repo",
-      }),
+    sandboxExec.mockImplementation(() =>
+      Promise.resolve({ success: true, stdout: " M file.ts\n" }),
     );
   });
 
-  test("does not throw on error", async () => {
-    spies.performAutoCommit.mockImplementationOnce(() =>
-      Promise.reject(new Error("Git error")),
-    );
-
-    await runAutoCommitStep({
-      userId: "user-1",
-      sessionId: "session-1",
-      chatId: "chat-1",
-      sessionTitle: "My session",
-      push: true,
-      repoOwner: "acme",
-      repoName: "repo",
-      sandboxState: {
-        type: "docker",
-        sandboxName: "session_session-1",
-      } as never,
-    });
+  test("refuses a base branch name that is not one", async () => {
+    await expect(
+      hasCommitsToProposeStep({
+        sandboxState: SANDBOX_STATE,
+        chatId: "chat-1",
+        baseBranch: "main;rm -rf /",
+      }),
+    ).resolves.toBe(false);
   });
 });
 
@@ -503,5 +573,190 @@ describe("runAutoCreatePrStep", () => {
         sandboxName: "session_session-1",
       } as never,
     });
+  });
+});
+
+// ─── distillTurnMemoryStep ─────────────────────────────────────────
+
+describe("distillTurnMemoryStep", () => {
+  test("starts distillation with the given params", async () => {
+    await distillTurnMemoryStep({
+      chatId: "chat-1",
+      sessionRepoDir: "/tmp/repo",
+      userId: "user-1",
+      turnId: "turn-1",
+    });
+
+    expect(distillTurnSpy).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      sessionRepoDir: "/tmp/repo",
+      userId: "user-1",
+      turnId: "turn-1",
+    });
+  });
+
+  test("awaits distillTurn before resolving", async () => {
+    let resolveDistill: () => void = () => undefined;
+    distillTurnResult = new Promise<void>((resolve) => {
+      resolveDistill = resolve;
+    });
+
+    let stepResolved = false;
+    const stepPromise = distillTurnMemoryStep({
+      chatId: "chat-1",
+      sessionRepoDir: "/tmp/repo",
+      userId: "user-1",
+      turnId: "turn-1",
+    }).then(() => {
+      stepResolved = true;
+    });
+
+    // Flush pending microtasks: distillTurn is still pending, so the step
+    // must not have resolved yet — it awaits distillTurn, it doesn't fire
+    // and walk away.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(stepResolved).toBe(false);
+
+    resolveDistill();
+    await stepPromise;
+
+    expect(stepResolved).toBe(true);
+    expect(distillTurnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not throw when distillTurn rejects, and still awaits it", async () => {
+    distillTurnResult = new Error("Distillation backend unavailable");
+
+    await expect(
+      distillTurnMemoryStep({
+        chatId: "chat-1",
+        sessionRepoDir: "/tmp/repo",
+        userId: "user-1",
+        turnId: "turn-1",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(distillTurnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("resolves via the timeout guard when distillTurn hangs", async () => {
+    // Never resolves — stands in for a hung CLI process.
+    distillTurnResult = new Promise<void>(() => undefined);
+
+    const originalSetTimeout = globalThis.setTimeout;
+    const fakeSetTimeout = mock(
+      (callback: () => void): ReturnType<typeof setTimeout> => {
+        // Fire immediately rather than waiting the real 90s, so the test
+        // exercises the timeout branch without a 90s-long test.
+        callback();
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      },
+    );
+    globalThis.setTimeout = fakeSetTimeout as unknown as typeof setTimeout;
+
+    try {
+      await expect(
+        distillTurnMemoryStep({
+          chatId: "chat-1",
+          sessionRepoDir: "/tmp/repo",
+          userId: "user-1",
+          turnId: "turn-1",
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    expect(fakeSetTimeout).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── runTaskCompletionStep ─────────────────────────────────────────
+
+describe("runTaskCompletionStep", () => {
+  test("leaves a chat with no task untouched", async () => {
+    taskByChatIdResult = undefined;
+
+    await runTaskCompletionStep({
+      chatId: "chat-1",
+      isError: false,
+      finishReason: "stop",
+    });
+
+    expect(getTaskByChatIdSpy).toHaveBeenCalledWith("chat-1");
+    expect(transitionTaskStatusSpy).not.toHaveBeenCalled();
+    expect(runReviewerGateSpy).not.toHaveBeenCalled();
+  });
+
+  test("fails the task outright when the turn errored", async () => {
+    taskByChatIdResult = {
+      id: "task-1",
+      organizationId: "org-1",
+      status: "running",
+    };
+
+    await runTaskCompletionStep({
+      chatId: "chat-1",
+      isError: true,
+      finishReason: "error: the model refused",
+    });
+
+    expect(transitionTaskStatusSpy).toHaveBeenCalledWith(
+      "org-1",
+      "task-1",
+      "failed",
+      { resultSummary: "error: the model refused" },
+    );
+    expect(runReviewerGateSpy).not.toHaveBeenCalled();
+  });
+
+  test("routes a clean finish through the reviewer gate", async () => {
+    const task = {
+      id: "task-1",
+      organizationId: "org-1",
+      status: "running",
+    };
+    taskByChatIdResult = task;
+
+    await runTaskCompletionStep({
+      chatId: "chat-1",
+      isError: false,
+      finishReason: "stop",
+    });
+
+    expect(runReviewerGateSpy).toHaveBeenCalledWith(task, "chat-1");
+    expect(transitionTaskStatusSpy).not.toHaveBeenCalled();
+  });
+
+  test("does not throw when the reviewer gate rejects", async () => {
+    taskByChatIdResult = {
+      id: "task-1",
+      organizationId: "org-1",
+      status: "running",
+    };
+    reviewerGateResult = new Error("reviewer gate exploded");
+
+    await expect(
+      runTaskCompletionStep({
+        chatId: "chat-1",
+        isError: false,
+        finishReason: "stop",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("does not throw when the lookup itself fails", async () => {
+    getTaskByChatIdSpy.mockImplementationOnce(() =>
+      Promise.reject(new Error("DB down")),
+    );
+
+    await expect(
+      runTaskCompletionStep({
+        chatId: "chat-1",
+        isError: false,
+        finishReason: "stop",
+      }),
+    ).resolves.toBeUndefined();
   });
 });

@@ -5,6 +5,10 @@ import { type Checkpoint, createCheckpoint } from "@/lib/git/checkpoint";
 /**
  * Take a restore point for the turn that is about to run.
  *
+ * The post-turn counterpart is `runTurnSnapshotStep` in `chat-post-finish.ts`;
+ * both write commit objects under `refs/paco/turns/<chatId>/` and neither
+ * touches the branch, the index, or the working tree.
+ *
  * A workflow step because it touches the sandbox and `node:path`, neither of
  * which the workflow function itself can reach.
  *

@@ -1,6 +1,7 @@
 "use client";
 
 import type { UseChatHelpers } from "@ai-sdk/react";
+import type { BackendCapabilities } from "@paco/agent-backend";
 import {
   createContext,
   type ReactNode,
@@ -98,6 +99,13 @@ function resolveContextLimitForModel(
 type SessionChatContextValue = {
   session: Session;
   chatInfo: Chat;
+  /**
+   * What `chatInfo.backend` actually supports — computed server-side
+   * (`capabilitiesForBackend`, threaded down via the chat bootstrap payload
+   * in `page.tsx`, and refreshed from every `updateChatBackend` response) so
+   * the UI never hardcodes a backend id to decide what to show.
+   */
+  chatCapabilities: BackendCapabilities;
   chat: UseChatHelpers<WebAgentUIMessage>;
   contextLimit: number | null;
   stopChatStream: () => void;
@@ -112,6 +120,8 @@ type SessionChatContextValue = {
   updateChatModel: (modelId: string) => Promise<void>;
   /** Reasoning effort for this chat; null uses the model's own default. */
   updateChatEffort: (effort: EffortSelection) => Promise<void>;
+  /** Which `AgentBackend` this chat's turns run on (`chats.backend`). */
+  updateChatBackend: (backend: string) => Promise<void>;
   /** Whether the chat had persisted messages when it was loaded */
   hadInitialMessages: boolean;
   /** The initial message snapshot used for SSR hydration */
@@ -228,6 +238,7 @@ type SessionChatMetadataContextValue = Pick<
   SessionChatContextValue,
   | "session"
   | "chatInfo"
+  | "chatCapabilities"
   | "setSandboxInfo"
   | "clearSandboxInfo"
   | "archiveSession"
@@ -235,6 +246,7 @@ type SessionChatMetadataContextValue = Pick<
   | "updateSessionTitle"
   | "updateChatModel"
   | "updateChatEffort"
+  | "updateChatBackend"
   | "hasRuntimeSandboxState"
   | "hasPausedWorkspace"
   | "reconnectionStatus"
@@ -267,6 +279,12 @@ const sandboxInfoCache = new Map<string, SandboxInfo>();
 type SessionChatProviderProps = {
   session: Session;
   chat: Chat;
+  /**
+   * Computed server-side from `chat.backend` (`capabilitiesForBackend` in
+   * `page.tsx`) — the chat bootstrap payload capability-driven UI reads,
+   * rather than the client re-deriving it from a backend id.
+   */
+  initialCapabilities: BackendCapabilities;
   initialMessages: WebAgentUIMessage[];
   initialModelOptions: ModelOption[];
   children: ReactNode;
@@ -279,6 +297,7 @@ interface SessionsResponse {
 export function SessionChatProvider({
   session: initialSession,
   chat: initialChat,
+  initialCapabilities,
   initialMessages,
   initialModelOptions,
   children,
@@ -292,6 +311,8 @@ export function SessionChatProvider({
     setSessionRecord,
   });
   const [chatInfo, setChatInfo] = useState<Chat>(initialChat);
+  const [chatCapabilities, setChatCapabilities] =
+    useState<BackendCapabilities>(initialCapabilities);
   const [hasPausedWorkspaceState, setHasPausedWorkspaceState] =
     useState<boolean>(
       !hasRuntimeSandboxStateValue(initialSession.sandboxState) &&
@@ -917,7 +938,11 @@ export function SessionChatProvider({
   );
 
   const patchChat = useCallback(
-    async (patch: { modelId?: string; effort?: EffortSelection }) => {
+    async (patch: {
+      modelId?: string;
+      effort?: EffortSelection;
+      backend?: string;
+    }) => {
       const res = await fetch(
         `/api/sessions/${sessionRecord.id}/chats/${chatInfo.id}`,
         {
@@ -927,12 +952,23 @@ export function SessionChatProvider({
         },
       );
 
-      const data = (await res.json()) as { chat?: Chat; error?: string };
+      const data = (await res.json()) as {
+        chat?: Chat & { capabilities?: BackendCapabilities };
+        error?: string;
+      };
       if (!res.ok || !data.chat) {
         throw new Error(data.error ?? "Failed to update chat");
       }
 
-      setChatInfo(data.chat);
+      const { capabilities, ...nextChatInfo } = data.chat;
+      setChatInfo(nextChatInfo);
+      // Present on every response (the route always attaches it), but
+      // narrowed defensively rather than asserted: an older cached response
+      // shape must not wipe out the capabilities a backend switch is what
+      // this callback exists to keep in sync.
+      if (capabilities) {
+        setChatCapabilities(capabilities);
+      }
     },
     [sessionRecord.id, chatInfo.id],
   );
@@ -944,6 +980,11 @@ export function SessionChatProvider({
 
   const updateChatEffort = useCallback(
     (effort: EffortSelection) => patchChat({ effort }),
+    [patchChat],
+  );
+
+  const updateChatBackend = useCallback(
+    (backend: string) => patchChat({ backend }),
     [patchChat],
   );
 
@@ -1021,6 +1062,7 @@ export function SessionChatProvider({
     () => ({
       session: sessionRecord,
       chatInfo,
+      chatCapabilities,
       setSandboxInfo,
       clearSandboxInfo,
       archiveSession,
@@ -1028,6 +1070,7 @@ export function SessionChatProvider({
       updateSessionTitle,
       updateChatModel,
       updateChatEffort,
+      updateChatBackend,
       hasRuntimeSandboxState,
       hasPausedWorkspace,
       reconnectionStatus,
@@ -1043,6 +1086,7 @@ export function SessionChatProvider({
     [
       sessionRecord,
       chatInfo,
+      chatCapabilities,
       setSandboxInfo,
       clearSandboxInfo,
       archiveSession,
@@ -1050,6 +1094,7 @@ export function SessionChatProvider({
       updateSessionTitle,
       updateChatModel,
       updateChatEffort,
+      updateChatBackend,
       hasRuntimeSandboxState,
       hasPausedWorkspace,
       reconnectionStatus,

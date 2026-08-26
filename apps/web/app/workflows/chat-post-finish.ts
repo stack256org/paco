@@ -1,7 +1,6 @@
 import { isToolUIPart, type LanguageModelUsage, type UIMessageChunk } from "ai";
 import type { SandboxState, Sandbox } from "@paco/sandbox";
 import type { WebAgentUIMessage } from "@/app/types";
-import type { AutoCommitResult } from "@/lib/chat/auto-commit-direct";
 import type { AutoCreatePrResult } from "@/lib/chat/auto-pr-direct";
 import {
   claimChatActiveStreamId,
@@ -545,74 +544,104 @@ export async function sendFinish(
   }
 }
 
-export async function hasAutoCommitChangesStep(params: {
+/**
+ * Record what this turn produced, under a ref nobody sees.
+ *
+ * This replaces the end-of-turn auto-commit. A turn used to finish by running
+ * `git add -A && git commit` (and, with pushing on, `git push`) on the chat's
+ * own branch, so the branch filled up with commits the operator never wrote
+ * and never reviewed. The operator commits now, deliberately, from the Source
+ * Control panel.
+ *
+ * That leaves a hole this fills. While turns committed, every turn's result
+ * was reachable from the branch forever; with nothing committing, the only
+ * record of what a turn produced is the working tree, and the next turn
+ * overwrites it. So the tree is captured into a commit object under
+ * `refs/paco/turns/<chatId>/<turnId>` — a ref outside `refs/heads`, so it is
+ * not a branch, appears in no `git log`, in no diff against the base, in
+ * nothing `git status` reports to the Changes list, and matches no default
+ * push refspec. It captures untracked files and leaves the index and the
+ * working tree exactly as it found them. See `lib/git/checkpoint.ts`.
+ *
+ * Never throws. A snapshot is bookkeeping; a turn that already succeeded must
+ * not be reported as failed because bookkeeping did.
+ */
+export async function runTurnSnapshotStep(params: {
   sandboxState: SandboxState;
   chatId: string;
+  turnId: string;
+}): Promise<void> {
+  "use step";
+  try {
+    const { connectSandbox } = await import("@paco/sandbox");
+    const { snapshotTurn } = await import("@/lib/git/checkpoint");
+    const { resolveWorkCwd } = await import("@/lib/agent/workspace-paths");
+    const sandbox: Sandbox = await connectSandbox(params.sandboxState);
+    await snapshotTurn(
+      sandbox,
+      // The chat's worktree: the work is on its branch, not on the session
+      // repository's default branch.
+      resolveWorkCwd(params.sandboxState, params.chatId),
+      params.chatId,
+      params.turnId,
+    );
+  } catch (error) {
+    console.error("[workflow] Failed to snapshot the turn:", error);
+  }
+}
+
+/**
+ * Whether this branch has anything a pull request could be about.
+ *
+ * Asked before the pull-request step runs, not inside it, so the panel is
+ * never shown a "creating a pull request…" placeholder for a request that
+ * cannot go anywhere. Now that turns do not commit, the ordinary answer after
+ * a turn is *no* — the work is sitting uncommitted in the worktree, waiting
+ * for the operator — and a pull request opened anyway would be empty.
+ *
+ * Counts against the base branch as the remote sees it, falling back to the
+ * local base: `origin/<base>` is the ref GitHub would compare against, but a
+ * session whose branch has never been pushed has no `origin/<base>` at all,
+ * and answering "no commits" there would be wrong.
+ *
+ * Errs towards *not* proposing: an unreadable count is reported as zero, so
+ * the failure mode is a pull request the operator opens by hand rather than an
+ * empty one Paco opened for them.
+ */
+export async function hasCommitsToProposeStep(params: {
+  sandboxState: SandboxState;
+  chatId: string;
+  baseBranch: string;
 }): Promise<boolean> {
   "use step";
   try {
     const { connectSandbox } = await import("@paco/sandbox");
-    const { hostChatWorktree } = await import("@/lib/agent/workspace-paths");
-    const sandbox: Sandbox = await connectSandbox(params.sandboxState);
-    // The chat's worktree: uncommitted work lives on its branch, not on the
-    // session repository's default branch.
-    const statusResult = await sandbox.exec(
-      "git status --porcelain",
-      hostChatWorktree(params.sandboxState, params.chatId),
-      10000,
-    );
-
-    if (!statusResult.success) {
-      return true;
+    const { resolveWorkCwd } = await import("@/lib/agent/workspace-paths");
+    const { isSafeBranchName } = await import("@/lib/git/helpers");
+    if (!isSafeBranchName(params.baseBranch)) {
+      return false;
     }
 
-    return statusResult.stdout.trim().length > 0;
-  } catch (error) {
-    console.error("[workflow] Failed to preflight auto-commit changes:", error);
-    return true;
-  }
-}
+    const sandbox: Sandbox = await connectSandbox(params.sandboxState);
+    const cwd = resolveWorkCwd(params.sandboxState, params.chatId);
 
-export async function runAutoCommitStep(params: {
-  userId: string;
-  sessionId: string;
-  chatId: string;
-  sessionTitle: string;
-  /**
-   * Whether to publish the commit. A session with no repository can still
-   * commit, so the repo fields are optional and the push flag is not derived
-   * from them here — the workflow already decided.
-   */
-  push: boolean;
-  repoOwner?: string;
-  repoName?: string;
-  sandboxState: SandboxState;
-}): Promise<AutoCommitResult> {
-  "use step";
-  try {
-    const { connectSandbox } = await import("@paco/sandbox");
-    const { performAutoCommit } = await import("@/lib/chat/auto-commit-direct");
-    const { hostChatWorktree } = await import("@/lib/agent/workspace-paths");
-    const sandbox = await connectSandbox(params.sandboxState);
-    return await performAutoCommit({
-      sandbox,
-      userId: params.userId,
-      sessionId: params.sessionId,
-      chatId: params.chatId,
-      sessionTitle: params.sessionTitle,
-      push: params.push,
-      ...(params.repoOwner ? { repoOwner: params.repoOwner } : {}),
-      ...(params.repoName ? { repoName: params.repoName } : {}),
-      // The chat's worktree: its branch is the one being committed.
-      cwd: hostChatWorktree(params.sandboxState, params.chatId),
-    });
+    for (const base of [`origin/${params.baseBranch}`, params.baseBranch]) {
+      const count = await sandbox.exec(
+        `git rev-list --count ${base}..HEAD`,
+        cwd,
+        10_000,
+      );
+      if (!count.success) {
+        continue;
+      }
+      const ahead = Number.parseInt(count.stdout.trim(), 10);
+      return Number.isFinite(ahead) && ahead > 0;
+    }
+
+    return false;
   } catch (error) {
-    console.error("[workflow] Auto-commit failed:", error);
-    return {
-      committed: false,
-      pushed: false,
-      error: error instanceof Error ? error.message : "Auto-commit failed",
-    };
+    console.error("[workflow] Failed to count commits to propose:", error);
+    return false;
   }
 }
 
@@ -657,5 +686,102 @@ export async function runAutoCreatePrStep(params: {
       skipped: false,
       error: error instanceof Error ? error.message : "Auto-PR failed",
     };
+  }
+}
+
+/**
+ * Task completion + the reviewer gate.
+ *
+ * Runs after a turn finishes for whichever chat it belongs to. Most chats
+ * belong to no task at all — `getTaskByChatId` returns nothing and this is a
+ * no-op — so ordinary chat usage is unaffected. For a chat that does own a
+ * `running` task: an errored turn fails the task outright (there is nothing
+ * to review); a clean turn hands off to `runReviewerGate`, which applies the
+ * reviewer's verdict (or auto-approves when no reviewer is configured) and
+ * moves the task on the state machine in `lib/tasks/state.ts`.
+ *
+ * Never throws: a task-board bookkeeping failure must not take down the
+ * chat turn that triggered it, the same invariant every other step in this
+ * file follows for its own side effect.
+ */
+export async function runTaskCompletionStep(params: {
+  chatId: string;
+  isError: boolean;
+  finishReason: string;
+}): Promise<void> {
+  "use step";
+  try {
+    const { getTaskByChatId, transitionTaskStatus } =
+      await import("@/lib/db/tasks");
+    const task = await getTaskByChatId(params.chatId);
+    if (!task) {
+      return;
+    }
+
+    if (params.isError) {
+      await transitionTaskStatus(task.organizationId, task.id, "failed", {
+        resultSummary: params.finishReason,
+      });
+      return;
+    }
+
+    const { runReviewerGate } = await import("@/lib/tasks/reviewer-gate");
+    await runReviewerGate(task, params.chatId);
+  } catch (error) {
+    console.error("[workflow] Task completion step failed:", error);
+  }
+}
+
+/**
+ * Ceiling on one distillation call.
+ *
+ * This step runs after the stream is already closed and the turn's result
+ * has been delivered, so awaiting it doesn't cost the user anything — but an
+ * awaited step with no ceiling could still wedge the workflow's own
+ * durability bookkeeping on a hung CLI process. 90s is generous for a
+ * Haiku-tier, tools-off, single-turn call.
+ */
+const DISTILL_TIMEOUT_MS = 90_000;
+
+/**
+ * Run post-turn memory distillation as a durable, awaited step.
+ *
+ * Runs after the stream has been cleared, so awaiting it never delays
+ * anything the user is waiting on. `distillTurn` itself never throws (see
+ * the plan's memory invariants — a failed distillation must never fail the
+ * turn), but this still guards with a timeout and a `catch`: a step that
+ * awaits a callee must not depend on that callee's contract holding forever,
+ * and a hung CLI process would otherwise wedge this step indefinitely.
+ */
+export async function distillTurnMemoryStep(params: {
+  chatId: string;
+  sessionRepoDir: string;
+  userId: string;
+  turnId: string;
+}): Promise<void> {
+  "use step";
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const { distillTurn } = await import("@/lib/memory/distill");
+
+    const timedOut = new Promise<"timed-out">((resolve) => {
+      timeoutId = setTimeout(() => resolve("timed-out"), DISTILL_TIMEOUT_MS);
+    });
+
+    const outcome = await Promise.race([
+      distillTurn(params).then(() => "completed" as const),
+      timedOut,
+    ]);
+
+    if (outcome === "timed-out") {
+      console.error("[workflow] Memory distillation timed out:", {
+        chatId: params.chatId,
+        turnId: params.turnId,
+      });
+    }
+  } catch (error) {
+    console.error("[workflow] Memory distillation failed:", error);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

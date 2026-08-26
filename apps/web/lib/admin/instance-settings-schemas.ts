@@ -89,3 +89,31 @@ export const smtpSchema = z.object({
 
 /** The address `sendTestEmail` is asked to send to. */
 export const emailAddressSchema = z.string().trim().pipe(z.email());
+
+/**
+ * The BYO Poolside provider form.
+ *
+ * `baseUrl`, not `endpoint`: the value is forwarded to the `pool` process as
+ * `POOLSIDE_STANDALONE_BASE_URL`, so it is the base URL of a Poolside
+ * deployment and it genuinely takes effect. Blank means "use Poolside's
+ * default service", which is why `null` is accepted rather than required.
+ */
+export const poolsideSchema = z.object({
+  baseUrl: z
+    .string()
+    .nullable()
+    .transform((value) => (value && value.trim() !== "" ? value.trim() : null))
+    .refine((value) => value === null || z.url().safeParse(value).success, {
+      message: "Enter a full URL, including the scheme.",
+    }),
+  binaryPath: z.string().trim().min(1).nullable(),
+  /**
+   * Same "blank means leave it alone" rule as `smtpSchema.password`: the
+   * real key is never sent to the browser (see `getInstanceSettings`), so a
+   * form that isn't touching this field has nothing else it could submit.
+   */
+  apiKey: z
+    .string()
+    .nullable()
+    .transform((value) => (value && value.trim() !== "" ? value : null)),
+});

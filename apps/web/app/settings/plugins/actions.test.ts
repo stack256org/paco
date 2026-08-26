@@ -1,0 +1,660 @@
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import type { Capability } from "@paco/plugin-kit";
+
+mock.module("server-only", () => ({}));
+
+// --- admin gate --------------------------------------------------------
+
+let adminOk = true;
+mock.module("@/lib/admin/require-admin", () => ({
+  requireAdmin: async () => {
+    if (!adminOk) {
+      throw new Error("Not an administrator");
+    }
+    return "admin-1";
+  },
+}));
+
+// --- @/lib/db/plugins ----------------------------------------------------
+
+class FakePluginGrantEscalationError extends Error {
+  constructor(
+    pluginId: string,
+    requested: Capability[],
+    declared: Capability[],
+  ) {
+    super(
+      `Plugin "${pluginId}" requested grants ${JSON.stringify(requested)} that are not a subset of its declared capabilities ${JSON.stringify(declared)}`,
+    );
+    this.name = "FakePluginGrantEscalationError";
+  }
+}
+
+type FakeRow = {
+  id: string;
+  manifest: { capabilities: Capability[]; netDomains?: string[] };
+  grantedCapabilities: Capability[];
+  consentedNetDomains: string[];
+  enabled: boolean;
+  ingressSecret?: string;
+};
+
+let rows: Map<string, FakeRow>;
+let getPluginCalls: string[];
+
+async function getPluginImpl(id: string): Promise<FakeRow | undefined> {
+  getPluginCalls.push(id);
+  return rows.get(id);
+}
+
+async function setPluginEnabledImpl(
+  id: string,
+  enabled: boolean,
+): Promise<void> {
+  const row = rows.get(id);
+  if (row) {
+    row.enabled = enabled;
+  }
+}
+
+async function setPluginGrantsImpl(
+  id: string,
+  grants: Capability[],
+): Promise<void> {
+  const row = rows.get(id);
+  if (!row) {
+    throw new Error(`No plugin installed with id "${id}"`);
+  }
+  const declared = row.manifest.capabilities;
+  const escalated = grants.filter((grant) => !declared.includes(grant));
+  if (escalated.length > 0) {
+    throw new FakePluginGrantEscalationError(id, grants, declared);
+  }
+  row.grantedCapabilities = grants;
+  row.consentedNetDomains = row.manifest.netDomains ?? [];
+}
+
+async function removePluginImpl(id: string): Promise<void> {
+  rows.delete(id);
+}
+
+let ensurePluginIngressSecretCalls: string[];
+
+/**
+ * Mirrors the real `ensurePluginIngressSecret` (`lib/db/plugins.ts`): mints
+ * and stores a secret only when the row doesn't already have one, and
+ * returns the plaintext only on that first mint — `undefined` on every
+ * later call, so a test can assert the secret is never handed back twice.
+ */
+async function ensurePluginIngressSecretImpl(
+  id: string,
+): Promise<string | undefined> {
+  ensurePluginIngressSecretCalls.push(id);
+  const row = rows.get(id);
+  if (!row) {
+    throw new Error(`No plugin installed with id "${id}"`);
+  }
+  if (row.ingressSecret) {
+    return undefined;
+  }
+  const secret = `secret-for-${id}`;
+  row.ingressSecret = secret;
+  return secret;
+}
+
+mock.module("@/lib/db/plugins", () => ({
+  PluginGrantEscalationError: FakePluginGrantEscalationError,
+  ensurePluginIngressSecret: (id: string) => ensurePluginIngressSecretImpl(id),
+  getPlugin: (id: string) => getPluginImpl(id),
+  // Unused by anything this file exercises, but `lib/plugins/registry.ts`
+  // (now the real, unmocked module backing `startPluginHost`/
+  // `stopPluginHost`) imports it too, and a named ESM import is validated
+  // against the mocked module's exports at load time regardless of whether
+  // the importing code path is actually reached.
+  listPlugins: () => Promise.resolve([...rows.values()]),
+  setPluginEnabled: (id: string, enabled: boolean) =>
+    setPluginEnabledImpl(id, enabled),
+  setPluginGrants: (id: string, grants: Capability[]) =>
+    setPluginGrantsImpl(id, grants),
+  removePlugin: (id: string) => removePluginImpl(id),
+}));
+
+// --- @/lib/plugins/install -------------------------------------------------
+
+type InstallResult =
+  | { ok: true; pluginId: string; requested: Capability[] }
+  | { ok: false; error: string };
+
+let installBehavior: (source: unknown) => Promise<InstallResult>;
+const installCalls: unknown[] = [];
+/**
+ * The `installedBy` argument each `installPlugin` call carried — the
+ * plugin's security principal, which must come from `requireAdmin()` and
+ * never from the action's own input.
+ */
+const installInstallerIds: unknown[] = [];
+let pluginDirImpl: (id: string) => string = (id) => `/plugins/${id}`;
+
+mock.module("@/lib/plugins/install", () => ({
+  installPlugin: (source: unknown, installedBy: unknown) => {
+    installCalls.push(source);
+    installInstallerIds.push(installedBy);
+    return installBehavior(source);
+  },
+  pluginDir: (id: string) => pluginDirImpl(id),
+  // Unused by anything this file exercises directly, but `lib/plugins/registry.ts`
+  // (the real, unmocked module backing `startPluginHost`/`stopPluginHost` — see
+  // the registry section below) calls it before every start; a passing default
+  // keeps this file's own start/stop tests exercising what they were written
+  // to exercise instead of failing on unrelated integrity-check plumbing.
+  recheckPluginIntegrity: () => Promise.resolve({ ok: true }),
+}));
+
+// --- @paco/plugin-kit --------------------------------------------------
+
+let discoverBehavior: (rootDir: string) => Promise<
+  | {
+      ok: true;
+      plugin: {
+        manifest: { name: string; capabilities: Capability[] };
+        rootDir: string;
+      };
+    }
+  | { ok: false; error: string }
+>;
+
+mock.module("@paco/plugin-kit", () => ({
+  discoverPlugin: (rootDir: string) => discoverBehavior(rootDir),
+}));
+
+// --- @paco/plugin-host ---------------------------------------------------
+
+let startBehavior: () => Promise<{ tools: [] }>;
+let stopCalls: string[];
+
+type FakePluginHost = {
+  id: string;
+  start: () => Promise<{ tools: [] }>;
+  stop: () => Promise<void>;
+  onCrash: (callback: (error: string) => void) => void;
+};
+
+/**
+ * A plain factory rather than a `class` — this file already declares
+ * `FakePluginGrantEscalationError`, and Ultracite's `max-classes-per-file`
+ * caps a file at one. The shape (an object with `start`/`stop`/`onCrash`) is
+ * all `discoverAndStartHost` in the real, unmocked `lib/plugins/registry.ts`
+ * (see below) actually calls on a `PluginHost` — `onCrash` is a no-op here
+ * since crash-restart behavior is `registry.test.ts`'s concern, not this
+ * file's.
+ */
+function makeFakePluginHost(options: {
+  descriptor: { manifest: { name: string } };
+}): FakePluginHost {
+  const id = options.descriptor.manifest.name;
+  return {
+    id,
+    start: () => startBehavior(),
+    stop: () => {
+      stopCalls.push(id);
+      return Promise.resolve();
+    },
+    onCrash: () => {
+      // No-op: nothing in this file's tests simulates a post-start crash.
+    },
+  };
+}
+
+mock.module("@paco/plugin-host", () => ({ PluginHost: makeFakePluginHost }));
+
+// --- @/lib/plugins/capability-handlers -----------------------------------
+
+mock.module("@/lib/plugins/capability-handlers", () => ({
+  buildCapabilityHandlers: () => ({}),
+}));
+
+// --- @/lib/plugins/plugin-fanout -------------------------------------------
+//
+// The real `lib/plugins/registry.ts` registers every started host with the
+// process-wide session-event fan-out (`plugin-fanout.ts`, itself a thin
+// wrapper around `SessionEventFanout`'s polling). That polling behavior is
+// `event-fanout.test.ts`'s concern, not this file's — mocked out here so a
+// started host doesn't leave a real poll timer running past this test file.
+
+mock.module("@/lib/plugins/plugin-fanout", () => ({
+  getPluginEventFanout: () => ({
+    register: () => {
+      // No-op.
+    },
+    unregister: () => {
+      // No-op.
+    },
+    start: () => {
+      // No-op.
+    },
+  }),
+}));
+
+// --- @/lib/plugins/registry ------------------------------------------------
+//
+// Deliberately NOT mocked: `startPluginHost`/`stopPluginHost` now live in
+// `lib/plugins/registry.ts` (Task 7 consolidated them out of this file), so
+// this test exercises the real registry module against the same mocked
+// `@paco/plugin-host`/`@paco/plugin-kit`/`@/lib/plugins/install`/
+// `@/lib/plugins/plugin-fanout`/`@/lib/db/plugins` it already set up above —
+// the same approach `lib/plugins/registry.test.ts` uses for the registry's
+// own tests.
+
+const registryModule = await import("@/lib/plugins/registry");
+
+/** The real, shared registry `Map` — cast for this file's `FakePluginHost`. */
+function registry(): Map<string, FakePluginHost> {
+  return registryModule.getPluginRegistry() as unknown as Map<
+    string,
+    FakePluginHost
+  >;
+}
+
+const {
+  disablePluginAction,
+  grantAndEnableAction,
+  installPluginAction,
+  removePluginAction,
+} = await import("./actions");
+// Not from "./actions": that module is `"use server"`, where a synchronous
+// export fails `next build`. See `install-source.ts`'s header.
+const { parseInstallSource } = await import("./install-source");
+
+function makeRow(id: string, capabilities: Capability[] = []): FakeRow {
+  return {
+    id,
+    manifest: {
+      capabilities,
+      netDomains: capabilities.includes("net:fetch")
+        ? ["api.example.com"]
+        : undefined,
+    },
+    grantedCapabilities: [],
+    consentedNetDomains: [],
+    enabled: false,
+  };
+}
+
+beforeEach(() => {
+  adminOk = true;
+  rows = new Map();
+  getPluginCalls = [];
+  ensurePluginIngressSecretCalls = [];
+  registry().clear();
+  (
+    globalThis as typeof globalThis & { __pacoPluginStartLocks?: unknown }
+  ).__pacoPluginStartLocks = undefined;
+  stopCalls = [];
+  installCalls.length = 0;
+  installInstallerIds.length = 0;
+  pluginDirImpl = (id) => `/plugins/${id}`;
+  installBehavior = async () => ({
+    ok: true,
+    pluginId: "some-plugin",
+    requested: ["storage:kv"],
+  });
+  discoverBehavior = async (rootDir) => ({
+    ok: true,
+    plugin: {
+      manifest: {
+        name: rootDir.split("/").pop() ?? "unknown",
+        capabilities: [],
+      },
+      rootDir,
+    },
+  });
+  startBehavior = async () => ({ tools: [] });
+});
+
+describe("parseInstallSource", () => {
+  test("parses a bare owner/repo", () => {
+    expect(parseInstallSource("acme/widgets")).toEqual({
+      ok: true,
+      source: { kind: "github", repo: "acme/widgets", ref: undefined },
+    });
+  });
+
+  test("parses an owner/repo#ref", () => {
+    expect(parseInstallSource("acme/widgets#v2")).toEqual({
+      ok: true,
+      source: { kind: "github", repo: "acme/widgets", ref: "v2" },
+    });
+  });
+
+  test("parses a local:/abs/path source", () => {
+    expect(parseInstallSource("local:/opt/my-plugin")).toEqual({
+      ok: true,
+      source: { kind: "local", path: "/opt/my-plugin" },
+    });
+  });
+
+  test("rejects a non-absolute local path", () => {
+    const result = parseInstallSource("local:relative/path");
+    expect(result.ok).toBe(false);
+  });
+
+  test("rejects an empty repo", () => {
+    const result = parseInstallSource("#v2");
+    expect(result.ok).toBe(false);
+  });
+
+  test("round-trips the github: label installPlugin stores", () => {
+    // `plugins.sourceLabel` is written as `github:owner/repo#ref`, and the
+    // Plugins page's Update button feeds it straight back in. Without the
+    // scheme branch this fell through to the bare-repo case with
+    // `repo = "github:acme/widgets"`, failed GITHUB_REPO_PATTERN inside
+    // installPlugin, and Update was broken for every GitHub-installed
+    // plugin — while working fine for local: ones, which is why nothing
+    // noticed.
+    expect(parseInstallSource("github:acme/widgets#v2")).toEqual({
+      ok: true,
+      source: { kind: "github", repo: "acme/widgets", ref: "v2" },
+    });
+    expect(parseInstallSource("github:acme/widgets")).toEqual({
+      ok: true,
+      source: { kind: "github", repo: "acme/widgets", ref: undefined },
+    });
+  });
+
+  test("rejects a github: label with no repo", () => {
+    expect(parseInstallSource("github:").ok).toBe(false);
+  });
+});
+
+describe("admin gate", () => {
+  test("a non-admin is rejected for every action", async () => {
+    adminOk = false;
+
+    await expect(
+      installPluginAction({ source: "acme/widgets" }),
+    ).rejects.toThrow();
+    await expect(
+      grantAndEnableAction({ pluginId: "p", grants: [] }),
+    ).rejects.toThrow();
+    await expect(disablePluginAction({ pluginId: "p" })).rejects.toThrow();
+    await expect(removePluginAction({ pluginId: "p" })).rejects.toThrow();
+  });
+});
+
+describe("installPluginAction", () => {
+  test("yields disabled+ungranted and returns the requested capabilities", async () => {
+    installBehavior = async () => ({
+      ok: true,
+      pluginId: "widgets",
+      requested: ["storage:kv", "net:fetch"],
+    });
+
+    const result = await installPluginAction({ source: "acme/widgets" });
+
+    expect(result).toEqual({
+      ok: true,
+      pluginId: "widgets",
+      requested: ["storage:kv", "net:fetch"],
+    });
+    expect(installCalls).toEqual([
+      { kind: "github", repo: "acme/widgets", ref: undefined },
+    ]);
+  });
+
+  test("records the administrator from requireAdmin as the plugin's principal", async () => {
+    installBehavior = async () => ({
+      ok: true,
+      pluginId: "widgets",
+      requested: [],
+    });
+
+    await installPluginAction({ source: "acme/widgets" });
+
+    // Straight from the server session (`requireAdmin`'s return), not from
+    // `input` — the client cannot nominate whom a plugin will act as.
+    expect(installInstallerIds).toEqual(["admin-1"]);
+  });
+
+  test("surfaces an install failure as a value", async () => {
+    installBehavior = async () => ({ ok: false, error: "git clone failed" });
+
+    const result = await installPluginAction({ source: "acme/widgets" });
+
+    expect(result).toEqual({ ok: false, error: "git clone failed" });
+  });
+
+  test("rejects an unparseable source before ever calling installPlugin", async () => {
+    const result = await installPluginAction({ source: "local:relative" });
+
+    expect(result.ok).toBe(false);
+    expect(installCalls).toEqual([]);
+  });
+});
+
+describe("pluginId validation", () => {
+  const malformedIds = [
+    "../../../etc/passwd", // path traversal
+    "../secrets",
+    "Not-Lowercase",
+    "has a space",
+    "",
+  ];
+
+  test("grantAndEnableAction rejects every malformed id as a value, without touching the DB", async () => {
+    for (const pluginId of malformedIds) {
+      const result = await grantAndEnableAction({ pluginId, grants: [] });
+      expect(result.ok).toBe(false);
+    }
+    expect(getPluginCalls).toEqual([]);
+  });
+
+  test("disablePluginAction rejects every malformed id as a value, without touching the DB", async () => {
+    for (const pluginId of malformedIds) {
+      const result = await disablePluginAction({ pluginId });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  test("removePluginAction rejects a path-traversal id before any DB or filesystem work", async () => {
+    const result = await removePluginAction({
+      pluginId: "../../../etc/passwd",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(getPluginCalls).toEqual([]);
+  });
+});
+
+describe("grantAndEnableAction", () => {
+  test("enforces the grant subset rule as an error value, not a throw", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv"]));
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["net:fetch"],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not a subset/);
+    expect(rows.get("widgets")?.enabled).toBe(false);
+    expect(registry().size).toBe(0);
+  });
+
+  test("grants, enables, and starts the host", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv"]));
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv"],
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(rows.get("widgets")?.enabled).toBe(true);
+    expect(rows.get("widgets")?.grantedCapabilities).toEqual(["storage:kv"]);
+    expect(registry().has("widgets")).toBe(true);
+  });
+
+  test("surfaces a host start failure, including the Node-floor message, verbatim", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv"]));
+    const nodeFloorMessage =
+      "plugin widgets cannot start: the runtime at /usr/bin/node reports major version 18, but a hardened plugin worker requires Node >= 24. Point the `nodeExecutable` option at a Node >= 24 binary.";
+    startBehavior = async () => {
+      throw new Error(nodeFloorMessage);
+    };
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv"],
+    });
+
+    expect(result).toEqual({ ok: false, error: nodeFloorMessage });
+    // Enabling already happened; only the host failed to start.
+    expect(rows.get("widgets")?.enabled).toBe(true);
+    expect(registry().has("widgets")).toBe(false);
+  });
+
+  test("does not start a second host when one is already registered", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv"]));
+    const already = makeFakePluginHost({
+      descriptor: { manifest: { name: "widgets" } },
+    });
+    registry().set("widgets", already);
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv"],
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(registry().get("widgets")).toBe(already);
+  });
+});
+
+describe("grantAndEnableAction ingress secret", () => {
+  test("mints and returns an ingress secret once for a channels:ingress plugin", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv", "channels:ingress"]));
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv", "channels:ingress"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.ingressSecret).toBe("secret-for-widgets");
+    expect(ensurePluginIngressSecretCalls).toEqual(["widgets"]);
+    expect(rows.get("widgets")?.ingressSecret).toBe("secret-for-widgets");
+  });
+
+  test("does not mint a secret for a plugin that doesn't declare channels:ingress", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv"]));
+
+    const result = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv"],
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(result.ingressSecret).toBeUndefined();
+    expect(ensurePluginIngressSecretCalls).toEqual([]);
+  });
+
+  test("does not return the secret again on a later grantAndEnableAction call", async () => {
+    rows.set("widgets", makeRow("widgets", ["storage:kv", "channels:ingress"]));
+
+    const first = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv", "channels:ingress"],
+    });
+    expect(first.ingressSecret).toBe("secret-for-widgets");
+
+    const second = await grantAndEnableAction({
+      pluginId: "widgets",
+      grants: ["storage:kv", "channels:ingress"],
+    });
+
+    expect(second.ok).toBe(true);
+    expect(second.ingressSecret).toBeUndefined();
+    expect(ensurePluginIngressSecretCalls).toEqual(["widgets", "widgets"]);
+  });
+
+  test("no other action's result ever carries an ingress secret", async () => {
+    rows.set("widgets", {
+      ...makeRow("widgets", ["channels:ingress"]),
+      ingressSecret: "already-set",
+    });
+
+    const installResult = await installPluginAction({ source: "acme/widgets" });
+    const disableResult = await disablePluginAction({ pluginId: "widgets" });
+
+    expect(installResult).not.toHaveProperty("ingressSecret");
+    expect(disableResult).not.toHaveProperty("ingressSecret");
+  });
+});
+
+describe("disablePluginAction", () => {
+  test("stops the host and sets enabled false", async () => {
+    rows.set("widgets", { ...makeRow("widgets"), enabled: true });
+    const host = makeFakePluginHost({
+      descriptor: { manifest: { name: "widgets" } },
+    });
+    registry().set("widgets", host);
+
+    const result = await disablePluginAction({ pluginId: "widgets" });
+
+    expect(result).toEqual({ ok: true });
+    expect(stopCalls).toEqual(["widgets"]);
+    expect(registry().has("widgets")).toBe(false);
+    expect(rows.get("widgets")?.enabled).toBe(false);
+  });
+
+  test("is a no-op on the host when none is running", async () => {
+    rows.set("widgets", { ...makeRow("widgets"), enabled: true });
+
+    const result = await disablePluginAction({ pluginId: "widgets" });
+
+    expect(result).toEqual({ ok: true });
+    expect(stopCalls).toEqual([]);
+    expect(rows.get("widgets")?.enabled).toBe(false);
+  });
+});
+
+describe("removePluginAction", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "paco-plugin-remove-"));
+    pluginDirImpl = () => tempDir;
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("stops the host, removes the plugin directory, and deletes the row", async () => {
+    rows.set("widgets", { ...makeRow("widgets"), enabled: true });
+    const host = makeFakePluginHost({
+      descriptor: { manifest: { name: "widgets" } },
+    });
+    registry().set("widgets", host);
+
+    const result = await removePluginAction({ pluginId: "widgets" });
+
+    expect(result).toEqual({ ok: true });
+    expect(stopCalls).toEqual(["widgets"]);
+    expect(registry().has("widgets")).toBe(false);
+    expect(rows.has("widgets")).toBe(false);
+    await expect(stat(tempDir)).rejects.toThrow();
+  });
+
+  test("removing a plugin with no directory on disk does not throw", async () => {
+    rows.set("widgets", makeRow("widgets"));
+    await rm(tempDir, { recursive: true, force: true });
+
+    await expect(removePluginAction({ pluginId: "widgets" })).resolves.toEqual({
+      ok: true,
+    });
+  });
+});

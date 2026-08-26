@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import type { WebAgentUIMessage } from "@/app/types";
 import { DiffsProvider } from "@/components/diffs-provider";
+import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import {
   getChatById,
   getChatMessages,
@@ -10,7 +11,8 @@ import {
 } from "@/lib/db/sessions";
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { buildModelOptions } from "@/lib/model-options";
-import { listAvailableModels } from "@/lib/model-catalog";
+import { listAllModels } from "@/lib/model-catalog";
+import { enabledPluginRenderers } from "@/lib/plugins/renderer-info";
 import { getServerSession } from "@/lib/session/get-server-session";
 import { parseThemePreference, THEME_COOKIE_NAME } from "@/lib/theme";
 import { getInitialIsOnlyChatInSession } from "./only-chat-in-session";
@@ -36,9 +38,18 @@ function isOptimisticChatId(chatId: string): boolean {
 const OPTIMISTIC_CHAT_RETRY_DELAY_MS = 100;
 const OPTIMISTIC_CHAT_RETRY_ATTEMPTS = 50;
 
+/**
+ * Every model, across every backend — not just the one this chat currently
+ * runs on.
+ *
+ * The composer filters these client-side against `capabilities.models`
+ * (`ModelEffortBackendControls`), and its backend selector can switch the
+ * chat after this page was rendered. Narrowing the list here would leave
+ * that switch with nothing to reveal.
+ */
 function getInitialModels() {
   try {
-    return listAvailableModels();
+    return listAllModels();
   } catch {
     return [];
   }
@@ -100,13 +111,16 @@ export default async function SessionChatPage({
   if (sessionRecord.userId !== session.user.id) {
     redirect("/");
   }
-  // Fetch chat, messages, models and the chat list in parallel
-  const [chat, dbMessages, initialModels, sessionChats] = await Promise.all([
-    getChatByIdWithRetry(chatId, sessionId),
-    getChatMessages(chatId),
-    getInitialModels(),
-    getChatSummariesBySessionId(sessionId, session.user.id),
-  ]);
+  // Fetch chat, messages, models, the chat list, and enabled plugins'
+  // renderer slots in parallel.
+  const [chat, dbMessages, initialModels, sessionChats, pluginRenderers] =
+    await Promise.all([
+      getChatByIdWithRetry(chatId, sessionId),
+      getChatMessages(chatId),
+      getInitialModels(),
+      getChatSummariesBySessionId(sessionId, session.user.id),
+      enabledPluginRenderers(),
+    ]);
 
   if (!chat) {
     if (isOptimisticChatId(chatId)) {
@@ -161,11 +175,18 @@ export default async function SessionChatPage({
     chat.id,
   );
 
+  // Computed here, not derived client-side from `chat.backend`: this is the
+  // chat bootstrap payload capability-driven UI reads (Section 7 Task 5) —
+  // `EffortSelectorCompact` hides itself when `chatCapabilities.effort` is
+  // `false`, without ever hardcoding a backend id.
+  const initialCapabilities = capabilitiesForBackend(chat.backend);
+
   return (
     <DiffsProvider themePreference={themePreference}>
       <SessionChatProvider
         session={sessionRecord}
         chat={chat}
+        initialCapabilities={initialCapabilities}
         initialMessages={initialMessages}
         initialModelOptions={initialModelOptions}
       >
@@ -174,6 +195,7 @@ export default async function SessionChatPage({
           messageDurationMap={messageDurationMap}
           messageStartedAtMap={messageStartedAtMap}
           lastUserMessageSentAt={lastUserMessageSentAt}
+          pluginRenderers={pluginRenderers}
         />
       </SessionChatProvider>
     </DiffsProvider>

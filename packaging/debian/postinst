@@ -268,6 +268,83 @@ rm -f /tmp/paco-sudoers-check.log
 #
 # Must run BEFORE the restart in step 7: group membership is read when a
 # process starts, so a service already running would not pick it up.
+#
+# The `docker` group is the right discriminator for the branch that does the
+# work — it is what usermod needs, and every rootful packaging (docker.io,
+# docker-ce) creates it — but it is the wrong discriminator for the branch that
+# reports failure, which is what this used to be. A rootless Docker install
+# creates no `docker` group at all, so a host with Docker installed, running,
+# and serving containers was told "Docker was not found" and sent off to
+# install a second one. Hence three states below, not two.
+#
+# Rootless cannot be supported, so this reports rather than adapts: the sandbox
+# bind-mounts the paco user's workspace into the container and runs as that
+# user's own uid, while rootless maps container uids through a user namespace,
+# so uid 106 inside becomes 100106 on the host (/etc/subuid) and paco cannot
+# read its own workspace. docker.io ships no rootless tooling either
+# (dockerd-rootless-setuptool.sh and rootlesskit are both absent, and
+# docker-ce-rootless-extras is not in Ubuntu's repositories), so there is
+# nothing to install that would change the answer.
+#
+# Detection has to work as root in a maintainer script, which is the awkward
+# part: `docker info --format '{{println .SecurityOptions}}'` printing
+# `name=rootless` is authoritative, but root's docker(1) talks to
+# /var/run/docker.sock, which a rootless install never creates. So DOCKER_HOST
+# under /run/user/ and the per-user runtime sockets themselves — visible and
+# connectable from root — are the fallbacks. None of this runs on a normal
+# rootful host: the group check below short-circuits first.
+DOCKER_ROOTLESS_AT=""
+
+# $1 is a DOCKER_HOST to probe with, or "" for the ambient environment. The
+# assignment is confined to a subshell so probing one socket cannot change
+# where the next call looks. `timeout` when present, because `docker info`
+# against a wedged daemon can block and a hanging maintainer script is worse
+# than a wrong guess.
+# shellcheck disable=SC2030 # confining the assignment to this subshell is the point.
+docker_reports_rootless() {
+  (
+    if [ -n "${1:-}" ]; then
+      DOCKER_HOST="$1"
+      export DOCKER_HOST
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5 docker info --format '{{println .SecurityOptions}}' 2>/dev/null
+    else
+      docker info --format '{{println .SecurityOptions}}' 2>/dev/null
+    fi
+  ) | grep -q 'name=rootless'
+}
+
+# shellcheck disable=SC2031 # DOCKER_HOST is only ever set inside the subshell above, never here.
+docker_is_rootless() {
+  DOCKER_ROOTLESS_AT=""
+
+  if command -v docker >/dev/null 2>&1 && docker_reports_rootless ""; then
+    DOCKER_ROOTLESS_AT="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+    return 0
+  fi
+
+  case "${DOCKER_HOST:-}" in
+    */run/user/*)
+      DOCKER_ROOTLESS_AT="$DOCKER_HOST"
+      return 0
+      ;;
+  esac
+
+  # A socket at this path with nothing answering is still rootless Docker —
+  # rootful never listens under /run/user/ — so it counts as evidence even when
+  # `docker info` cannot confirm it.
+  for _sock in /run/user/*/docker.sock; do
+    [ -S "$_sock" ] || continue
+    if command -v docker >/dev/null 2>&1 && docker_reports_rootless "unix://$_sock"; then
+      DOCKER_ROOTLESS_AT="unix://$_sock"
+      return 0
+    fi
+    [ -n "$DOCKER_ROOTLESS_AT" ] || DOCKER_ROOTLESS_AT="unix://$_sock"
+  done
+  [ -n "$DOCKER_ROOTLESS_AT" ]
+}
+
 if getent group docker >/dev/null 2>&1; then
   if ! id -nG "$PACO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     # Not allowed to abort the install. This script runs under `set -e`, and an
@@ -281,6 +358,14 @@ if getent group docker >/dev/null 2>&1; then
       echo "        usermod -aG docker $PACO_USER && systemctl restart paco" >&2
     fi
   fi
+elif docker_is_rootless; then
+  echo "paco: Docker is installed on this host, but it is running rootless, and Paco cannot use a rootless daemon. Chats cannot run yet." >&2
+  echo "        Found at: $DOCKER_ROOTLESS_AT" >&2
+  echo "        Why: every chat runs in a container that bind-mounts the '$PACO_USER' user's workspace and runs as that user's own uid. Rootless Docker maps container uids through a user namespace, so a container writing as uid 106 produces files owned by uid 100106 on the host (see /etc/subuid), and '$PACO_USER' cannot read its own workspace. No setting changes that." >&2
+  echo "        Paco needs the rootful daemon. That is a separate installation, not a setting on the one you have: it adds a root-owned daemon on /var/run/docker.sock with its own images, containers and volumes, while your rootless daemon keeps running alongside it, untouched, and keeps its own." >&2
+  echo "        If that is what you want, chats work after:" >&2
+  echo "          apt-get install -y docker.io && dpkg-reconfigure paco" >&2
+  echo "        Everything else about this install is fine; only chats are affected." >&2
 else
   echo "paco: Docker was not found, so chats cannot run yet. Install it and reconfigure paco:" >&2
   echo "        apt-get install -y docker.io && dpkg-reconfigure paco" >&2
@@ -292,6 +377,30 @@ fi
 # ends up running the new version, not the old one left running from
 # before the package was replaced.
 systemctl daemon-reload
+
+# The unit's `After=docker.service` (packaging/paco.service) orders boot, and
+# nothing else: a manual `systemctl restart` — which is exactly what the next
+# line is — starts the unit immediately regardless of ordering, and `Wants=`
+# pulling docker.service in does not make this command wait for it either.
+#
+# That matters here specifically. This script runs during `apt install` and
+# `apt upgrade`, and an upgrade that includes docker.io restarts Docker in the
+# same apt run; restarting Paco in that window is precisely the race the
+# ordering above exists to remove, reintroduced by hand. So ask for Docker
+# first and give it a moment to be up before Paco starts talking to its socket.
+#
+# Best-effort throughout, because this script runs under `set -e` and none of
+# it is worth failing an install over: `is-enabled` is only consulted so a host
+# where the operator deliberately disabled Docker is not overridden, an absent
+# unit makes every branch a no-op, and a Docker that refuses to start still
+# leaves a working Paco whose chats explain themselves.
+if systemctl is-enabled docker.service >/dev/null 2>&1; then
+  if ! systemctl is-active docker.service >/dev/null 2>&1; then
+    echo "paco: waiting for docker.service before restarting paco."
+    systemctl start docker.service >/dev/null 2>&1 || true
+  fi
+fi
+
 systemctl enable paco.service
 systemctl restart paco.service
 

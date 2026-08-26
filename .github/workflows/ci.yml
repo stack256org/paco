@@ -37,6 +37,34 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # `next build` is a distinct class of check from everything above it,
+      # and until now nothing in CI ran it. Lint, typecheck, tests and
+      # db:check all passed on a tree whose production build died outright —
+      # a synchronous export from a `"use server"` module, and a module-scope
+      # `path.join(import.meta.dirname, ...)` that is `undefined` once
+      # Turbopack bundles the module. Neither is visible to `tsc`: both are
+      # build-time contracts, not type errors. A green `pnpm run ci` has to
+      # imply an app that actually builds, so the build runs here.
+      #
+      # Deliberately `next build` and not `pnpm build` — the same choice, for
+      # the same reason, that release.yml makes. `pnpm --dir apps/web build`
+      # is `db:migrate:apply && next build`, and that first half needs a real,
+      # reachable Postgres: building against a database *is* a write to it,
+      # because migrations run. A CI runner has no database and must never
+      # need one.
+      #
+      # POSTGRES_URL is set anyway, and is deliberately unreachable. Nothing
+      # in the build connects to it; `next.config.ts` copies it into
+      # WORKFLOW_POSTGRES_URL while the config is evaluated, and the Workflow
+      # SDK's own fallback is a `world` database that exists nowhere. Giving
+      # it a syntactically valid URL keeps the build deterministic and keeps
+      # that fallback's noise out of the log. Locally `pnpm run ci` picks up
+      # apps/web/.env instead, which is why the script itself sets no env.
+      - name: Build
+        run: pnpm ci:build
+        env:
+          POSTGRES_URL: postgres://paco:paco@127.0.0.1:5432/paco
+
       # Built here, not pulled. The sandbox integration tests exercise the image
       # together with the code that drives it, and those two now have to match:
       # the container runs as the host's uid, which only works on an image built

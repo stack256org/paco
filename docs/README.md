@@ -6,8 +6,17 @@
   package, the file layout, `paco auth` and the Claude credential, what
   `apt remove` keeps versus what `apt purge` destroys, backup and restore
   (start with the `APP_SECRET` warning), who may sign in and who becomes the
-  administrator, DNS/TLS/previews, disk usage and cleanup, every environment
-  variable, and troubleshooting.
+  administrator, DNS/TLS/previews, disk usage and cleanup, one section each
+  for plugins, memory, tasks, the agent roster, design mode, schedules and the
+  Poolside backend, every environment variable, and troubleshooting.
+- **[Plugins](plugins.md)** — installing a plugin and granting it
+  capabilities, how an inbound webhook is authenticated (and what
+  `self-verified` does not enforce), and a worked example wiring up the
+  first-party Slack channel plugin end to end.
+- **[What the plugin sandbox contains](../packages/plugin-host/SECURITY.md)**
+  — the authoritative statement of what running a third-party plugin does and
+  does not expose, including the escapes earlier versions had and the Node
+  >= 24 floor that backs the rest of it up.
 
 Installing is in the [repository README](../README.md).
 

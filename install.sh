@@ -6,6 +6,13 @@
 # the terminal (the domain prompt, step 2 below) is guarded so a
 # `curl ... | sudo sh` pipeline — which has no terminal at all — never blocks
 # on a `read` that can never be answered.
+#
+# Root is needed to INSTALL — apt sources, packages, a system account, systemd
+# units. Paco does not RUN as root: postinst creates the unprivileged `paco`
+# account and packaging/paco.service runs the service as `User=paco`/
+# `Group=paco`. The one privilege that account is given afterwards is
+# membership of the `docker` group (postinst step 6b), which is what lets it
+# start the containers chats run in.
 set -eu
 
 APT_REPO_URL="https://apt.stack256.org"
@@ -92,7 +99,10 @@ done
 
 # --- 1. Require root and a systemd host, and refuse clearly otherwise. -----
 
-[ "$(id -u)" = "0" ] || fail "this must be run as root (try: sudo sh install.sh)."
+# Name both invocation shapes, rather than guessing which one is in use. The
+# advertised install is the piped one, and someone who runs that without sudo
+# has no install.sh on disk for "try: sudo sh install.sh" to refer to.
+[ "$(id -u)" = "0" ] || fail "this must be run as root. Piped: 'curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh'. From a downloaded copy: 'sudo sh install.sh'."
 
 if [ ! -d /run/systemd/system ]; then
   fail "no systemd found on this host. The paco package's service, and this installer, both assume one — there is no other supported native install path."
@@ -154,7 +164,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "install.sh: --dry-run - the following would happen, but nothing below actually runs:"
   echo "  - install ca-certificates, gnupg, curl if missing"
   echo "  - add $APT_SOURCE (deb $APT_REPO_URL stable main), signed by $KEYRING_FILE"
-  echo "  - install and start docker.io if no container runtime is present"
+  echo "  - install and start docker.io if no rootful Docker is present (a"
+  echo "    rootless Docker is reported and left alone, never installed over)"
   echo "  - apt-get update && apt-get install -y paco"
   echo "    (which also brings PostgreSQL and nginx, and puts the paco user in"
   echo "     the docker group so chats can run)"
@@ -233,9 +244,105 @@ apt-get update
 # or a derivative whose runtime is packaged under another name. Paco itself
 # still installs and runs; only chats are affected, and the closing message
 # says so instead of claiming everything is ready.
+# Which Docker, if any, is on this host — three states, not two, because they
+# need three different answers:
+#
+#   absent    install docker.io, below.
+#   rootful   nothing to do; this is the daemon Paco needs.
+#   rootless  Docker is here and working, and Paco still cannot use it.
+#
+# The check this replaced was `command -v docker`, which is true for all three:
+# a rootless install has a perfectly good docker(1) on PATH, so the installer
+# skipped installing the rootful daemon, said "Docker is already installed",
+# and the operator found out at the first chat.
+#
+# Rootless is not a supported configuration and cannot be made into one. Paco's
+# sandbox bind-mounts the paco user's workspace into the container and runs the
+# container process as that user's own uid, so the files it writes are readable
+# from both sides. Rootless Docker maps container uids through a user
+# namespace, so uid 106 inside lands on the host as uid 100106 (/etc/subuid),
+# and the paco user cannot read its own workspace. There is no package to fix
+# that with either: docker.io ships no rootless tooling at all — no
+# dockerd-rootless-setuptool.sh, no rootlesskit — and docker-ce-rootless-extras
+# is not in Ubuntu's repositories. So the job here is to detect it and say so
+# precisely, not to work around it.
+#
+# `docker info --format '{{println .SecurityOptions}}'` printing `name=rootless`
+# is the authoritative signal, but it only answers for a daemon docker(1) can
+# actually reach — and this script runs as root, whose docker(1) talks to
+# /var/run/docker.sock, which a rootless install never creates. Hence the two
+# fallbacks below: DOCKER_HOST pointing under /run/user/, and the per-user
+# runtime sockets themselves, which root can both see and connect to.
+#
+# Set by docker_is_rootless() to the endpoint the rootless daemon was found on,
+# so the message can name it instead of asserting it in the abstract.
+DOCKER_ROOTLESS_AT=""
+
+# Ask a daemon whether it is rootless. $1 is a DOCKER_HOST to probe with, or ""
+# to use whatever is already in the environment; the assignment is confined to
+# a subshell so probing one socket cannot change where the next call looks.
+# `timeout` is used when present because `docker info` against a wedged daemon
+# can block, and this runs before anything is installed.
+# shellcheck disable=SC2030 # confining the assignment to this subshell is the point.
+docker_reports_rootless() {
+  (
+    if [ -n "${1:-}" ]; then
+      DOCKER_HOST="$1"
+      export DOCKER_HOST
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5 docker info --format '{{println .SecurityOptions}}' 2>/dev/null
+    else
+      docker info --format '{{println .SecurityOptions}}' 2>/dev/null
+    fi
+  ) | grep -q 'name=rootless'
+}
+
+# shellcheck disable=SC2031 # DOCKER_HOST is only ever set inside the subshell above, never here.
+docker_is_rootless() {
+  DOCKER_ROOTLESS_AT=""
+
+  # (a) The daemon docker(1) is already pointed at, whatever that is.
+  if command -v docker >/dev/null 2>&1 && docker_reports_rootless ""; then
+    DOCKER_ROOTLESS_AT="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+    return 0
+  fi
+
+  # (b) DOCKER_HOST under /run/user/ — the per-user runtime directory, where
+  # only a rootless daemon ever listens.
+  case "${DOCKER_HOST:-}" in
+    */run/user/*)
+      DOCKER_ROOTLESS_AT="$DOCKER_HOST"
+      return 0
+      ;;
+  esac
+
+  # (c) Root with no DOCKER_HOST set, which is the normal case here and in the
+  # postinst: look for the sockets directly. Confirm with `docker info` when
+  # there is a docker(1) to confirm with; a socket at this path with nothing
+  # answering is still rootless Docker (rootful never lives under /run/user/),
+  # so it counts as evidence rather than being discarded.
+  for _sock in /run/user/*/docker.sock; do
+    [ -S "$_sock" ] || continue
+    if command -v docker >/dev/null 2>&1 && docker_reports_rootless "unix://$_sock"; then
+      DOCKER_ROOTLESS_AT="unix://$_sock"
+      return 0
+    fi
+    [ -n "$DOCKER_ROOTLESS_AT" ] || DOCKER_ROOTLESS_AT="unix://$_sock"
+  done
+  [ -n "$DOCKER_ROOTLESS_AT" ]
+}
+
 DOCKER_READY=1
-if command -v docker >/dev/null 2>&1; then
-  echo "install.sh: Docker is already installed."
+DOCKER_ROOTLESS=0
+if docker_is_rootless; then
+  # Deliberately does NOT install docker.io over the top. Adding a second,
+  # root-owned daemon to a host someone chose to run rootless on is the
+  # operator's call, not this script's — so it is explained and left to them.
+  DOCKER_ROOTLESS=1
+  DOCKER_READY=0
+elif command -v docker >/dev/null 2>&1; then
+  echo "install.sh: Docker is already installed, and it is the rootful daemon Paco needs."
 else
   echo "install.sh: installing Docker, which every chat runs inside."
   DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || DOCKER_READY=0
@@ -251,7 +358,28 @@ if [ "$DOCKER_READY" -eq 1 ]; then
     || DOCKER_READY=0
 fi
 
-if [ "$DOCKER_READY" -eq 0 ]; then
+if [ "$DOCKER_ROOTLESS" -eq 1 ]; then
+  echo "install.sh: WARNING - Docker is installed on this host, but it is running rootless," >&2
+  echo "install.sh:           and Paco cannot use a rootless daemon. Chats will not run." >&2
+  echo "install.sh:           Found at: $DOCKER_ROOTLESS_AT" >&2
+  echo "install.sh:           Why: every chat runs in a container that bind-mounts the paco" >&2
+  echo "install.sh:           user's workspace and runs as that user's own uid. Rootless" >&2
+  echo "install.sh:           Docker maps container uids through a user namespace, so a" >&2
+  echo "install.sh:           container writing as uid 106 produces files owned by uid 100106" >&2
+  echo "install.sh:           on the host (see /etc/subuid), and paco cannot read its own" >&2
+  echo "install.sh:           workspace. No setting changes that." >&2
+  echo "install.sh:           Paco needs the rootful daemon, which is a separate installation" >&2
+  echo "install.sh:           rather than a setting on the one you have. Nothing was installed" >&2
+  echo "install.sh:           for it just now, because that is your call: it adds a root-owned" >&2
+  echo "install.sh:           daemon on /var/run/docker.sock with its own images, containers" >&2
+  echo "install.sh:           and volumes. Your rootless daemon keeps running alongside it," >&2
+  echo "install.sh:           untouched, and keeps its own." >&2
+  echo "install.sh:           If that is what you want, chats work after:" >&2
+  echo "install.sh:             apt-get install -y docker.io" >&2
+  echo "install.sh:             systemctl enable --now docker.service" >&2
+  echo "install.sh:             usermod -aG docker paco && systemctl restart paco" >&2
+  echo "install.sh:           Everything else is installed normally; only chats are affected." >&2
+elif [ "$DOCKER_READY" -eq 0 ]; then
   echo "install.sh: WARNING - Docker is not available, so chats will not run." >&2
   echo "install.sh:           Everything else is installed normally. To fix it:" >&2
   echo "install.sh:             apt-get install -y docker.io" >&2
@@ -317,6 +445,12 @@ if [ "$DOCKER_READY" -eq 1 ]; then
   echo "Everything is installed and running: the app, its database, nginx, and"
   echo "Docker for the sandboxes chats run in. One thing is left, and it cannot"
   echo "be automated because it needs your Claude account:"
+elif [ "$DOCKER_ROOTLESS" -eq 1 ]; then
+  echo "The app, its database and nginx are installed and running. The Docker on"
+  echo "this host is rootless, which Paco cannot use, so chats will fail until a"
+  echo "rootful daemon is installed (see the warning above for what that means"
+  echo "and the three commands it takes). Once it is sorted, this still needs"
+  echo "doing, because it needs your Claude account:"
 else
   echo "The app, its database and nginx are installed and running. Docker is NOT,"
   echo "so chats will fail until you fix that (see the warning above). Once it is"

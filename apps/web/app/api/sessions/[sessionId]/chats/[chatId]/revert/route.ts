@@ -26,8 +26,28 @@ const bodySchema = z.object({
 /**
  * Undo an agent turn by returning the worktree to its pre-turn checkpoint.
  *
- * Destructive: everything after the checkpoint goes, including any edits the
- * user made by hand since. The client confirms before calling, and says so.
+ * What "undo this turn" means, exactly — the client must say all of this in
+ * its confirmation, because every line of it is destructive:
+ *
+ * - **The working tree goes back to the moment before that turn started.**
+ *   Not a reverse-patch of the turn: a whole-tree restore. Files it created
+ *   are deleted, files it deleted come back, files it rewrote are restored,
+ *   and untracked files are included in all three.
+ * - **Everything done after that turn goes too.** Later turns, and anything
+ *   the operator edited by hand since. There is no honest way to lift one
+ *   turn out of the middle of a stack of edits to the same files, and
+ *   pretending otherwise would silently keep half of a later change.
+ * - **The staging area is replaced** by the one the checkpoint recorded. What
+ *   is staged now is not preserved; what was staged then comes back.
+ * - **Commits are untouched.** The branch does not move, so anything the
+ *   operator has committed survives an undo completely. That is the point of
+ *   committing being an explicit act: it is the line past which undo cannot
+ *   reach.
+ * - **Ignored files are untouched.** Build output and dependencies were never
+ *   captured, so they are never deleted.
+ *
+ * The snapshot lives under `refs/paco/turns/<chatId>/…`, outside `refs/heads`,
+ * so none of this ever put a commit on the operator's branch.
  */
 export async function POST(request: Request, context: RouteContext) {
   const auth = await requireAuthenticatedUser();

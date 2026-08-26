@@ -3,8 +3,9 @@ import {
   requireAuthenticatedUser,
   requireOwnedSessionChat,
 } from "@/app/api/sessions/_lib/session-context";
+import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
-import { getSessionById } from "@/lib/db/sessions";
+import { getSessionById, resolveChatResumeToken } from "@/lib/db/sessions";
 import { WORKSPACE_ASLEEP } from "@/lib/error-copy";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 
@@ -46,7 +47,35 @@ export async function POST(_request: Request, context: RouteContext) {
     );
   }
 
-  const claudeSessionId = chatContext.chat.claudeSessionId;
+  /*
+   * Refuse a backend that cannot compact on demand, before touching resume
+   * tokens.
+   *
+   * Without this the next lines answer a Poolside chat with "this chat has
+   * not run a turn yet, so there is no context to compact" — technically
+   * true of its *Claude* token, and a completely misleading thing to tell
+   * someone whose chat has been running all afternoon. The UI already hides
+   * the control (`capabilities.compaction`); this is the same answer for a
+   * caller that reaches the route anyway.
+   */
+  if (!capabilitiesForBackend(chatContext.chat.backend).compaction) {
+    return Response.json(
+      {
+        error:
+          "This chat's backend compacts its own history automatically, so there is nothing to trigger.",
+      },
+      { status: 409 },
+    );
+  }
+
+  // Scoped to "claude-code" regardless of the chat's *current* `backend`:
+  // compaction is a Claude Code CLI operation (`compactSession`), so it
+  // always targets Claude's own resume token, the same one a turn on this
+  // chat would resume from if it were switched back to claude-code.
+  const claudeSessionId = resolveChatResumeToken(
+    chatContext.chat,
+    "claude-code",
+  );
   if (!claudeSessionId) {
     return Response.json(
       {

@@ -1,4 +1,10 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { POOLSIDE_DEFAULT_MODEL } from "@paco/poolside-backend";
+
+// The route now pulls in `backend-capabilities.ts` (to attach `capabilities`
+// to a PATCH response), which is server-only; the marker throws outside a
+// server component and has nothing to do with what is being tested here.
+mock.module("server-only", () => ({}));
 
 type AuthResult =
   | {
@@ -36,6 +42,7 @@ type ChatRecord = {
   sessionId: string;
   title: string;
   modelId: string;
+  backend?: string;
 };
 
 let authResult: AuthResult = { ok: true, userId: "user-1" };
@@ -80,7 +87,7 @@ let chatsInSession: Array<{ id: string }> = [
 
 const updateChatCalls: Array<{
   chatId: string;
-  patch: { title?: string; modelId?: string };
+  patch: { title?: string; modelId?: string; backend?: string };
 }> = [];
 /** Every command the route ran in the workspace, in order. */
 const sandboxCommands: string[] = [];
@@ -119,7 +126,7 @@ mock.module("@/app/api/sessions/_lib/session-context", () => ({
 mock.module("@/lib/db/sessions", () => ({
   updateChat: async (
     chatId: string,
-    patch: { title?: string; modelId?: string },
+    patch: { title?: string; modelId?: string; backend?: string },
   ) => {
     updateChatCalls.push({ chatId, patch });
     return updatedChat;
@@ -351,6 +358,174 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
       },
     ]);
     expect(body.chat.id).toBe("chat-1");
+  });
+
+  test("PATCH accepts a known backend and returns its capabilities", async () => {
+    updatedChat = {
+      id: "chat-1",
+      sessionId: "session-1",
+      title: "Updated",
+      modelId: "model-updated",
+      backend: "poolside",
+    };
+    const { PATCH } = await routeModulePromise;
+
+    const response = await PATCH(
+      createPatchRequest({ backend: "poolside" }),
+      createContext(),
+    );
+    const body = (await response.json()) as {
+      chat: ChatRecord & {
+        backend?: string;
+        capabilities?: { id: string; effort: boolean };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.chat.capabilities?.id).toBe("poolside");
+    expect(body.chat.capabilities?.effort).toBe(false);
+  });
+
+  /**
+   * `modelId` and `backend` used to be written straight through as
+   * independent fields, so a chat switched to Poolside kept whatever Claude
+   * tier alias it held. The turn survived it — `run-step.ts`'s
+   * `resolveModelId` refuses to forward an id the backend does not accept —
+   * but the composer renders the stored id, so it showed "opus" on a chat
+   * that could only run Laguna.
+   */
+  test("PATCH moves a stranded model onto the new backend's default", async () => {
+    ownedSessionChatResult = {
+      ok: true,
+      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
+      chat: {
+        id: "chat-1",
+        sessionId: "session-1",
+        modelId: "opus",
+        activeStreamId: null,
+      },
+    };
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(createPatchRequest({ backend: "poolside" }), createContext());
+
+    expect(updateChatCalls).toEqual([
+      {
+        chatId: "chat-1",
+        patch: { backend: "poolside", modelId: POOLSIDE_DEFAULT_MODEL },
+      },
+    ]);
+  });
+
+  test("PATCH leaves a model the new backend accepts alone", async () => {
+    ownedSessionChatResult = {
+      ok: true,
+      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
+      chat: {
+        id: "chat-1",
+        sessionId: "session-1",
+        modelId: "poolside/laguna-xs-2.1",
+        activeStreamId: null,
+      },
+    };
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(createPatchRequest({ backend: "poolside" }), createContext());
+
+    expect(updateChatCalls).toEqual([
+      { chatId: "chat-1", patch: { backend: "poolside" } },
+    ]);
+  });
+
+  /** And back: a Poolside id cannot survive a switch to Claude Code. */
+  test("PATCH reconciles the model when switching back to Claude Code", async () => {
+    ownedSessionChatResult = {
+      ok: true,
+      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
+      chat: {
+        id: "chat-1",
+        sessionId: "session-1",
+        modelId: "poolside/laguna-s-2.1",
+        activeStreamId: null,
+      },
+    };
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(
+      createPatchRequest({ backend: "claude-code" }),
+      createContext(),
+    );
+
+    expect(updateChatCalls).toEqual([
+      { chatId: "chat-1", patch: { backend: "claude-code", modelId: "opus" } },
+    ]);
+  });
+
+  /**
+   * A client that switches both at once is judged on what it asked for: the
+   * requested model is accepted by the requested backend, so nothing is
+   * overridden.
+   */
+  test("PATCH keeps a model sent alongside the backend it belongs to", async () => {
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(
+      createPatchRequest({
+        backend: "poolside",
+        modelId: "poolside/laguna-xs-2.1",
+      }),
+      createContext(),
+    );
+
+    expect(updateChatCalls).toEqual([
+      {
+        chatId: "chat-1",
+        patch: {
+          backend: "poolside",
+          modelId: "poolside/laguna-xs-2.1",
+        },
+      },
+    ]);
+  });
+
+  /** ...and overridden when it does not belong to it. */
+  test("PATCH overrides a model the requested backend cannot run", async () => {
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(
+      createPatchRequest({ backend: "poolside", modelId: "opus" }),
+      createContext(),
+    );
+
+    expect(updateChatCalls).toEqual([
+      {
+        chatId: "chat-1",
+        patch: { backend: "poolside", modelId: POOLSIDE_DEFAULT_MODEL },
+      },
+    ]);
+  });
+
+  /** No backend in the patch, no reconciliation: only the model is written. */
+  test("PATCH does not touch the model when no backend is requested", async () => {
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(createPatchRequest({ modelId: "haiku" }), createContext());
+
+    expect(updateChatCalls).toEqual([
+      { chatId: "chat-1", patch: { modelId: "haiku" } },
+    ]);
+  });
+
+  test("PATCH rejects an unrecognised backend value", async () => {
+    const { PATCH } = await routeModulePromise;
+
+    const response = await PATCH(
+      createPatchRequest({ backend: "some-future-backend" }),
+      createContext(),
+    );
+
+    expect(response.status).toBe(400);
+    expect(updateChatCalls).toHaveLength(0);
   });
 
   test("PATCH returns 404 when updateChat returns null", async () => {

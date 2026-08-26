@@ -140,7 +140,7 @@ export function SessionStarter({
             )}
           >
             <MessageSquare className="h-3.5 w-3.5" />
-            New Chat
+            Blank workspace
           </button>
           <button
             type="button"
@@ -156,7 +156,7 @@ export function SessionStarter({
             )}
           >
             <GitBranch className="h-3.5 w-3.5" />
-            Start Session
+            From a repository
           </button>
         </div>
 
@@ -184,7 +184,8 @@ export function SessionStarter({
 
         {mode === "empty" && (
           <p className="text-center text-sm text-base-content/60">
-            Start a new chat &mdash; no repository required.
+            An empty workspace, with no repository cloned into it. Switch to
+            &ldquo;From a repository&rdquo; above to work on existing code.
           </p>
         )}
 

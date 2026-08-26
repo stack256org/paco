@@ -1,0 +1,178 @@
+import type { Capability } from "@paco/plugin-kit";
+
+export interface ConsentFormProps {
+  /** The manifest's declared capabilities — never widened here, only chosen from. */
+  requested: Capability[];
+  /** The manifest's exact `net:fetch` domain list, shown verbatim. */
+  netDomains: string[];
+  /**
+   * The names of this plugin's channels declared `auth: "self-verified"` in
+   * its manifest — the ones Paco will NOT check its shared secret for. Shown
+   * verbatim under `channels:ingress`, for the same reason `netDomains` is:
+   * this is the operator's only chance to see it before granting.
+   */
+  selfVerifiedChannels?: readonly string[];
+  grants: Capability[];
+  onGrantsChange: (grants: Capability[]) => void;
+  disabled?: boolean;
+}
+
+/**
+ * Plain-language line for every entry in `CAPABILITIES`
+ * (`packages/plugin-kit/capabilities.ts`) — this is the security UX the
+ * whole install flow exists for, so each line was checked against what the
+ * host actually enforces (`packages/plugin-host/SECURITY.md`), not against
+ * what the capability's name merely suggests.
+ *
+ * Typed as `Record<Capability, string>` rather than a list or a `switch`:
+ * adding a capability to `CAPABILITIES` without adding its line here is a
+ * type error, not a silently blank row on the consent screen.
+ */
+const CAPABILITY_COPY: Record<Capability, string> = {
+  "events:subscribe":
+    "See every session event for chats in this instance — messages, tool calls, and status updates, including the human's.",
+  "messages:post": "Post messages into a chat, as if a person had typed them.",
+  "tools:register":
+    "Add its own tools that the model can call during a turn. Each call runs inside the plugin process described above, under every limit listed there — it cannot use this to run a program on this server.",
+  "net:fetch":
+    "Make outbound HTTP requests — restricted to exactly the domains listed below, and nowhere else.",
+  "storage:kv": "Store and read its own private data on this server.",
+  "ui:panel": "Show a sandboxed panel it controls inside the app.",
+  "tasks:create": "Create a task on the board.",
+  "channels:ingress":
+    "Receive inbound webhook requests sent to its own /api/channels URL.",
+};
+
+/** Stable empty default for `selfVerifiedChannels`, so the prop's default does not break referential equality on every render. */
+const NO_SELF_VERIFIED_CHANNELS: readonly string[] = [];
+
+function withToggled(
+  grants: Capability[],
+  capability: Capability,
+  checked: boolean,
+): Capability[] {
+  return checked
+    ? [...grants, capability]
+    : grants.filter((granted) => granted !== capability);
+}
+
+/**
+ * The consent screen's actual content: an honest isolation summary, drawn
+ * from `packages/plugin-host/SECURITY.md`'s "What IS enforced" and "What is
+ * NOT enforced" sections, plus one checkbox per REQUESTED capability with
+ * `CAPABILITY_COPY`'s line.
+ *
+ * Deliberately never says "sandboxed" or "fully isolated" for the process
+ * boundary — that word is reserved for `ui:panel`'s line, where it is
+ * literally true (`sandbox="allow-scripts"` on an iframe). `tools:register`
+ * draws the same contrast without borrowing the word: a tool call runs in
+ * the worker this panel already described, NOT as a program on the server.
+ * That contrast is the point, because a manifest may declare
+ * `mcpServers`, whose `command` would be spawned as a plain child of Paco
+ * with none of these limits; `lib/plugins/mcp-bridge.ts` refuses them
+ * outright, and the paragraph above says so, because "add its own tools"
+ * alone read as if it might cover both. The process
+ * itself is not a container, has no CPU/memory limit, can force-kill the
+ * host, is confined on disk to an explicit path allowlist (not "no file
+ * access"), requires Node >= 24 to be isolated at all, and leaves
+ * `process.platform`/`arch`/`version`/`pid`/`cwd()` readable — all per
+ * SECURITY.md's "What IS enforced" (the filesystem allowlist, the Node
+ * floor) and "What is NOT enforced" (everything else here) sections.
+ * Overclaiming here would be worse than saying nothing: an operator
+ * granting capabilities is trusting this text to be complete.
+ *
+ * Split out of `ConsentDialog` (which owns the `Dialog`/`Portal` chrome) so
+ * it renders with `renderToStaticMarkup` in tests — Base UI's `Dialog` does
+ * not render outside a browser, the same reason `AgentEditorForm` is split
+ * out of `AgentEditorDialog` (see that file's docstring).
+ */
+export function ConsentForm({
+  requested,
+  netDomains,
+  selfVerifiedChannels = NO_SELF_VERIFIED_CHANNELS,
+  grants,
+  onGrantsChange,
+  disabled = false,
+}: ConsentFormProps) {
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2 rounded-md border border-base-300 bg-base-200/50 p-3 text-base-content/70 text-xs">
+        <p>
+          This plugin runs as its own process, never inside Paco&apos;s server,
+          and starts with none of your secrets or tokens. It cannot open a
+          shell, load native code, or reach the network beyond the domains you
+          approve below.
+        </p>
+        <p>
+          On disk, it can read its own plugin directory, Paco&apos;s own
+          plugin-runtime code, and its own state directory — but it can only
+          write to that state directory. Everything else is refused, enforced by
+          Node&apos;s permission model.
+        </p>
+        <p>
+          It is <strong>not a container</strong> — there is no OS-level sandbox,
+          and a bug in Node&apos;s own permission model would be an escape from
+          all of this. It has no CPU or memory limit and can force-kill this
+          server outright, since it runs as this server&apos;s child process. It
+          can also read a few harmless facts about this machine — its platform,
+          architecture, version, process id, and working directory.
+        </p>
+        <p>
+          This isolation depends on the runtime: plugins refuse to run at all on
+          Node &lt; 24, because that is the version where the network
+          restriction above is backed by the runtime itself rather than by this
+          process alone.
+        </p>
+        <p>
+          A plugin can also declare MCP servers of its own in its manifest.{" "}
+          <strong>Paco refuses those</strong>: they name a command that would
+          run as an ordinary program on this server, as you, outside every limit
+          described here. Nothing a plugin declares that way ever starts.
+        </p>
+      </div>
+
+      <fieldset className="space-y-3" disabled={disabled}>
+        <legend className="sr-only">Requested capabilities</legend>
+        {requested.map((capability) => (
+          <label
+            className="flex items-start gap-3 rounded-md border border-base-300 p-3"
+            key={capability}
+          >
+            <input
+              checked={grants.includes(capability)}
+              className="checkbox checkbox-sm mt-0.5"
+              onChange={(event) =>
+                onGrantsChange(
+                  withToggled(grants, capability, event.target.checked),
+                )
+              }
+              type="checkbox"
+              value={capability}
+            />
+            <span className="min-w-0">
+              <span className="block font-mono text-xs">{capability}</span>
+              <span className="block text-sm">
+                {CAPABILITY_COPY[capability]}
+              </span>
+              {capability === "net:fetch" ? (
+                <span className="mt-1 block text-base-content/60 text-xs">
+                  Domains:{" "}
+                  {netDomains.length > 0
+                    ? netDomains.join(", ")
+                    : "none declared — this grant would allow no outbound requests"}
+                </span>
+              ) : null}
+              {capability === "channels:ingress" ? (
+                <span className="mt-1 block text-base-content/60 text-xs">
+                  {selfVerifiedChannels.length > 0
+                    ? `Requests are checked against a per-plugin secret, except for these channels, which this plugin claims to verify itself: ${selfVerifiedChannels.join(", ")}. Requests to those reach the plugin with Paco checking nothing, and whatever its own handler does — which may be nothing — is the only thing standing in the way. Grant this only to a plugin you trust to check them.`
+                    : "Requests must carry a per-plugin secret, checked before the plugin sees them."}
+                </span>
+              ) : null}
+            </span>
+          </label>
+        ))}
+      </fieldset>
+    </div>
+  );
+}

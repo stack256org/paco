@@ -14,6 +14,16 @@ import { postgresUrl } from "@/lib/db/url";
 /** Queue names. Keep them centralized so producers and workers cannot drift. */
 export const QUEUES = {
   sendEmail: "send-email",
+  /**
+   * One queue for every cron schedule (`lib/db/schema.ts`'s `schedules`
+   * table). Each schedule row registers its own pg-boss cron entry on this
+   * queue, keyed by the schedule's id (`lib/jobs/schedule-job.ts`), rather
+   * than getting a queue of its own — a queue per schedule would mean
+   * creating and dropping pg-boss queues as schedules come and go, where a
+   * single `key`-scoped registration is exactly what pg-boss's own
+   * `schedule()`/`unschedule()` API is for.
+   */
+  fireSchedule: "fire-schedule",
 } as const;
 
 /**

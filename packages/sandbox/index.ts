@@ -73,8 +73,29 @@ export {
   type DockerState,
 } from "./docker/index.ts";
 
+// docker preflight: whether this host's daemon can run a sandbox at all.
+// `dockerPreflight` returns a verdict for an operator-facing surface (the
+// health page); `assertDockerUsable` is what `DockerSandbox.create` calls to
+// fail a chat early. `DockerPreflightState`'s names match
+// `ProvisioningFailureReason` deliberately — see `docker/preflight.ts`.
+export {
+  assertDockerUsable,
+  classifyDockerInfoError,
+  type DockerInfoHost,
+  type DockerPreflightFailure,
+  type DockerPreflightOptions,
+  type DockerPreflightResult,
+  type DockerPreflightState,
+  dockerEndpoint,
+  dockerPreflight,
+  DockerUnusableError,
+  isRootlessInfo,
+  readSecurityOptions,
+} from "./docker/index.ts";
+
 // worktree layout: one repository per session, one worktree per chat
 export {
+  assertPathSegment,
   CHATS_DIRNAME,
   type ChatWorktree,
   chatBranchName,

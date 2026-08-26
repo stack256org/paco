@@ -3,8 +3,11 @@
 import { LogOut, Settings } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useId } from "react";
+import {
+  AccountMenuTrigger,
+  resolveAccountDisplayName,
+} from "@/components/account-menu-trigger";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useSignOutConfirm } from "@/hooks/use-sign-out-confirm";
 import type { Session as AuthSession } from "@/lib/session/types";
 
@@ -17,11 +20,6 @@ import type { Session as AuthSession } from "@/lib/session/types";
  * that shows every rare action loses the room for the frequent ones.
  */
 
-function initialsOf(name: string): string {
-  const trimmed = name.trim();
-  return trimmed ? trimmed.slice(0, 2).toUpperCase() : "?";
-}
-
 export function AppAccountMenu({ user }: { user?: AuthSession["user"] }) {
   const router = useRouter();
   const { requestSignOut, dialog: signOutDialog } = useSignOutConfirm();
@@ -32,23 +30,15 @@ export function AppAccountMenu({ user }: { user?: AuthSession["user"] }) {
     return null;
   }
 
-  const displayName = user.username || user.email || "Account";
+  const displayName = resolveAccountDisplayName(user);
 
   return (
     <>
-      <button
-        aria-label={`Account menu for ${displayName}`}
-        className="btn btn-ghost btn-sm btn-square"
+      <AccountMenuTrigger
+        anchorName={anchorName}
+        displayName={displayName}
         popoverTarget={menuId}
-        style={{ anchorName } as React.CSSProperties}
-        type="button"
-      >
-        <Avatar className="size-6">
-          <AvatarFallback className="text-[10px]">
-            {initialsOf(displayName)}
-          </AvatarFallback>
-        </Avatar>
-      </button>
+      />
 
       <div
         className="dropdown dropdown-end w-60 rounded-box border border-base-300 bg-base-100 shadow-lg"

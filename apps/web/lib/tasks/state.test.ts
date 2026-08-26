@@ -1,0 +1,201 @@
+import { describe, expect, test } from "bun:test";
+import { TASK_STATUSES, type TaskStatus } from "@/lib/db/schema";
+import { canTransition, nextForPlanRoot, nextOnReviewerVerdict } from "./state";
+
+/**
+ * The complete set of legal (from, to) pairs, written independently of
+ * `state.ts`'s own table so this test can't pass by construction. Mirrors
+ * the Global Constraints machine verbatim, plus the two Task 8 edges this
+ * task ships: `failed → todo` (retry) and `blocked → running` (human
+ * unblock).
+ *
+ * `review → blocked` is part of that machine, not an extra: it is the
+ * terminating edge of the bounded rejection loop — `nextOnReviewerVerdict`
+ * returns `blocked` once the rejection cap is reached, and the reviewer gate
+ * performs exactly that transition. Without it the safety valve is an
+ * illegal edge, the gate's transition throws, and the task is stranded in
+ * `review` forever (no later turn can move it — `getTaskByChatId` only
+ * matches `running` — and the board renders no action for `review`).
+ *
+ * `blocked → todo` is the same human unblock for a task that never started:
+ * a proposal (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is BORN
+ * `blocked` with no chat, so there is no turn to resume — releasing it into
+ * the backlog is what unblocking it means (`unblockTaskAction` then starts
+ * it, and a start that fails leaves it in `todo`, where the board offers
+ * Start, instead of stranded).
+ */
+const LEGAL_EDGES: ReadonlyArray<readonly [TaskStatus, TaskStatus]> = [
+  ["todo", "running"],
+  ["running", "review"],
+  ["review", "done"],
+  ["running", "blocked"],
+  ["running", "failed"],
+  ["review", "failed"],
+  ["review", "running"],
+  ["review", "blocked"],
+  ["failed", "todo"],
+  ["blocked", "running"],
+  ["blocked", "todo"],
+];
+
+const LEGAL_KEYS = new Set(LEGAL_EDGES.map(([from, to]) => `${from}->${to}`));
+
+describe("canTransition", () => {
+  for (const [from, to] of LEGAL_EDGES) {
+    test(`${from} -> ${to} is legal`, () => {
+      expect(canTransition(from, to)).toBe(true);
+    });
+  }
+
+  describe("every other pair is illegal", () => {
+    for (const from of TASK_STATUSES) {
+      for (const to of TASK_STATUSES) {
+        const key = `${from}->${to}`;
+        if (LEGAL_KEYS.has(key)) {
+          continue;
+        }
+        test(`${from} -> ${to} is illegal`, () => {
+          expect(canTransition(from, to)).toBe(false);
+        });
+      }
+    }
+  });
+
+  test("no status transitions to itself", () => {
+    for (const status of TASK_STATUSES) {
+      expect(canTransition(status, status)).toBe(false);
+    }
+  });
+
+  test("done is terminal", () => {
+    for (const to of TASK_STATUSES) {
+      expect(canTransition("done", to)).toBe(false);
+    }
+  });
+});
+
+describe("nextOnReviewerVerdict", () => {
+  test("pass moves review to done, leaving rejections untouched", () => {
+    expect(
+      nextOnReviewerVerdict(
+        { status: "review", reviewerRejections: 0 },
+        "pass",
+      ),
+    ).toEqual({ status: "done", reviewerRejections: 0 });
+
+    expect(
+      nextOnReviewerVerdict(
+        { status: "review", reviewerRejections: 1 },
+        "pass",
+      ),
+    ).toEqual({ status: "done", reviewerRejections: 1 });
+  });
+
+  test("first fail sends it back to running with rejections incremented", () => {
+    expect(
+      nextOnReviewerVerdict(
+        { status: "review", reviewerRejections: 0 },
+        "fail",
+      ),
+    ).toEqual({ status: "running", reviewerRejections: 1 });
+  });
+
+  test("second fail sends it back to running with rejections at the cap", () => {
+    expect(
+      nextOnReviewerVerdict(
+        { status: "review", reviewerRejections: 1 },
+        "fail",
+      ),
+    ).toEqual({ status: "running", reviewerRejections: 2 });
+  });
+
+  test("third fail blocks for a human instead of retrying again", () => {
+    expect(
+      nextOnReviewerVerdict(
+        { status: "review", reviewerRejections: 2 },
+        "fail",
+      ),
+    ).toEqual({ status: "blocked", reviewerRejections: 2 });
+  });
+
+  test("a fail past the cap stays blocked, not looping further", () => {
+    expect(
+      nextOnReviewerVerdict(
+        { status: "review", reviewerRejections: 5 },
+        "fail",
+      ),
+    ).toEqual({ status: "blocked", reviewerRejections: 5 });
+  });
+});
+
+describe("nextForPlanRoot", () => {
+  test("a task with no children is not a plan root and never moves", () => {
+    expect(nextForPlanRoot("todo", [])).toEqual([]);
+  });
+
+  test("a plan whose children have all yet to start stays put", () => {
+    expect(nextForPlanRoot("todo", ["todo", "todo"])).toEqual([]);
+  });
+
+  test("the first child to start moves the plan to running", () => {
+    expect(nextForPlanRoot("todo", ["running", "todo"])).toEqual(["running"]);
+  });
+
+  test("a plan already running does not re-run", () => {
+    expect(nextForPlanRoot("running", ["running", "todo"])).toEqual([]);
+  });
+
+  test("every child done takes the plan through review to done", () => {
+    // No `running -> done` edge exists, and inventing one would let any task
+    // skip review. The plan takes the same route `passWithoutReviewer` takes.
+    expect(nextForPlanRoot("running", ["done", "done"])).toEqual([
+      "review",
+      "done",
+    ]);
+  });
+
+  test("a plan still in todo whose children all finished catches up in one path", () => {
+    expect(nextForPlanRoot("todo", ["done", "done"])).toEqual([
+      "running",
+      "review",
+      "done",
+    ]);
+  });
+
+  test("a failed child fails the plan once nothing is left to run", () => {
+    expect(nextForPlanRoot("running", ["done", "failed"])).toEqual(["failed"]);
+  });
+
+  test("a blocked child blocks the plan, but a failure outranks it", () => {
+    expect(nextForPlanRoot("running", ["done", "blocked"])).toEqual([
+      "blocked",
+    ]);
+    expect(nextForPlanRoot("running", ["blocked", "failed"])).toEqual([
+      "failed",
+    ]);
+  });
+
+  test("a plan with work still in flight does not settle early", () => {
+    expect(nextForPlanRoot("running", ["done", "failed", "running"])).toEqual(
+      [],
+    );
+    expect(nextForPlanRoot("running", ["blocked", "review"])).toEqual([]);
+  });
+
+  test("unblocking a child brings the plan back to running", () => {
+    expect(nextForPlanRoot("blocked", ["done", "running"])).toEqual([
+      "running",
+    ]);
+  });
+
+  test("a finished plan is never reopened", () => {
+    expect(nextForPlanRoot("done", ["done", "todo"])).toEqual([]);
+  });
+
+  test("retrying a subtask revives a failed plan rather than stranding it", () => {
+    expect(nextForPlanRoot("failed", ["done", "running"])).toEqual([
+      "todo",
+      "running",
+    ]);
+  });
+});

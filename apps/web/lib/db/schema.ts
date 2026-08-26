@@ -1,6 +1,10 @@
+import type { ClaudeAgentDefinition } from "@paco/claude-code";
+import type { Capability, PluginManifest } from "@paco/plugin-kit";
 import type { SandboxState } from "@paco/sandbox";
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
+  bigserial,
   boolean,
   index,
   integer,
@@ -300,15 +304,68 @@ export const chats = pgTable(
     effort: text("effort", {
       enum: ["low", "medium", "high", "xhigh", "max"],
     }),
+    /**
+     * What happens when a message arrives while a turn is running.
+     * "steer": buffer durably, cancel the active turn, continue with the
+     * buffered message. "queue": buffer durably, run it after the turn ends.
+     * (Spec 1c; both consume from the same steer/buffered events.)
+     */
+    turnPolicy: text("turn_policy", { enum: ["steer", "queue"] })
+      .notNull()
+      .default("steer"),
+    /**
+     * Which agent backend runs this chat's turns.
+     *
+     * A per-chat choice rather than instance-wide config: `"claude-code"` is
+     * always available and stays the default so every existing chat and
+     * insert keeps working unchanged; `"poolside"` runs the turn through
+     * Poolside's `pool` CLI instead. Recording it on the chat, not just at
+     * submit time, is what lets a chat's turn history stay attributable to
+     * the backend that actually produced it.
+     *
+     * `"openfx"` was the second backend until migration 0015. It is gone,
+     * and that migration rewrites any row still carrying it back to
+     * `"claude-code"` rather than to `"poolside"` — see the SQL for why.
+     */
+    backend: text("backend", { enum: ["claude-code", "poolside"] })
+      .notNull()
+      .default("claude-code"),
     activeStreamId: text("active_stream_id"),
     /**
-     * Claude Code session id backing this chat.
+     * Legacy, single-backend predecessor of `resumeTokens` below.
      *
-     * Set on the first turn and reused with `--resume` afterwards so the CLI
-     * keeps its own conversation history instead of us replaying the full
-     * transcript on every turn.
+     * Nothing writes to this column anymore — every write goes through
+     * `resumeTokens["claude-code"]` instead (`setChatResumeToken` in
+     * `lib/db/sessions.ts`). Kept as a pure read fallback
+     * (`resolveChatResumeToken`) for any row the one-time backfill
+     * migration (00XX) missed, and because dropping a column is a one-way
+     * door a read fallback isn't.
      */
     claudeSessionId: text("claude_session_id"),
+    /**
+     * Resume tokens per agent backend, keyed by backend id
+     * (`"claude-code"` / `"poolside"`).
+     *
+     * `backend` above is a mutable, per-chat choice, and each backend's
+     * resume token means something only to that backend's own session
+     * store: Claude Code's `--resume` id and Poolside's `pool` session id
+     * are not interchangeable — handing one to the other backend either
+     * fails outright or, worse, resumes the wrong conversation. Keying the
+     * resume token by backend means switching back and forth needs no
+     * clearing at all: each side's token just sits under its own key until
+     * that backend runs again, and a round trip (claude-code -> poolside ->
+     * claude-code) resumes both sides correctly. See
+     * `resolveChatResumeToken`/`setChatResumeToken` in `lib/db/sessions.ts`.
+     *
+     * A key is only ever meaningful to a backend that still exists.
+     * Migration 0015 deletes the `"openfx"` key from every row for exactly
+     * that reason: the session it names lives in a session store that has
+     * been removed, so resuming from it could only fail.
+     */
+    resumeTokens: jsonb("resume_tokens")
+      .$type<Record<string, string>>()
+      .notNull()
+      .default({}),
     lastAssistantMessageAt: timestamp("last_assistant_message_at"),
     /**
      * Who may open this chat's preview.
@@ -386,6 +443,47 @@ export const chatReads = pgTable(
   (table) => [
     primaryKey({ columns: [table.userId, table.chatId] }),
     index("chat_reads_chat_id_idx").on(table.chatId),
+  ],
+);
+
+/**
+ * Append-only session event log — the source of truth for what happened in a
+ * chat (spec: Section 1 of 2026-08-25-paco-platform-design.md).
+ *
+ * `chatMessages` is a projection of this log. Ordering is the bigserial `id`:
+ * a single writer per chat is already enforced by the active-stream claim, so
+ * global insert order is per-chat order.
+ */
+export const sessionEvents = pgTable(
+  "session_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    chatId: text("chat_id")
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    payload: jsonb("payload").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("session_events_chat_id_id_idx").on(table.chatId, table.id),
+    /**
+     * Serves every read that wants a *kind* of event rather than all of them
+     * — the steer poll (`listUnconsumedSteerEvents`, once a second for the
+     * whole of a steerable turn) and the turn-boundary lookup behind
+     * `listTurnSessionEvents`.
+     *
+     * Both are needle-in-haystack queries: the recorder writes one row per
+     * streamed chunk, so `assistant/chunk` swamps every other type, and
+     * without `type` in the index those queries degrade into a scan of the
+     * chat's entire history with the jsonb `payload` dragged along. `id`
+     * trails the key so the ordered range comes back without a sort.
+     */
+    index("session_events_chat_id_type_id_idx").on(
+      table.chatId,
+      table.type,
+      table.id,
+    ),
   ],
 );
 
@@ -544,6 +642,30 @@ export const instanceSettings = pgTable("instance_settings", {
    */
   smtpPasswordSealed: text("smtp_password_sealed"),
   smtpFrom: text("smtp_from"),
+
+  /**
+   * Bring-your-own Poolside provider config: a chat whose `backend` is
+   * `"poolside"` runs its turns through the `pool` CLI configured here
+   * instead of the Claude Code CLI. All three are null until an operator
+   * configures Poolside — there is no default provider, unlike
+   * `chats.backend`'s default of `"claude-code"`.
+   *
+   * These replace the `openfx_*` columns dropped in migration 0015. Unlike
+   * OpenFX's endpoint — which was stored but inert, because that binary had
+   * no way to be told where to send provider traffic — every value here is
+   * actually forwarded to the process: this one as
+   * `POOLSIDE_STANDALONE_BASE_URL`.
+   */
+  poolsideBaseUrl: text("poolside_base_url"),
+  /**
+   * Sealed with `lib/crypto/secret-box`, never hashed — same rationale and
+   * mechanism as `smtpPasswordSealed`: the original value is needed on every
+   * call, so there is nothing to compare a hash against. Forwarded to the
+   * `pool` process as `POOLSIDE_API_KEY`.
+   */
+  poolsideApiKeySealed: text("poolside_api_key_sealed"),
+  /** Path to the `pool` binary on this instance, when it is not on `PATH`. */
+  poolsideBinaryPath: text("poolside_binary_path"),
   /**
    * When the guided first-run flow (account, platform, mail) was finished.
    *
@@ -559,3 +681,393 @@ export const instanceSettings = pgTable("instance_settings", {
 });
 
 export type InstanceSettings = typeof instanceSettings.$inferSelect;
+
+/**
+ * An organisation's subagent roster: the `--agents` definitions available in
+ * every chat, editable by the organisation instead of hardcoded in
+ * `@paco/claude-code`'s `DEFAULT_AGENTS`.
+ *
+ * `definition` is validated with `agentDefinitionSchema`
+ * (`apps/web/lib/agent/agent-definition-schema.ts`) on every write and every
+ * read — the column itself is untyped JSONB, so nothing stops a row from
+ * predating a schema change or being written by something other than
+ * `upsertRosterAgent`. An invalid row is skipped with a `console.error`
+ * rather than passed through: a bad definition must not become a fatal error
+ * for every turn in the organisation.
+ *
+ * `builtin` marks the seeded defaults (explorer/executor/reviewer/designer):
+ * editable like any other row, but `deleteRosterAgent` refuses to remove
+ * them, so an organisation can always get back to a working roster by
+ * resetting a row rather than needing to reconstruct one from scratch.
+ */
+export const rosterAgents = pgTable(
+  "roster_agents",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    /** Becomes the agent's key in `--agents`. */
+    name: text("name").notNull(),
+    definition: jsonb("definition").notNull(),
+    builtin: boolean("builtin").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("roster_agents_org_name_idx").on(
+      table.organizationId,
+      table.name,
+    ),
+  ],
+);
+
+export type RosterAgent = typeof rosterAgents.$inferSelect;
+export type NewRosterAgent = typeof rosterAgents.$inferInsert;
+
+/**
+ * An installed third-party plugin (spec Section 2).
+ *
+ * `id` is the manifest name — a plugin re-installed at the same name
+ * overwrites its row rather than accumulating duplicates. `manifest` is the
+ * parsed `PluginManifest` stored verbatim, and `grantedCapabilities` is
+ * always a subset of `manifest.capabilities`: `setPluginGrants`
+ * (`apps/web/lib/db/plugins.ts`) enforces that on every write, throwing
+ * `PluginGrantEscalationError` rather than letting a plugin grant itself
+ * something it never declared wanting.
+ *
+ * `enabled` defaults to `false` — installing a plugin only ever registers
+ * it; running it (and therefore starting its host process, per the spec's
+ * security invariants) is a deliberate second step, so install alone can
+ * never be mistaken for consent to run.
+ */
+export const plugins = pgTable("plugins", {
+  id: text("id").primaryKey(),
+  /** "github:owner/repo#ref" or "local:<path>". */
+  source: text("source").notNull(),
+  version: text("version").notNull(),
+  /** sha256 over the installed tree. */
+  contentHash: text("content_hash").notNull(),
+  manifest: jsonb("manifest").$type<PluginManifest>().notNull(),
+  grantedCapabilities: jsonb("granted_capabilities")
+    .$type<Capability[]>()
+    .notNull(),
+  /**
+   * The operator-consented outbound domains, snapshotted from the manifest
+   * at the moment grants are given.
+   *
+   * The plugin host reads THIS column, never the on-disk manifest, when
+   * deciding what `net:fetch` may reach — so a plugin that widens its own
+   * manifest after install (or after being granted `net:fetch`) cannot
+   * widen its own network access that way. `setPluginGrants`
+   * (`lib/db/plugins.ts`) snapshots `manifest.netDomains` here whenever
+   * grants are written; `upsertPlugin` only ever intersects this with the
+   * new manifest's `netDomains` on re-install, the same "never widens" rule
+   * `grantedCapabilities` already follows.
+   */
+  consentedNetDomains: jsonb("consented_net_domains")
+    .$type<string[]>()
+    .notNull()
+    .default([]),
+  enabled: boolean("enabled").notNull().default(false),
+  /**
+   * The per-plugin shared secret for `/api/channels/[pluginId]/[channel]`,
+   * sealed with `lib/crypto/secret-box` — same rationale as
+   * `githubTokens.sealedToken`: the route needs the original value back on
+   * every inbound webhook to compare against `x-paco-channel-secret`, so it
+   * cannot be hashed.
+   *
+   * Null until a plugin is first enabled (`ensurePluginIngressSecret` in
+   * `lib/db/plugins.ts`, called from `grantAndEnableAction`), which
+   * generates one and returns it in the clear exactly once — that single
+   * response is the only place the plaintext ever exists outside the
+   * sealed column and the plugin author's own webhook config. Stable
+   * across re-enables: only ever generated when absent, never rotated
+   * automatically, so disabling and re-enabling a plugin doesn't silently
+   * break its already-configured webhook.
+   */
+  ingressSecret: text("ingress_secret"),
+  /**
+   * The administrator who installed the plugin — the plugin's SECURITY
+   * PRINCIPAL, and the whole reason this column exists.
+   *
+   * A plugin process is not a person, so "what may this plugin touch?" has
+   * no answer until something records whom it acts for. Without this column
+   * the strictest rule `authorizeSessionForPlugin`
+   * (`lib/plugins/capability-handlers.ts`) could derive was "the target
+   * session's owner must be an administrator" — a property of the victim,
+   * not of the actor, which let a plugin into an admin's session while
+   * locking it out of an ordinary member's. That is backwards for the
+   * product's own worked example (`docs/plugins.md`: a Slack `channelMap`
+   * points at whichever sessions the team actually works in, mostly
+   * non-admins'). `installPluginAction` runs behind `requireAdmin`, so the
+   * installer is always an administrator at the moment it is written, and
+   * "a plugin may reach what its installer could reach" is a rule about the
+   * actor.
+   *
+   * NULLABLE, deliberately, in two directions:
+   *
+   * - Rows written before this column existed have no installer on record.
+   *   Backfilling them to "some administrator" would invent a principal
+   *   nobody consented as, so they stay null and every capability that
+   *   authorizes through this column REFUSES for them (fail closed) until
+   *   an administrator re-installs the plugin. That is a visible,
+   *   fixable outage, not a silent widening.
+   * - `onDelete: "set null"` for the same reason `invitations.invitedBy`
+   *   and `tasks.createdBy` use it: deleting a user must not cascade into
+   *   deleting installed plugins, and a plugin whose installer no longer
+   *   exists has lost its principal — null, and therefore refused, is the
+   *   correct end state rather than an orphaned id or a blocked user
+   *   deletion.
+   *
+   * Being an administrator is re-checked live at every call, never trusted
+   * from this column: a demoted installer's plugin stops being able to act.
+   */
+  installedBy: text("installed_by").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  installedAt: timestamp("installed_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type PluginRow = typeof plugins.$inferSelect;
+export type NewPluginRow = typeof plugins.$inferInsert;
+
+/**
+ * Per-plugin key-value storage backing the `storage:kv` capability (spec
+ * Section 2, Task 6).
+ *
+ * Keyed by `(pluginId, key)` rather than a synthetic id: a plugin's rows are
+ * scoped to it by construction, so a handler that only ever queries with the
+ * `pluginId` the host supplies (never one read from a payload) cannot be
+ * tricked into crossing into another plugin's namespace. `onDelete: "cascade"`
+ * so uninstalling a plugin (`removePlugin`) takes its stored state with it
+ * instead of leaving orphaned rows behind.
+ */
+export const pluginKv = pgTable(
+  "plugin_kv",
+  {
+    pluginId: text("plugin_id")
+      .notNull()
+      .references(() => plugins.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: jsonb("value").notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.pluginId, table.key] })],
+);
+
+export type PluginKvRow = typeof pluginKv.$inferSelect;
+export type NewPluginKvRow = typeof pluginKv.$inferInsert;
+
+/**
+ * The task board's state machine (Section 3 Global Constraints, binding,
+ * single source of truth): `todo → running → review → done`, with `blocked`
+ * reachable from `running` (approval pending) and `failed` reachable from
+ * `running`/`review`, `review → running` on reviewer rejection (bounded: two
+ * automatic rejections, then `blocked` for a human). Plus two edges Task 8's
+ * UI needs and this task ships: `failed → todo` (retry) and `blocked →
+ * running` (human unblock). See `lib/tasks/state.ts` for `canTransition`,
+ * the single place this list is enforced.
+ */
+export const TASK_STATUSES = [
+  "todo",
+  "running",
+  "blocked",
+  "review",
+  "done",
+  "failed",
+] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/**
+ * Who created a task: a person, the planner, a schedule, a channel
+ * integration, or the reflection job (Section 4 Task 6) proposing follow-up
+ * work off of session activity.
+ */
+export const TASK_ORIGINS = [
+  "user",
+  "planner",
+  "schedule",
+  "channel",
+  "reflection",
+] as const;
+export type TaskOrigin = (typeof TASK_ORIGINS)[number];
+
+/**
+ * A unit of agent work tracked on the org's task board (spec Section 3).
+ *
+ * A task owns a chat only once started — `chatId` is null for every `todo`
+ * task and is set when `startTaskAction` creates the worktree-backed chat
+ * that executes it. `parentTaskId` self-references so a planner can
+ * decompose one goal into a tree of subtasks; the FK cascades so deleting a
+ * parent removes its subtree instead of leaving orphaned children pointing
+ * at nothing.
+ */
+export const tasks = pgTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    /**
+     * The session whose repo the task works in.
+     *
+     * Nullable: a proposal or reflection task (e.g. an org-memory promotion
+     * a non-admin filed, or a follow-up the reflection job proposes) can
+     * belong to no session at all — it names work to consider, not a repo
+     * to act in yet. `startTask` (`lib/tasks/start.ts`) refuses to start a
+     * session-less task, since starting one always means running an
+     * executor turn in some session's worktree.
+     */
+    sessionId: text("session_id").references(() => sessions.id, {
+      onDelete: "cascade",
+    }),
+    /** The chat executing it, created when the task is started. */
+    chatId: text("chat_id").references(() => chats.id, {
+      onDelete: "set null",
+    }),
+    parentTaskId: text("parent_task_id").references(
+      (): AnyPgColumn => tasks.id,
+      { onDelete: "cascade" },
+    ),
+    title: text("title").notNull(),
+    /** The full prompt/goal text handed to the executor. */
+    goal: text("goal").notNull(),
+    status: text("status", { enum: TASK_STATUSES }).notNull().default("todo"),
+    /** Roster name; null means the orchestrator's default agent. */
+    assignedAgent: text("assigned_agent"),
+    reviewerRejections: integer("reviewer_rejections").notNull().default(0),
+    origin: text("origin", { enum: TASK_ORIGINS }).notNull().default("user"),
+    resultSummary: text("result_summary"),
+    createdBy: text("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("tasks_org_id_status_idx").on(table.organizationId, table.status),
+    index("tasks_session_id_idx").on(table.sessionId),
+    index("tasks_parent_task_id_idx").on(table.parentTaskId),
+  ],
+);
+
+export type Task = typeof tasks.$inferSelect;
+export type NewTask = typeof tasks.$inferInsert;
+
+/** An eval run's terminal states, plus `running` while its turn is in flight. */
+export const EVAL_RUN_STATUSES = [
+  "running",
+  "passed",
+  "failed",
+  "error",
+] as const;
+export type EvalRunStatus = (typeof EVAL_RUN_STATUSES)[number];
+
+/**
+ * One execution of a repo-defined eval scenario against a throwaway chat
+ * (spec Section 3 Task 9).
+ *
+ * Scenarios themselves are not stored — they live as `<sessionRepo>/evals/*.json`
+ * files (`lib/evals/discovery.ts`) — this table only records what happened
+ * when one ran: `scenarioName` names it, `details` carries the per-assertion
+ * results (or the harness error, when `status` is `"error"`) as untyped
+ * JSONB re-validated on read rather than a typed column, the same
+ * "JSONB, revalidate on read" choice `rosterAgents.definition` makes — see
+ * `lib/db/eval-runs.ts` for the shape it is expected to hold.
+ *
+ * `rosterSnapshot` is the organisation's roster (`lib/db/roster.ts`'s
+ * `getRoster`) at the moment the scenario ran, kept alongside the result so
+ * a later roster edit can be checked against whether it made evals worse —
+ * the whole point of the feature — without needing separate roster history.
+ */
+export const evalRuns = pgTable(
+  "eval_runs",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    scenarioName: text("scenario_name").notNull(),
+    status: text("status", { enum: EVAL_RUN_STATUSES })
+      .notNull()
+      .default("running"),
+    details: jsonb("details"),
+    rosterSnapshot: jsonb("roster_snapshot")
+      .$type<Record<string, ClaudeAgentDefinition>>()
+      .notNull(),
+    startedAt: timestamp("started_at").defaultNow().notNull(),
+    finishedAt: timestamp("finished_at"),
+  },
+  (table) => [
+    index("eval_runs_org_id_idx").on(table.organizationId),
+    index("eval_runs_session_id_idx").on(table.sessionId),
+  ],
+);
+
+export type EvalRun = typeof evalRuns.$inferSelect;
+export type NewEvalRun = typeof evalRuns.$inferInsert;
+
+/**
+ * A cron schedule that fires a task (spec Section 6 Task 4) — "run the
+ * suite nightly and open a fix PR if it's red" as a config row instead of a
+ * hand-run command.
+ *
+ * `sessionId` is required (unlike `tasks.sessionId`): a schedule always
+ * names the repo its fired task works in — there is no "proposal" case here
+ * the way a planner/reflection task can be session-less. `goal` is the
+ * prompt text handed to the executor the same way `tasks.goal` is;
+ * `assignedAgent` mirrors `tasks.assignedAgent` (a roster name, or null for
+ * the orchestrator's default agent). `cron` is stored as free text and
+ * validated at the write boundary (`lib/db/schedules.ts`), not with a
+ * database constraint, so an invalid expression is rejected with a
+ * field-level message before it ever reaches a row.
+ *
+ * `lastFiredAt` records the most recent fire (`lib/schedules/fire.ts`);
+ * there is deliberately no "missed windows" bookkeeping here — a schedule
+ * that fires only records that it fired, never what it would have fired for
+ * while nothing was watching (see that file's own comment on catch-up).
+ * `createdBy` is nullable and set-null-on-delete like `tasks.createdBy`: the
+ * schedule keeps firing after the admin who created it is gone.
+ */
+export const schedules = pgTable(
+  "schedules",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /** A five-field cron expression, validated by `lib/db/schedules.ts`. */
+    cron: text("cron").notNull(),
+    /** The full prompt/goal text handed to the executor when this fires. */
+    goal: text("goal").notNull(),
+    /** Roster name; null means the orchestrator's default agent. */
+    assignedAgent: text("assigned_agent"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastFiredAt: timestamp("last_fired_at"),
+    createdBy: text("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (table) => [
+    index("schedules_org_id_enabled_idx").on(
+      table.organizationId,
+      table.enabled,
+    ),
+  ],
+);
+
+export type Schedule = typeof schedules.$inferSelect;
+export type NewSchedule = typeof schedules.$inferInsert;

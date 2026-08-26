@@ -90,7 +90,7 @@ function TodoItem({ todo }: { todo: Todo }) {
       </span>
       <span
         className={cn(
-          "text-xs leading-relaxed",
+          "min-w-0 wrap-anywhere text-xs leading-relaxed",
           status === "completed"
             ? "text-base-content/40 line-through"
             : status === "in_progress"

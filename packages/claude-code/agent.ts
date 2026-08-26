@@ -71,6 +71,13 @@ export function streamClaudeAgent(
       isResultMessage(first.value) &&
       isMissingSessionResult(first.value)
     ) {
+      // Close the failed run's iterator before abandoning it for the retry.
+      // Without this it stays suspended forever: nothing else will ever call
+      // `.next()` on it, so run.ts's own `finally` (closing `rl`, removing
+      // its `onAbort` listener from the shared `signal`) never runs, and that
+      // stale listener lives on for the rest of the turn. A no-op once the
+      // run has already finished on its own.
+      await iterator.return?.();
       const { resume: _dropped, ...withoutResume } = options;
       run = runClaudeCode(prompt, withoutResume, signal);
       iterator = run.messages[Symbol.asyncIterator]();
@@ -83,10 +90,23 @@ export function streamClaudeAgent(
     run.sessionId.then(sessionDeferred.resolve).catch(sessionDeferred.reject);
 
     const mapper = new ClaudeUIStreamMapper({ workspaceRoot: options.cwd });
-    for (let step = first; !step.done; step = await iterator.next()) {
-      for (const chunk of mapper.map(step.value)) {
-        yield chunk;
+    try {
+      for (let step = first; !step.done; step = await iterator.next()) {
+        for (const chunk of mapper.map(step.value)) {
+          yield chunk;
+        }
       }
+    } finally {
+      // A caller that abandons `chunks` before the turn ends (an external
+      // `.return()`, e.g. from a `for await` loop's `break`) resumes this
+      // generator right here, since the loop above is the only thing
+      // suspended at a `yield`. Without this, the manual `for` loop's own
+      // `iterator` — run.ts's process-management generator — is simply
+      // orphaned mid-iteration: nothing ever calls `.next()` on it again, so
+      // its `finally` (closing `rl`, sending SIGTERM) never runs. Closing it
+      // explicitly here cascades the teardown. A no-op once the loop has
+      // already run to completion or thrown.
+      await iterator.return?.();
     }
   }
 

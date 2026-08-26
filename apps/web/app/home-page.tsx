@@ -1,6 +1,7 @@
 "use client";
 
-import { History } from "lucide-react";
+import { History, ListTodo } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { SignInPanel } from "@/components/auth/sign-in-panel";
@@ -94,6 +95,13 @@ export function HomePage({ hasSessionCookie, lastRepo }: HomePageProps) {
             <History className="h-4 w-4" />
             <span>Sessions</span>
           </button>
+          <Link
+            className="flex h-8 items-center gap-1.5 rounded-md px-2.5 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+            href="/tasks"
+          >
+            <ListTodo className="h-4 w-4" />
+            <span>Tasks</span>
+          </Link>
           <UserAvatarDropdown />
         </div>
       </header>

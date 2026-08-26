@@ -1,0 +1,12 @@
+-- `IF NOT EXISTS` is deliberate, and is the deploy escape hatch for a large
+-- `session_events`. Drizzle's migrator runs every statement of every pending
+-- migration inside one transaction, and Postgres refuses
+-- `CREATE INDEX CONCURRENTLY` in a transaction block (25001) -- so this build
+-- is the blocking kind: it holds a SHARE lock on `session_events`, which
+-- permits concurrent reads but blocks appends for as long as the build runs.
+-- An operator whose table is big enough for that to matter can run
+--     CREATE INDEX CONCURRENTLY "session_events_chat_id_type_id_idx"
+--       ON "session_events" USING btree ("chat_id","type","id");
+-- against the database first; this migration then finds the index already in
+-- place and does nothing.
+CREATE INDEX IF NOT EXISTS "session_events_chat_id_type_id_idx" ON "session_events" USING btree ("chat_id","type","id");

@@ -2,8 +2,10 @@
 // dependencies, and the workflow tests import it directly.
 
 import {
+  isProvisioningFailureReason,
   type ProvisioningFailureReason,
   provisioningFailureReason,
+  readMarkedSetupReason,
 } from "./provisioning-errors";
 
 /**
@@ -26,11 +28,45 @@ import {
  * the one word that identifies the problem helps nobody.
  */
 
+// A download link is the wrong advice for the machine most likely to be reading
+// this. `install.sh` installs `docker.io` from apt, and `postinst` prints
+// `apt-get install -y docker.io && dpkg-reconfigure paco` for exactly this
+// state — so on a server that is the fix, verbatim, and it does not involve a
+// website. The reconfigure is the half that is easy to miss: it is what puts
+// the `paco` user back in the `docker` group once Docker exists.
+//
+// Both installers try to prevent this state, so a server that reaches it is
+// already off the happy path; the Mac half is for someone running from a
+// checkout. As with the other Docker copy, neither half asserts which machine
+// the reader is on.
 export const DOCKER_MISSING =
-  "Paco runs your app inside Docker, and Docker isn't installed on this computer. Install Docker Desktop from docker.com, then start it and try again.";
+  "Paco runs your app inside Docker, and Docker isn't installed on this computer. On a Linux server, run `sudo apt-get install -y docker.io && sudo dpkg-reconfigure paco` — the same commands Paco's own installer uses, and the reconfigure is what gets Paco back onto the Docker socket afterwards. On a Mac, install Docker from docker.com and start it. Then try again.";
 
+// Deliberately does not guess which machine the reader is on. Paco ships as a
+// .deb for Debian/Ubuntu with systemd, and it is also run locally on a Mac
+// while developing; naming one and being wrong costs the reader the fix.
 export const DOCKER_NOT_RUNNING =
-  "Docker is installed but isn't running, so there's nowhere to build your app. Start Docker Desktop, wait for it to say it's running, then try again.";
+  "Docker is installed but isn't running, so there's nowhere to build your app. On a Linux server, start it with `sudo systemctl start docker`; on a Mac, open the Docker app and wait for it to say it's running. Then try again.";
+
+// The daemon answered — this is not a stopped Docker, and telling the reader to
+// start one wastes their afternoon. On the packaged install Paco runs as the
+// `paco` system user, and `/var/run/docker.sock` is owned by root:docker.
+//
+// The restart is load-bearing and the sentence says why: a process's
+// supplementary groups are read once, when it starts. `usermod` alone changes
+// nothing for the already-running service, so a reader who runs half of this
+// fix sees exactly the same failure and concludes it did not work.
+export const DOCKER_PERMISSION =
+  "Docker is running, but it refused to talk to Paco: the user Paco runs as isn't allowed to use the Docker socket. On the server, run `sudo usermod -aG docker paco && sudo systemctl restart paco`. The restart isn't optional — a process only picks up its group membership when it starts, so until Paco restarts it will keep being refused.";
+
+// Rootless is a reasonable thing for a careful admin to have set up, so this
+// says plainly that it cannot work rather than implying they misconfigured it.
+// The sandbox bind-mounts the workspace and runs as the host's own uid;
+// rootless remaps every id through a user namespace (`/etc/subuid`), so uid 106
+// inside the container writes files owned by uid 100106 outside it and Paco
+// cannot read back its own workspace.
+export const DOCKER_ROOTLESS =
+  "This computer runs Docker in rootless mode, which Paco doesn't support. Paco's workspace is a folder shared between the server and the container, so the container has to run as the same user as the server — and rootless Docker remaps every user id, which means files written in the workspace come back owned by a user Paco can't read or write. Install the normal system-wide Docker daemon on this host, the one that runs as root, then try again.";
 
 // Paco downloads this image itself now, so reaching here means the download
 // failed rather than that somebody forgot a build step. The old copy told the
@@ -72,6 +108,8 @@ const REASON_COPY: Record<ProvisioningFailureReason, string> = {
   "github-not-connected": GITHUB_NOT_CONNECTED,
   "docker-missing": DOCKER_MISSING,
   "docker-not-running": DOCKER_NOT_RUNNING,
+  "docker-permission": DOCKER_PERMISSION,
+  "docker-rootless": DOCKER_ROOTLESS,
   "image-missing": IMAGE_MISSING,
   "repo-not-found": REPO_NOT_FOUND,
   "repo-auth-failed": REPO_AUTH_FAILED,
@@ -144,6 +182,39 @@ const MATCHERS: ReadonlyArray<{
     reason: "docker-missing",
   },
   {
+    // Rootless MUST stay ahead of the permission matcher below, and the reason
+    // is not stylistic: a rootless daemon refuses another user's connection in
+    // the *same* words as the group problem, so whichever matcher runs first
+    // wins the string outright. The two fixes are opposite — the group advice
+    // would send a rootless admin to `usermod`, which cannot work, when the
+    // honest answer is that Paco cannot use their daemon at all. Do not
+    // reorder these two; the guard test is the only other thing that would
+    // notice. Measured on Ubuntu 24.04 — the socket lives under
+    // `/run/user/<uid>/`, the shim is `rootlesskit`, the unit is
+    // `dockerd-rootless.sh`.
+    test: /rootlesskit|dockerd-rootless|\/run\/user\/\d+\/[\w.-]*docker[\w.-]*\.sock/,
+    reason: "docker-rootless",
+  },
+  {
+    // MUST stay ahead of the daemon matcher below. Docker names the socket in
+    // its permission error, the daemon matcher matches any mention of
+    // `docker.sock`, and the result was that the single most common
+    // self-hosting failure — a user who is not in the `docker` group — told
+    // people to start a daemon that was already running.
+    //
+    // Verified on Docker 29.6 / Ubuntu 24.04:
+    //
+    //   permission denied while trying to connect to the Docker daemon socket
+    //     at unix:///var/run/docker.sock
+    //   Got permission denied while trying to connect to the Docker daemon socket
+    //   error during connect: dial unix /var/run/docker.sock: connect: permission denied
+    //
+    // Not a bare `permission denied`: that also arrives from git as
+    // `Permission denied (publickey)`, which is a `repo-auth-failed`.
+    test: /permission denied while trying to connect|dial unix [^\s]*docker\.sock: connect: permission denied/,
+    reason: "docker-permission",
+  },
+  {
     test: /cannot connect to the docker daemon|is the docker daemon running|failed to connect to the docker api|docker\.sock|econnrefused|dial unix/,
     reason: "docker-not-running",
   },
@@ -193,6 +264,21 @@ export function classifySetupFailureText(
 ): ProvisioningFailureReason {
   const haystack = text.toLowerCase();
 
+  // Checked before the matchers, and it is the only pattern here that keys on
+  // something Paco wrote. `markSetupReason` stamps it onto every message that
+  // already knew its own reason, and it is the one part of an error that
+  // survives the durable workflow intact — see `provisioning-errors.ts` for
+  // what the boundary actually does to a thrown object, and for why matching
+  // a purpose-built token is not the same mistake as matching our own prose.
+  //
+  // It wins over the text matchers because the thrower knew more than the
+  // reader can infer: a wrapper prefix can easily contain a word one of the
+  // patterns below keys on, and the tag is immune to that.
+  const marked = readMarkedSetupReason(haystack);
+  if (marked) {
+    return marked;
+  }
+
   for (const matcher of MATCHERS) {
     if (matcher.test.test(haystack)) {
       return matcher.reason;
@@ -200,6 +286,33 @@ export function classifySetupFailureText(
   }
 
   return "unknown";
+}
+
+/**
+ * A `DockerUnusableError` that has not crossed a boundary yet.
+ *
+ * `@paco/sandbox` cannot import this module and this module must not import
+ * the sandbox package, so the class is recognised by `name` and its `state`
+ * field is validated against the reason list rather than trusted. Name-based
+ * duck typing rather than `instanceof` for the same reason `@workflow/core`
+ * uses it: the workflow half of this app runs in a separate `vm` realm, where
+ * `instanceof` against a host-realm class is false for an object that is
+ * unmistakably one.
+ *
+ * This only fires in-process — inside the provisioning step itself, and in the
+ * `/api/sandbox` route, which calls `classifySetupFailure` on an error it
+ * caught directly. Once the workflow has flattened the throw there is no
+ * object left to read, and the tag in the message is what answers.
+ */
+function dockerUnusableState(error: unknown): ProvisioningFailureReason | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  if ((error as { name?: unknown }).name !== "DockerUnusableError") {
+    return null;
+  }
+  const state = (error as { state?: unknown }).state;
+  return isProvisioningFailureReason(state) ? state : null;
 }
 
 /**
@@ -221,6 +334,11 @@ export function classifySetupFailure(
   const explicit = provisioningFailureReason(error);
   if (explicit) {
     return explicit;
+  }
+
+  const preflight = dockerUnusableState(error);
+  if (preflight) {
+    return preflight;
   }
 
   return classifySetupFailureText(

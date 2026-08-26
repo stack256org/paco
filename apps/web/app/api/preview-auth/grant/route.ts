@@ -49,8 +49,8 @@ export async function GET(req: NextRequest) {
   }
 
   const settings = await readInstanceSettings();
-  const slug = previewSlugFromHost(host, settings.previewBaseDomain);
-  if (!slug) {
+  const label = previewSlugFromHost(host, settings.previewBaseDomain);
+  if (!label) {
     return respond(400, "That isn't a preview hostname this instance knows.");
   }
 
@@ -62,7 +62,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const chat = await findChatOwnerByPreviewSlug(slug);
+  const chat = await findChatOwnerByPreviewSlug(label);
   if (!chat) {
     return respond(404, "This preview no longer exists.");
   }

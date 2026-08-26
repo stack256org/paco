@@ -1,0 +1,2 @@
+ALTER TABLE "plugins" ADD COLUMN "installed_by" text;--> statement-breakpoint
+ALTER TABLE "plugins" ADD CONSTRAINT "plugins_installed_by_users_id_fk" FOREIGN KEY ("installed_by") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;

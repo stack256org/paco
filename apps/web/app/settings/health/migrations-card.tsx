@@ -43,7 +43,10 @@ function MigrationsBody({ migrations }: { migrations: MigrationHealth }) {
 
 function MigrationsHeadline({ migrations }: { migrations: MigrationHealth }) {
   const pendingList = migrations.pendingTags.map((tag) => (
-    <code className="rounded bg-base-200 px-1 py-0.5 text-xs" key={tag}>
+    <code
+      className="rounded bg-base-200 px-1 py-0.5 text-xs wrap-anywhere"
+      key={tag}
+    >
       {tag}
     </code>
   ));
@@ -65,11 +68,11 @@ function MigrationsHeadline({ migrations }: { migrations: MigrationHealth }) {
         ) : null}
         <span className="mt-2 block">
           Do not run a migration blindly — compare{" "}
-          <code className="rounded bg-base-200 px-1 py-0.5 text-xs">
+          <code className="rounded bg-base-200 px-1 py-0.5 text-xs wrap-anywhere">
             drizzle.__drizzle_migrations
           </code>{" "}
           against{" "}
-          <code className="rounded bg-base-200 px-1 py-0.5 text-xs">
+          <code className="rounded bg-base-200 px-1 py-0.5 text-xs wrap-anywhere">
             lib/db/migrations/meta/_journal.json
           </code>{" "}
           before deciding what to run.
@@ -87,11 +90,11 @@ function MigrationsHeadline({ migrations }: { migrations: MigrationHealth }) {
         </span>
         <span className="mt-2 block">
           Run{" "}
-          <code className="rounded bg-base-200 px-1 py-0.5 text-xs">
+          <code className="rounded bg-base-200 px-1 py-0.5 text-xs wrap-anywhere">
             pnpm --dir apps/web db:migrate:apply
           </code>
           , or redeploy — migrations also run automatically during{" "}
-          <code className="rounded bg-base-200 px-1 py-0.5 text-xs">
+          <code className="rounded bg-base-200 px-1 py-0.5 text-xs wrap-anywhere">
             pnpm build
           </code>
           .

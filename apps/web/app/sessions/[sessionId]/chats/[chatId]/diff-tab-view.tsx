@@ -1,65 +1,63 @@
 "use client";
 
 import { PatchDiff } from "@pierre/diffs/react";
-import {
-  AlignJustify,
-  ChevronRight,
-  Columns2,
-  Download,
-  FileText,
-  Loader2,
-  RefreshCw,
-  SquareDot,
-  SquareMinus,
-  SquarePlus,
-} from "lucide-react";
+import { AlignJustify, Columns2, Download, Loader2 } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { toast } from "@/lib/toast";
-import type { DiffFile } from "@/app/api/sessions/[sessionId]/diff/route";
-import { useGitPanel } from "./git-panel-context";
-import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { useCodeTheme } from "@/hooks/use-code-theme";
+import { useDestructiveConfirm } from "@/hooks/use-destructive-confirm";
+import { useIsMobile } from "@/hooks/use-mobile";
 import {
   type DiffMode,
   useUserPreferences,
 } from "@/hooks/use-user-preferences";
-import { useIsMobile } from "@/hooks/use-mobile";
 import { defaultDiffOptions, splitDiffOptions } from "@/lib/diffs-config";
+import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { chatScopedUrl } from "./chat-scoped-url";
 import { DownloadDiffDialog } from "./download-diff-dialog";
+import { useGitPanel } from "./git-panel-context";
 import { useChatId } from "./hooks/use-chat-id";
 import { useSessionChatWorkspaceContext } from "./session-chat-context";
-import { useCodeTheme } from "@/hooks/use-code-theme";
+import { sourceControlApi } from "./source-control-api";
+import {
+  type ChangeRow,
+  describeDiscard,
+  patchHasBothSides,
+  workingTreeRows,
+} from "./source-control-contract";
+import { SourceControlDiff } from "./source-control-diff";
+import { SourceControlPanel } from "./source-control-panel";
+import { useSourceControl } from "./use-source-control";
 
-type DiffStyle = DiffMode;
+/**
+ * The Changes tab.
+ *
+ * This used to be a list of every file the branch had touched, each with a
+ * collapsible patch under it — a report on work that Paco had already
+ * committed on the operator's behalf at the end of every turn. Paco no longer
+ * does that. A person decides what goes into a commit, so this had to become
+ * the surface where that decision is made.
+ *
+ * Everything below the wiring lives in `source-control-panel`,
+ * `source-control-diff` and `use-source-control`; this file exists to connect
+ * them to the route, the sandbox, the confirm dialog and the patch renderer,
+ * and to hold nothing else.
+ */
 
-const wrappedDiffExtensions = new Set([".md", ".mdx", ".markdown", ".txt"]);
+const WRAPPED_DIFF_EXTENSIONS = [".md", ".mdx", ".markdown", ".txt"];
 
 function shouldWrapDiffContent(filePath: string) {
-  const normalizedPath = filePath.toLowerCase();
-  return [...wrappedDiffExtensions].some((extension) =>
-    normalizedPath.endsWith(extension),
+  const normalized = filePath.toLowerCase();
+  return WRAPPED_DIFF_EXTENSIONS.some((extension) =>
+    normalized.endsWith(extension),
   );
 }
 
-function formatTimestamp(date: Date) {
-  return date.toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function getFilenameFromContentDisposition(header: string | null): string {
-  if (!header) return "changes.diff";
-
+function filenameFromContentDisposition(header: string | null): string {
+  if (!header) {
+    return "changes.diff";
+  }
   const match = header.match(/filename="([^"]+)"/);
   return match?.[1] ?? "changes.diff";
 }
@@ -72,279 +70,209 @@ function sanitizeDiffFilename(value: string): string {
   return sanitized || "changes";
 }
 
-function createDownloadHash(): string {
+function createDownloadFilename(value: string): string {
   const bytes = new Uint8Array(4);
   globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  const hash = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${sanitizeDiffFilename(value)}-${hash}.diff`;
 }
 
-function createDownloadFilename(value: string): string {
-  return `${sanitizeDiffFilename(value)}-${createDownloadHash()}.diff`;
-}
-
-function StaleBanner({ cachedAt }: { cachedAt: Date | null }) {
-  return (
-    <div className="flex items-center gap-2 border-b border-base-300 bg-warning/10 px-4 py-2 text-xs text-warning">
-      <span className="h-2 w-2 shrink-0 rounded-full bg-warning" />
-      <span>
-        Viewing cached changes - sandbox is offline
-        {cachedAt && (
-          <span className="text-warning/70">
-            {" "}
-            (saved {formatTimestamp(cachedAt)})
-          </span>
-        )}
-      </span>
-    </div>
-  );
-}
-
-function FileStatusIcon({ status }: { status: DiffFile["status"] }) {
-  if (status === "added") {
-    return <SquarePlus className="h-4 w-4 shrink-0 text-success" />;
-  }
-  if (status === "deleted") {
-    return <SquareMinus className="h-4 w-4 shrink-0 text-error" />;
-  }
-  // modified + renamed
-  return <SquareDot className="h-4 w-4 shrink-0 text-warning" />;
-}
-
-function isUncommittedFile(file: DiffFile): boolean {
-  return file.stagingStatus === "unstaged" || file.stagingStatus === "partial";
-}
-
-/* ------------------------------------------------------------------ */
-/* Individual collapsible file diff section                            */
-/* ------------------------------------------------------------------ */
-
-function FileDiffSection({
-  file,
-  isExpanded,
-  onToggle,
-  diffStyle,
-  diffScope,
-  sectionRef,
+function DiffStyleToggle({
+  canSplit,
+  onChange,
+  value,
 }: {
-  file: DiffFile;
-  isExpanded: boolean;
-  onToggle: () => void;
-  diffStyle: DiffStyle;
-  diffScope: string;
-  sectionRef?: React.Ref<HTMLDivElement>;
+  canSplit: boolean;
+  onChange: (next: DiffMode) => void;
+  value: DiffMode;
 }) {
-  const codeTheme = useCodeTheme();
-  const baseOptions =
-    diffStyle === "split"
-      ? { ...splitDiffOptions, theme: codeTheme }
-      : { ...defaultDiffOptions, theme: codeTheme };
-  const fileName = file.path.split("/").pop() ?? file.path;
-  const dirPath = file.path.slice(0, -fileName.length);
-
-  const isLocalScope = diffScope === "uncommitted";
-  const hasLocalChanges =
-    file.stagingStatus === "unstaged" || file.stagingStatus === "partial";
-
-  // In local scope, prefer the localDiff (uncommitted changes vs HEAD)
-  const patchContent =
-    isLocalScope && file.localDiff ? file.localDiff : file.diff;
-
   return (
-    <div ref={sectionRef} className="border-b border-base-300 last:border-b-0">
-      {/* Collapsible header */}
+    <span className="join hidden shrink-0 md:inline-flex">
       <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left transition-colors hover:bg-base-200/50"
-      >
-        <ChevronRight
-          className={cn(
-            "h-3.5 w-3.5 shrink-0 text-base-content/60 transition-transform duration-150",
-            isExpanded && "rotate-90",
-          )}
-        />
-        <FileStatusIcon status={file.status} />
-        <span className="shrink-0 text-xs font-medium text-base-content font-mono">
-          {fileName}
-        </span>
-        {dirPath && (
-          <span
-            className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-base-content/60"
-            dir="rtl"
-          >
-            <bdi>{dirPath.replace(/\/$/, "")}</bdi>
-          </span>
+        aria-label="Show changes in one column"
+        aria-pressed={value === "unified"}
+        className={cn(
+          "btn join-item btn-xs btn-square",
+          value === "unified" ? "btn-active" : "btn-ghost",
         )}
-        <div className="ml-auto flex shrink-0 items-center gap-1.5 text-xs">
-          {file.additions > 0 && (
-            <span className="text-success">+{file.additions}</span>
-          )}
-          {file.deletions > 0 && (
-            <span className="text-error">-{file.deletions}</span>
-          )}
-        </div>
+        onClick={() => onChange("unified")}
+        title="One column"
+        type="button"
+      >
+        <AlignJustify aria-hidden className="size-3.5" />
       </button>
-
-      {/* Diff content */}
-      {isExpanded && (
-        <div>
-          {isLocalScope && !hasLocalChanges ? (
-            <div className="flex flex-col items-center justify-center gap-3 py-6 text-base-content/50">
-              <p className="text-sm">No uncommitted changes to display</p>
-            </div>
-          ) : file.generated ? (
-            <div className="px-4 py-6 text-center text-xs text-base-content/60">
-              Generated file — diff content hidden
-            </div>
-          ) : patchContent ? (
-            <PatchDiff
-              disableWorkerPool
-              key={`${file.path}-${diffStyle}-${diffScope}`}
-              patch={patchContent}
-              options={
-                shouldWrapDiffContent(file.path)
-                  ? { ...baseOptions, overflow: "wrap" as const }
-                  : baseOptions
-              }
-            />
-          ) : (
-            <div className="px-4 py-6 text-center text-xs text-base-content/60">
-              No diff content available
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      <button
+        aria-label="Show the old and new version side by side"
+        aria-pressed={value === "split" && canSplit}
+        className={cn(
+          "btn join-item btn-xs btn-square",
+          value === "split" && canSplit ? "btn-active" : "btn-ghost",
+        )}
+        disabled={!canSplit}
+        onClick={() => onChange("split")}
+        title={
+          canSplit
+            ? "Show the old and new version next to each other"
+            : "Nothing to compare side by side — this file has no older version to put beside it"
+        }
+        type="button"
+      >
+        <Columns2 aria-hidden className="size-3.5" />
+      </button>
+    </span>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Main DiffTabView — all files inline                                 */
-/* ------------------------------------------------------------------ */
-
-/**
- * Shows all changed files inline with collapsible diffs.
- * When a file is clicked in the git panel sidebar, it is expanded and scrolled into view.
- */
 export function DiffTabView() {
   const params = useParams<{ sessionId?: string }>();
   const chatId = useChatId();
-  const {
-    diff,
-    diffLoading,
-    diffRefreshing,
-    diffError,
-    diffCachedAt,
-    sandboxInfo,
-    refreshDiff,
-    gitStatus,
-  } = useSessionChatWorkspaceContext();
-  const { focusedDiffFile, focusedDiffRequestId, diffScope } = useGitPanel();
+  const { sandboxInfo, gitStatus } = useSessionChatWorkspaceContext();
+  const { activeView, focusedDiffFile, focusedDiffRequestId, workspaceTab } =
+    useGitPanel();
+  const { confirm, dialog: confirmDialog } = useDestructiveConfirm();
   const isMobile = useIsMobile();
   const { preferences } = useUserPreferences();
-  const [diffStyle, setDiffStyle] = useState<DiffStyle>("unified");
-  const [diffDownloading, setDiffDownloading] = useState(false);
-  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
-  const [downloadFilename, setDownloadFilename] = useState<string | null>(null);
+  const codeTheme = useCodeTheme();
 
-  // Track which files are expanded (by path)
-  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
-
-  // Refs for scrolling to specific file sections
-  const sectionRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-
-  // Filter files based on scope
-  const visibleFiles = useMemo(() => {
-    if (!diff) return [];
-    if (diffScope === "branch") return diff.files;
-    return diff.files.filter(isUncommittedFile);
-  }, [diff, diffScope]);
-
-  // When a file is requested from the sidebar, expand it and scroll to it.
-  useEffect(() => {
-    if (!focusedDiffFile) return;
-
-    setExpandedFiles((prev) => {
-      if (prev.has(focusedDiffFile)) return prev;
-      return new Set([...prev, focusedDiffFile]);
-    });
-
-    requestAnimationFrame(() => {
-      const el = sectionRefs.current.get(focusedDiffFile);
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    });
-  }, [focusedDiffFile, focusedDiffRequestId]);
-
+  const canMutate = Boolean(sandboxInfo);
   /*
-   * Whether side-by-side has anything to show.
-   *
-   * The renderer falls back to one column for a file that is purely added or
-   * purely deleted — there is no older version to put in the left column — and
-   * marks it `data-diff-type="single"`. On a session that only creates files,
-   * every file is like that, so the Split button flipped its own highlight and
-   * changed nothing on screen. That reads as a broken button. Disabling it, and
-   * saying why in the tooltip, is the honest version of the same fact.
+   * The panel stays mounted behind a `hidden` when another workspace tab is
+   * showing, so "am I on screen?" is a question about the tab, not the
+   * component. Polling a hidden panel would keep a `git status` running for a
+   * surface nobody is looking at.
    */
-  const canShowSideBySide = useMemo(
-    () => visibleFiles.some((f) => f.additions > 0 && f.deletions > 0),
-    [visibleFiles],
+  const isOnScreen = workspaceTab === "changes" || activeView === "diff";
+
+  const confirmDiscard = useCallback(
+    (files: ChangeRow[]) => confirm(describeDiscard(files)),
+    [confirm],
   );
 
-  const showStaleIndicator = !sandboxInfo && diff !== null;
+  const sourceControl = useSourceControl({
+    active: isOnScreen && canMutate,
+    api: sourceControlApi,
+    chatId,
+    confirmDiscard,
+  });
+
+  const {
+    busyKeys,
+    commit,
+    commitMessage,
+    committing,
+    clearSelection,
+    diff,
+    diffError,
+    diffLoading,
+    discard,
+    error,
+    loading,
+    refresh,
+    refreshing,
+    select,
+    selected,
+    setCommitMessage,
+    stage,
+    status,
+    unstage,
+  } = sourceControl;
+
+  /*
+   * A file clicked in the git sidebar opens here.
+   *
+   * The unstaged row wins when a file is in both lists: that is the version
+   * still being worked on, and the one someone following a link from the
+   * conversation means.
+   *
+   * The ref, rather than a dependency list that leaves `status` out, is what
+   * makes this fire once per click. The effect has to re-run as `status`
+   * arrives — a click can land before the first `git status` comes back, and
+   * the file is not in any list yet to be found — but it must not re-open the
+   * file on every poll after that, which would drag the person back out of
+   * whatever they had opened since.
+   */
+  const handledFocusRequest = useRef(0);
+  useEffect(() => {
+    if (!(focusedDiffFile && status)) {
+      return;
+    }
+    if (handledFocusRequest.current === focusedDiffRequestId) {
+      return;
+    }
+    const inWorking = workingTreeRows(status).some(
+      (file) => file.path === focusedDiffFile,
+    );
+    const inStaged = status.staged.some(
+      (file) => file.path === focusedDiffFile,
+    );
+    if (!(inWorking || inStaged)) {
+      return;
+    }
+    handledFocusRequest.current = focusedDiffRequestId;
+    select({ path: focusedDiffFile, staged: !inWorking });
+  }, [focusedDiffFile, focusedDiffRequestId, select, status]);
+
+  const [diffStyle, setDiffStyle] = useState<DiffMode>("unified");
+  const canSplit = useMemo(
+    () => !isMobile && Boolean(diff) && patchHasBothSides(diff?.patch ?? ""),
+    [diff, isMobile],
+  );
 
   /*
    * One effect owns the mode, so the preference and the fallback cannot fight.
-   * Splitting them meant a user who prefers side-by-side got dropped to one
+   * Splitting them meant someone who prefers side-by-side was dropped to one
    * column by the fallback and never came back when a comparable file appeared,
    * because the preference effect had no reason to re-run.
    */
   useEffect(() => {
-    if (isMobile || !canShowSideBySide) {
+    if (!canSplit) {
       setDiffStyle("unified");
       return;
     }
     setDiffStyle(preferences?.defaultDiffMode ?? "unified");
-  }, [isMobile, canShowSideBySide, preferences?.defaultDiffMode]);
+  }, [canSplit, preferences?.defaultDiffMode]);
 
-  const toggleFile = useCallback((filePath: string) => {
-    setExpandedFiles((prev) => {
-      const next = new Set(prev);
-      if (next.has(filePath)) {
-        next.delete(filePath);
-      } else {
-        next.add(filePath);
-      }
-      return next;
-    });
-  }, []);
-
-  const setSectionRef = useCallback(
-    (filePath: string, el: HTMLDivElement | null) => {
-      if (el) {
-        sectionRefs.current.set(filePath, el);
-      } else {
-        sectionRefs.current.delete(filePath);
-      }
+  const renderPatch = useCallback(
+    ({ patch, path }: { patch: string; path: string }) => {
+      const base =
+        diffStyle === "split"
+          ? { ...splitDiffOptions, theme: codeTheme }
+          : { ...defaultDiffOptions, theme: codeTheme };
+      return (
+        <PatchDiff
+          disableWorkerPool
+          key={`${path}-${diffStyle}`}
+          options={
+            shouldWrapDiffContent(path)
+              ? { ...base, overflow: "wrap" as const }
+              : base
+          }
+          patch={patch}
+        />
+      );
     },
-    [],
+    [codeTheme, diffStyle],
   );
+
+  /* ---------------------------------------------------------------- */
+  /* Download — unchanged behaviour, kept because a patch file is the  */
+  /* only way to move this work into a checkout outside the sandbox.   */
+  /* ---------------------------------------------------------------- */
+
+  const [downloading, setDownloading] = useState(false);
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const [downloadFilename, setDownloadFilename] = useState<string | null>(null);
 
   const downloadDiff = useCallback(async () => {
     const sessionId = params.sessionId;
-    if (!sessionId) return;
-
-    setDiffDownloading(true);
+    if (!sessionId) {
+      return;
+    }
+    setDownloading(true);
     try {
-      // The server returns one unified diff for the full chat/session changes,
-      // including readable untracked files.
       const response = await fetch(
-        // Scoped to this chat's worktree. Without it the route patched the
-        // session repository, which is on the default branch — so Download
-        // handed back an empty diff of the changes on screen.
         chatScopedUrl(
           `/api/sessions/${encodeURIComponent(sessionId)}/diff/patch`,
           chatId,
@@ -354,17 +282,16 @@ export function DiffTabView() {
         const data = (await response.json().catch(() => null)) as {
           error?: unknown;
         } | null;
-        const message =
+        throw new Error(
           typeof data?.error === "string"
             ? data.error
-            : "Failed to download diff";
-        throw new Error(message);
+            : "Failed to download diff",
+        );
       }
-
       const blob = await response.blob();
       const filename =
         downloadFilename ??
-        getFilenameFromContentDisposition(
+        filenameFromContentDisposition(
           response.headers.get("Content-Disposition"),
         );
       const url = URL.createObjectURL(blob);
@@ -376,14 +303,16 @@ export function DiffTabView() {
       link.remove();
       URL.revokeObjectURL(url);
       toast.success("Diff downloaded");
-    } catch (error) {
+    } catch (downloadError) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to download diff",
+        downloadError instanceof Error
+          ? downloadError.message
+          : "Failed to download diff",
       );
     } finally {
-      setDiffDownloading(false);
+      setDownloading(false);
     }
-  }, [chatId, params.sessionId, downloadFilename]);
+  }, [chatId, downloadFilename, params.sessionId]);
 
   const openDownloadDialog = useCallback(() => {
     setDownloadFilename(
@@ -391,209 +320,78 @@ export function DiffTabView() {
         gitStatus?.branch ?? sandboxInfo?.currentBranch ?? "changes",
       ),
     );
-    setDownloadDialogOpen(true);
+    setDownloadOpen(true);
   }, [gitStatus?.branch, sandboxInfo?.currentBranch]);
 
-  // Summary stats
-  const summaryAdds = visibleFiles.reduce((sum, f) => sum + f.additions, 0);
-  const summaryDels = visibleFiles.reduce((sum, f) => sum + f.deletions, 0);
-  const hasDownloadableDiff = (diff?.files.length ?? 0) > 0;
-  const canDownloadDiff = Boolean(
-    params.sessionId && sandboxInfo && hasDownloadableDiff,
-  );
+  const hasAnyChange =
+    (status?.staged.length ?? 0) +
+      (status?.unstaged.length ?? 0) +
+      (status?.untracked.length ?? 0) >
+    0;
+  const canDownload = Boolean(params.sessionId && sandboxInfo && hasAnyChange);
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      {confirmDialog}
       <DownloadDiffDialog
-        open={downloadDialogOpen}
-        onOpenChange={setDownloadDialogOpen}
-        onDownload={downloadDiff}
-        downloading={diffDownloading}
-        canDownload={canDownloadDiff}
+        canDownload={canDownload}
+        downloading={downloading}
         filename={downloadFilename ?? "changes.diff"}
+        onDownload={downloadDiff}
+        onOpenChange={setDownloadOpen}
+        open={downloadOpen}
       />
-      {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-between border-b border-base-300 px-4 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="text-sm font-medium font-mono">
-            {visibleFiles.length} file{visibleFiles.length !== 1 ? "s" : ""}{" "}
-            changed
-          </span>
-          <div className="flex shrink-0 items-center gap-1.5 text-xs">
-            {summaryAdds > 0 && (
-              <span className="text-success">+{summaryAdds}</span>
+      <SourceControlPanel
+        busyKeys={busyKeys}
+        canMutate={canMutate}
+        commitMessage={commitMessage}
+        committing={committing}
+        diff={
+          <SourceControlDiff
+            diff={diff}
+            error={diffError}
+            file={selected}
+            loading={diffLoading}
+            onBack={clearSelection}
+            renderPatch={renderPatch}
+            toolbar={
+              <DiffStyleToggle
+                canSplit={canSplit}
+                onChange={setDiffStyle}
+                value={diffStyle}
+              />
+            }
+          />
+        }
+        error={error}
+        loading={loading}
+        onCommit={commit}
+        onCommitMessageChange={setCommitMessage}
+        onDiscard={discard}
+        onRefresh={refresh}
+        onSelect={select}
+        onStage={stage}
+        onUnstage={unstage}
+        refreshing={refreshing}
+        selected={selected}
+        status={status}
+        toolbarExtra={
+          <button
+            aria-label="Download this chat's changes as a patch file"
+            className="btn btn-ghost btn-xs btn-square"
+            disabled={!canDownload || downloading}
+            onClick={openDownloadDialog}
+            title="Download this chat's changes as a patch file"
+            type="button"
+          >
+            {downloading ? (
+              <Loader2 aria-hidden className="size-3.5 animate-spin" />
+            ) : (
+              <Download aria-hidden className="size-3.5" />
             )}
-            {summaryDels > 0 && (
-              <span className="text-error">-{summaryDels}</span>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-1">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => refreshDiff()}
-                disabled={diffRefreshing || !sandboxInfo}
-                className="h-7 w-7 px-0"
-              >
-                <RefreshCw
-                  className={cn(
-                    "h-3.5 w-3.5",
-                    diffRefreshing && "animate-spin",
-                  )}
-                />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Refresh</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={openDownloadDialog}
-                disabled={!canDownloadDiff || diffDownloading}
-                className="h-7 w-7 px-0"
-                aria-label="Download diff"
-              >
-                {diffDownloading ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Download className="h-3.5 w-3.5" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Download diff</TooltipContent>
-          </Tooltip>
-          {/* Expand / Collapse all */}
-          <div className="flex items-center gap-0.5">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    setExpandedFiles(new Set(visibleFiles.map((f) => f.path)))
-                  }
-                  className="h-7 px-1.5 text-xs text-base-content/60"
-                >
-                  Expand all
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Expand all files</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setExpandedFiles(new Set())}
-                  className="h-7 px-1.5 text-xs text-base-content/60"
-                >
-                  Collapse all
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Collapse all files</TooltipContent>
-            </Tooltip>
-          </div>
-          {/* Unified / Split icon toggle */}
-          <div className="hidden items-center rounded-md border border-base-300 md:flex">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  aria-label="Show changes in one column"
-                  aria-pressed={diffStyle === "unified"}
-                  type="button"
-                  onClick={() => setDiffStyle("unified")}
-                  className={cn(
-                    "rounded-l-md p-1.5 transition-colors",
-                    diffStyle === "unified"
-                      ? "bg-base-200 text-base-content"
-                      : "text-base-content/60 hover:text-base-content",
-                  )}
-                >
-                  <AlignJustify className="h-3.5 w-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">One column</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  aria-label="Show changes side by side"
-                  aria-pressed={diffStyle === "split"}
-                  disabled={!canShowSideBySide}
-                  type="button"
-                  onClick={() => setDiffStyle("split")}
-                  className={cn(
-                    "rounded-r-md p-1.5 transition-colors",
-                    diffStyle === "split" && canShowSideBySide
-                      ? "bg-base-200 text-base-content"
-                      : "text-base-content/60 hover:text-base-content",
-                    !canShowSideBySide && "cursor-not-allowed opacity-40",
-                  )}
-                >
-                  <Columns2 className="h-3.5 w-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                {canShowSideBySide
-                  ? "Show the old and new version next to each other"
-                  : "Nothing to compare side by side — these files are all new, so there is no older version to put beside them"}
-              </TooltipContent>
-            </Tooltip>
-          </div>
-        </div>
-      </div>
-
-      {showStaleIndicator ? <StaleBanner cachedAt={diffCachedAt} /> : null}
-
-      {/* Content */}
-      <div
-        className={cn(
-          "min-h-0 flex-1 overflow-y-auto",
-          showStaleIndicator && "opacity-90",
-        )}
-      >
-        {diffLoading && (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-6 w-6 animate-spin text-base-content/60" />
-          </div>
-        )}
-
-        {diffError && (
-          <div className="px-4 py-8 text-center">
-            <p className="text-sm text-error">{diffError}</p>
-          </div>
-        )}
-
-        {!diffLoading && !diffError && visibleFiles.length === 0 && (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-base-content/50">
-            <FileText className="h-8 w-8" />
-            <p className="text-sm">
-              {diffScope === "uncommitted"
-                ? "No uncommitted changes to display"
-                : "No file changes yet"}
-            </p>
-          </div>
-        )}
-
-        {!diffLoading &&
-          !diffError &&
-          visibleFiles.length > 0 &&
-          visibleFiles.map((file) => (
-            <FileDiffSection
-              key={file.path}
-              file={file}
-              isExpanded={expandedFiles.has(file.path)}
-              onToggle={() => toggleFile(file.path)}
-              diffStyle={diffStyle}
-              diffScope={diffScope}
-              sectionRef={(el) => setSectionRef(file.path, el)}
-            />
-          ))}
-      </div>
+          </button>
+        }
+      />
     </div>
   );
 }

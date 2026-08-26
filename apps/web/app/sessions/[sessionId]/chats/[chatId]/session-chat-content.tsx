@@ -36,6 +36,7 @@ import {
   type PrDeploymentResponse,
 } from "@/lib/github/queries/deployment";
 import type { CheckRun } from "@/lib/github/queries/pr";
+import type { PluginRendererInfo } from "@/app/lib/render-tool";
 import type {
   WebAgentSnippetDataPart,
   WebAgentUIMessage,
@@ -48,14 +49,15 @@ import {
 } from "@/components/assistant-file-link";
 import { FileSuggestionsDropdown } from "@/components/file-suggestions-dropdown";
 import { ImageAttachmentsPreview } from "@/components/image-attachments-preview";
+import { UnviewableImageNotice } from "./unviewable-image-notice";
 import { TextAttachmentsPreview } from "@/components/text-attachments-preview";
-import { EffortSelectorCompact } from "@/components/effort-selector-compact";
-import { ModelSelectorCompact } from "@/components/model-selector-compact";
+import type { ChatBackendSelection } from "@/components/backend-selector-compact";
 import { useInlineQuestion } from "@/components/inline-question-input";
 import { SlashCommandDropdown } from "@/components/slash-command-dropdown";
 import { SnippetChip } from "@/components/snippet-chip";
 import { AssistantMessageGroups } from "@/components/assistant-message-groups";
 import { MessageModelPill } from "@/components/message-model-pill";
+import { PluginPostedBadge } from "@/components/plugin-posted-badge";
 import {
   PinnedTodoPanel,
   getLatestTodos,
@@ -122,6 +124,7 @@ import { ArchivedWorkspaceNotice } from "./archived-workspace-notice";
 import { ContextUsageIndicator } from "./context-usage-indicator";
 import { MessageActions } from "./message-actions";
 import { GitDataPartCard } from "./git-data-part-card";
+import { ModelEffortBackendControls } from "./model-effort-backend-controls";
 import { useStreamRecovery } from "./hooks/use-stream-recovery";
 import { useAutoCommitStatus } from "./hooks/use-auto-commit-status";
 import { useDevServer } from "./hooks/use-dev-server";
@@ -129,6 +132,7 @@ import { useDestructiveConfirm } from "@/hooks/use-destructive-confirm";
 import {
   COMPACT_CHAT_CONFIRM,
   FORK_CONVERSATION_CONFIRM,
+  REVERT_TURN_CONFIRM,
 } from "./conversation-confirm-copy";
 import { useGitPanel } from "./git-panel-context";
 import { WorkspacePanel } from "./workspace-panel";
@@ -211,6 +215,7 @@ export function SessionChatContent({
   messageDurationMap,
   messageStartedAtMap,
   lastUserMessageSentAt,
+  pluginRenderers,
 }: {
   initialIsOnlyChatInSession: boolean;
   /** Pre-computed generation duration (ms) per assistant message ID */
@@ -219,6 +224,14 @@ export function SessionChatContent({
   messageStartedAtMap: Record<string, string>;
   /** Fallback: last user message's createdAt, for refresh-during-stream */
   lastUserMessageSentAt: string | null;
+  /**
+   * Enabled plugins' registered renderers, resolved server-side
+   * (`enabledPluginRenderers`, `lib/plugins/renderer-info.ts`) and threaded
+   * straight through to `ToolCall`'s `pluginRenderers` prop — see that
+   * prop's own doc for why a tool call whose name matches one of these
+   * renders in a sandboxed iframe instead of the generic fallback.
+   */
+  pluginRenderers: PluginRendererInfo[];
 }) {
   const router = useRouter();
   const [input, setInput] = useState("");
@@ -376,11 +389,13 @@ export function SessionChatContent({
   const {
     session,
     chatInfo,
+    chatCapabilities,
     setSandboxInfo,
     archiveSession,
     unarchiveSession,
     updateChatModel,
     updateChatEffort,
+    updateChatBackend,
     updateSessionTitle,
     hasRuntimeSandboxState,
     hasPausedWorkspace,
@@ -960,12 +975,7 @@ export function SessionChatContent({
       // Destructive and not undoable, so it is confirmed rather than
       // optimistic — and the wording says what actually goes, including any
       // edits made by hand since the turn.
-      const confirmed = await confirmDestructive({
-        confirmLabel: "Revert this turn",
-        description:
-          "Every file change made since — by the agent and by you — will be discarded. This cannot be undone.",
-        title: "Revert this turn?",
-      });
+      const confirmed = await confirmDestructive(REVERT_TURN_CONFIRM);
       if (!confirmed) return;
 
       setRevertingMessageId(messageId);
@@ -1068,6 +1078,21 @@ export function SessionChatContent({
     [chatInfo.effort, updateChatEffort],
   );
 
+  const handleBackendChange = useCallback(
+    async (backend: ChatBackendSelection) => {
+      if (backend === chatInfo.backend) return;
+      try {
+        setIsUpdatingModel(true);
+        await updateChatBackend(backend);
+      } catch (err) {
+        console.error("Failed to update agent backend:", err);
+      } finally {
+        setIsUpdatingModel(false);
+      }
+    },
+    [chatInfo.backend, updateChatBackend],
+  );
+
   const selectedModelOption = useMemo(
     () => modelOptions.find((option) => option.id === chatInfo.modelId),
     [modelOptions, chatInfo.modelId],
@@ -1162,7 +1187,10 @@ export function SessionChatContent({
     resendingMessageId !== null;
 
   const sendMessageWithPendingState = useCallback(
-    async (message: Parameters<typeof sendMessage>[0]) => {
+    async (
+      message: Parameters<typeof sendMessage>[0],
+      options?: Parameters<typeof sendMessage>[1],
+    ) => {
       setHasPendingResponse(true);
       setUserStopped(false);
       lastSendTimestampRef.current = Date.now();
@@ -1170,7 +1198,7 @@ export function SessionChatContent({
       void setChatStreaming(chatInfo.id, true);
 
       try {
-        await sendMessage(message);
+        await sendMessage(message, options);
       } catch (error) {
         setHasPendingResponse(false);
         void setChatStreaming(chatInfo.id, false);
@@ -2561,6 +2589,15 @@ export function SessionChatContent({
                                               {p.text}
                                             </p>
                                           </div>
+                                          {group.index === 0 &&
+                                            m.metadata?.postedBy?.kind ===
+                                              "plugin" && (
+                                              <PluginPostedBadge
+                                                pluginId={
+                                                  m.metadata.postedBy.pluginId
+                                                }
+                                              />
+                                            )}
                                           {group.index === 0 && (
                                             <MessageActions
                                               actions={[
@@ -2607,7 +2644,7 @@ export function SessionChatContent({
                                           )}
                                         </div>
                                       ) : (
-                                        <div className="group min-w-0 w-full overflow-hidden">
+                                        <div className="group min-w-0 w-full overflow-hidden wrap-anywhere">
                                           <Streamdown
                                             animated={
                                               isMessageStreaming
@@ -2701,6 +2738,7 @@ export function SessionChatContent({
                                       <ToolCall
                                         part={p as WebAgentUIToolPart}
                                         isStreaming={isMessageStreaming}
+                                        pluginRenderers={pluginRenderers}
                                         onApprove={(id) =>
                                           addToolApprovalResponse({
                                             id,
@@ -3219,6 +3257,18 @@ export function SessionChatContent({
                                 className="p-0"
                               />
                             )}
+                            {/*
+                              Under the thumbnails, inside the same row, so it
+                              reads as a caption on the images it is about —
+                              and only when this chat's backend actually
+                              cannot see them (`capabilities.images`, the same
+                              capability-driven rule that hides the effort
+                              control). It renders nothing otherwise.
+                            */}
+                            <UnviewableImageNotice
+                              capabilities={chatCapabilities}
+                              imageCount={images.length}
+                            />
                           </div>
                         )}
 
@@ -3372,11 +3422,13 @@ export function SessionChatContent({
                             )}
                             {chatInfo.modelId && (
                               /*
-                               * Model and effort read as one setting, so they
-                               * sit on one line. This wrapper exists only to
-                               * dim the pair while a turn is in flight, and
-                               * without a flex here its two children stacked
-                               * vertically in a row with space to spare.
+                               * Model, effort, and backend read as one
+                               * setting, so they sit on one line — see
+                               * `ModelEffortBackendControls`'s own doc. This
+                               * wrapper exists only to dim the row while a
+                               * turn is in flight, and without a flex here
+                               * its children stacked vertically in a row
+                               * with space to spare.
                                *
                                * The rule before it separates two kinds of
                                * control that had been sharing one undivided
@@ -3387,66 +3439,72 @@ export function SessionChatContent({
                                * grouped it with submitting rather than with
                                * typing.
                                */
-                              <div
-                                className={cn(
-                                  "flex min-w-0 items-center gap-0.5 border-base-content/10 border-l pl-1.5",
-                                  (isChatInFlight ||
-                                    isUpdatingModel ||
-                                    modelOptionsLoading) &&
-                                    "pointer-events-none opacity-60",
-                                )}
-                              >
-                                <ModelSelectorCompact
-                                  value={chatInfo.modelId}
-                                  modelOptions={modelOptions}
-                                  disabled={
-                                    isChatInFlight ||
-                                    isUpdatingModel ||
-                                    modelOptionsLoading
-                                  }
-                                  onCloseAutoFocus={() => {
-                                    window.requestAnimationFrame(() => {
-                                      const textarea = inputRef.current;
-                                      if (!textarea) {
-                                        return;
-                                      }
+                              <ModelEffortBackendControls
+                                backend={
+                                  (chatInfo.backend ??
+                                    "claude-code") as ChatBackendSelection
+                                }
+                                capabilities={chatCapabilities}
+                                disabled={
+                                  isChatInFlight ||
+                                  isUpdatingModel ||
+                                  modelOptionsLoading
+                                }
+                                effort={chatInfo.effort ?? null}
+                                modelId={chatInfo.modelId}
+                                modelOptions={modelOptions}
+                                onBackendChange={(backend) => {
+                                  void handleBackendChange(backend);
+                                }}
+                                onEffortChange={(effort) => {
+                                  void handleEffortChange(effort);
+                                }}
+                                onModelChange={(modelId) => {
+                                  void handleModelChange(modelId);
+                                }}
+                                onModelCloseAutoFocus={() => {
+                                  window.requestAnimationFrame(() => {
+                                    const textarea = inputRef.current;
+                                    if (!textarea) {
+                                      return;
+                                    }
 
-                                      textarea.focus();
-                                      const nextCursorPosition = Math.min(
-                                        cursorPosition,
-                                        textarea.value.length,
-                                      );
-                                      textarea.setSelectionRange(
-                                        nextCursorPosition,
-                                        nextCursorPosition,
-                                      );
-                                    });
-                                  }}
-                                  onChange={(modelId) => {
-                                    void handleModelChange(modelId);
-                                  }}
-                                />
-                                <EffortSelectorCompact
-                                  value={chatInfo.effort ?? null}
-                                  disabled={
-                                    isChatInFlight ||
-                                    isUpdatingModel ||
-                                    modelOptionsLoading
-                                  }
-                                  onChange={(effort) => {
-                                    void handleEffortChange(effort);
-                                  }}
-                                />
-                              </div>
+                                    textarea.focus();
+                                    const nextCursorPosition = Math.min(
+                                      cursorPosition,
+                                      textarea.value.length,
+                                    );
+                                    textarea.setSelectionRange(
+                                      nextCursorPosition,
+                                      nextCursorPosition,
+                                    );
+                                  });
+                                }}
+                              />
                             )}
+                            {/*
+                              The dial is a button only where something can
+                              act on it. `capabilities.compaction` is false
+                              for Poolside — `pool` compacts on its own
+                              schedule and has no client-callable way in (see
+                              that field's doc) — so the chat gets a readout
+                              that says so, rather than a control that POSTs
+                              to a Claude-only route and comes back with an
+                              error about the wrong thing.
+                            */}
                             <ContextUsageIndicator
                               isCompacting={isCompacting}
-                              {...(isChatInFlight
-                                ? {}
+                              {...(chatCapabilities.compaction
+                                ? isChatInFlight
+                                  ? {}
+                                  : {
+                                      onCompact: () => {
+                                        void handleCompact();
+                                      },
+                                    }
                                 : {
-                                    onCompact: () => {
-                                      void handleCompact();
-                                    },
+                                    compactUnavailableReason:
+                                      "This backend compacts its own history when it needs to, so there is nothing to trigger here.",
                                   })}
                               inputTokens={tokenUsage.inputTokens}
                               conversationInputTokens={

@@ -5,6 +5,11 @@
   "ignorePatterns": [
     ".agents/skills/**",
     "apps/web/components/ui/**",
+    // Written by `drizzle-kit generate`, byte-for-byte as it emits them.
+    // Reformatting them puts every regenerated snapshot into the diff twice
+    // — once for the schema change, once for the reformat — and `db:check`
+    // regenerates to compare, so a formatted copy is never what it produces.
+    "apps/web/lib/db/migrations/meta/**",
     "**/*.md",
   ],
   "arrowParens": "always",

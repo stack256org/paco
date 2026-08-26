@@ -1,6 +1,15 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /**
  * The `PreToolUse` hook, and the settings that install it.
@@ -35,16 +44,65 @@ export const HOOK_SOURCE =
  * never inside the user's repository, which would put Paco's configuration in
  * their diff.
  */
+/**
+ * Install (or confirm) the hook at an exact path, atomically.
+ *
+ * `buildApprovalSettings()` runs once per gated `runAgentTurn` call, and
+ * this server runs many turns at once — separate chats on separate
+ * workflows, each carrying its own approval settings. Two calls overlapping
+ * is therefore ordinary, not exotic. A plain `writeFileSync` to this fixed
+ * path let a
+ * hook process spawned mid-write (by a *different* concurrent turn) read a
+ * truncated or half-overwritten file and fail the tool call it was supposed
+ * to gate.
+ *
+ * Two changes close that: the write is skipped entirely once the file
+ * already matches `HOOK_SOURCE` — true for every call after the very
+ * first, since the source only changes across a Paco upgrade — and when it
+ * doesn't match, the new content goes to a sibling temp file first, with
+ * `renameSync` swapping it into place. A rename within the same directory
+ * is atomic on POSIX filesystems, so a concurrent reader always sees
+ * either the complete old file or the complete new one, never a partial
+ * write.
+ *
+ * Exported (rather than folded into `hookPath()`) so `HOOK_SOURCE`'s
+ * atomic-install behavior can be tested against a throwaway path directly:
+ * `os.homedir()` cannot be relied on to honor `process.env.HOME` across
+ * every runtime this ships on (Bun's `homedir()` reads the OS user
+ * database, not the environment), so a test needs some other way to reach
+ * a throwaway target.
+ */
+export function installHookAt(target: string): void {
+  const current = existsSync(target) ? readFileSync(target, "utf-8") : null;
+  if (current !== HOOK_SOURCE) {
+    const dir = dirname(target);
+    const tempTarget = join(dir, `.pre-tool-use.mjs.${randomUUID()}.tmp`);
+    try {
+      writeFileSync(tempTarget, HOOK_SOURCE, "utf-8");
+      renameSync(tempTarget, target);
+    } catch (error) {
+      // The rename is what makes this atomic, so a failure before it leaves
+      // the real hook untouched — but it can leave the temp file behind, and
+      // every call mints a fresh UUID, so nothing would ever reclaim it.
+      // Best-effort: never let cleanup replace the error that actually
+      // matters (a full disk, a permission problem) with its own.
+      try {
+        rmSync(tempTarget, { force: true });
+      } catch {
+        // Ignored on purpose — see above.
+      }
+      throw error;
+    }
+  }
+  chmodSync(target, 0o755);
+}
+
 function hookPath(): string {
   const dir = join(homedir(), ".paco", "hooks");
   mkdirSync(dir, { recursive: true });
 
   const target = join(dir, "pre-tool-use.mjs");
-  // Rewritten every time rather than only when missing: the file is derived
-  // from this constant, and a stale copy from an older build would be a
-  // security control quietly running yesterday's logic.
-  writeFileSync(target, HOOK_SOURCE, "utf-8");
-  chmodSync(target, 0o755);
+  installHookAt(target);
 
   return target;
 }

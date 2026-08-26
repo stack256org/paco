@@ -117,12 +117,31 @@ describe("performAutoCreatePr", () => {
   });
 
   test("skips when the branch is no commits ahead", async () => {
-    // A turn that only answered a question has nothing to propose.
+    // The ordinary case now that turns do not commit: the work is sitting
+    // uncommitted in the worktree, waiting for the operator to choose it.
     execReplies = [[/rev-list --count/, { stdout: "0\n" }]];
 
     const result = await performAutoCreatePr(PARAMS);
 
     expect(result).toMatchObject({ skipped: true });
+    expect(result.skipReason).toBe(
+      "Nothing committed yet — commit to open a pull request",
+    );
+    // Short enough to survive the truncated one-line label it is shown in.
+    expect(result.skipReason?.length).toBeLessThanOrEqual(60);
+    expect(pushCalls).toHaveLength(0);
+    expect(createCalls).toHaveLength(0);
+  });
+
+  test("skips rather than guessing when the base cannot be compared", async () => {
+    // The count only fails when `origin/<base>` is missing, and a base branch
+    // GitHub has never seen cannot be a pull request's target. This used to
+    // fall through and open the pull request anyway.
+    execReplies = [[/rev-list --count/, { success: false }]];
+
+    const result = await performAutoCreatePr(PARAMS);
+
+    expect(result).toMatchObject({ skipped: true, created: false });
     expect(pushCalls).toHaveLength(0);
     expect(createCalls).toHaveLength(0);
   });

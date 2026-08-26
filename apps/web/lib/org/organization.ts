@@ -3,6 +3,7 @@ import "server-only";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "@/lib/db/client";
+import { seedDefaultRoster } from "@/lib/db/roster";
 import {
   type Organization,
   organizationMembers,
@@ -75,6 +76,12 @@ export async function ensureOrganizationWithOwner(
   });
 
   if (created) {
+    // Only the winner reaches this branch, so the roster is seeded exactly
+    // once per installation — not on every sign-in, and not for the loser
+    // of the race below. Runs after the transaction commits rather than
+    // inside it: roster.ts writes through the shared `db` handle, not the
+    // transaction's `tx`, so nothing here needs to participate in it.
+    await seedDefaultRoster(created.id);
     return created;
   }
 

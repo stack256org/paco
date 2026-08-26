@@ -1,0 +1,5 @@
+{
+  "name": "slack-plugin-source",
+  "private": true,
+  "type": "module"
+}

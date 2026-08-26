@@ -13,12 +13,24 @@ let session: TestSession;
 let previewBaseDomain: string | null;
 let tlsEnabled: boolean;
 
+// Matches strictly on the chat's own slug, so a route that looked a host
+// up by anything other than its exact preview label would fail here rather
+// than pass against a mock that answers regardless of what it was asked.
 mock.module("@/lib/preview/authorize", () => ({
-  findChatOwnerByPreviewSlug: async () => chat,
+  findChatOwnerByPreviewSlug: async (slug: string) =>
+    slug === "chat-abc" ? chat : null,
 }));
 
 mock.module("@/lib/session/get-server-session", () => ({
   getServerSession: async () => session,
+}));
+
+// Only `/api/preview-auth/route.ts` (not this grant endpoint) reads a
+// session this way — mocked here purely so the round-trip tests below can
+// exercise that route too, in-process, against the grant this endpoint
+// mints.
+mock.module("@/lib/session/server", () => ({
+  getSessionFromReq: async () => session,
 }));
 
 mock.module("@/lib/settings/instance-settings", () => ({
@@ -26,9 +38,34 @@ mock.module("@/lib/settings/instance-settings", () => ({
 }));
 
 const routeModulePromise = import("./route");
+const previewAuthRouteModulePromise = import("../route");
 
 function createRequest(url: string): NextRequest {
   return { url } as NextRequest;
+}
+
+/** A minimal fake of what `/api/preview-auth/route.ts`'s GET reads off a `NextRequest`. */
+function createForwardAuthRequest(params: {
+  forwardedHost: string;
+  cookie?: string;
+}): NextRequest {
+  const headers = new Headers();
+  headers.set("x-forwarded-host", params.forwardedHost);
+  headers.set("x-forwarded-uri", "/");
+
+  const cookieMap = new Map<string, { value: string }>();
+  if (params.cookie) {
+    const [name, value] = params.cookie.split("=");
+    if (name && value !== undefined) {
+      cookieMap.set(name, { value });
+    }
+  }
+
+  return {
+    headers,
+    cookies: { get: (name: string) => cookieMap.get(name) },
+    url: "http://localhost/api/preview-auth",
+  } as unknown as NextRequest;
 }
 
 describe("GET /api/preview-auth/grant", () => {
@@ -147,5 +184,70 @@ describe("GET /api/preview-auth/grant", () => {
     );
     const location = new URL(response.headers.get("Location") ?? "");
     expect(location.searchParams.get("returnTo")).toBe("/");
+  });
+
+  /*
+   * The two routes together, which neither file covers alone: minting a
+   * grant is only meaningful if forward auth then honours it.
+   *
+   * The preview host never carries Paco's own session cookie (it is
+   * host-only by design), so `session` is dropped before the second call —
+   * that is what makes this a test of the grant rather than one that would
+   * pass on the session alone.
+   */
+  test("real round trip: owner mints a grant, then forward auth allows on the grant alone", async () => {
+    session = { user: { id: "owner-1" } };
+    chat = {
+      chatId: "chat-abc",
+      ownerUserId: "owner-1",
+      visibility: "private",
+    };
+    const { GET: mintGrant } = await routeModulePromise;
+    const { GET: forwardAuth } = await previewAuthRouteModulePromise;
+
+    const mintResponse = await mintGrant(
+      createRequest(
+        "https://paco.example.com/api/preview-auth/grant?host=chat-abc.previews.example.com",
+      ),
+    );
+    expect(mintResponse.status).toBe(302);
+    const consumeLocation = new URL(mintResponse.headers.get("Location") ?? "");
+    const grant = consumeLocation.searchParams.get("grant");
+    expect(grant).toBeTruthy();
+
+    session = undefined;
+
+    const allowedResponse = await forwardAuth(
+      createForwardAuthRequest({
+        forwardedHost: "chat-abc.previews.example.com",
+        cookie: `paco_preview_grant=${grant}`,
+      }),
+    );
+    expect(allowedResponse.status).toBe(200);
+  });
+
+  test("real round trip: a non-owner cannot mint, so forward auth keeps denying", async () => {
+    chat = {
+      chatId: "chat-abc",
+      ownerUserId: "owner-1",
+      visibility: "private",
+    };
+    session = { user: { id: "someone-else" } };
+    const { GET: mintGrant } = await routeModulePromise;
+    const { GET: forwardAuth } = await previewAuthRouteModulePromise;
+
+    const mintResponse = await mintGrant(
+      createRequest(
+        "https://paco.example.com/api/preview-auth/grant?host=chat-abc.previews.example.com",
+      ),
+    );
+    expect(mintResponse.status).toBe(403);
+
+    const deniedResponse = await forwardAuth(
+      createForwardAuthRequest({
+        forwardedHost: "chat-abc.previews.example.com",
+      }),
+    );
+    expect(deniedResponse.status).not.toBe(200);
   });
 });

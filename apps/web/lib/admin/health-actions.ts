@@ -1,5 +1,6 @@
 "use server";
 
+import { dockerPreflight, type DockerPreflightResult } from "@paco/sandbox";
 import { z } from "zod";
 import {
   readMigrationHealth,
@@ -66,6 +67,7 @@ export type SandboxHealth = {
 export type InstanceHealth = {
   queue: HealthMetric<QueueHealth>;
   migrations: HealthMetric<MigrationHealth>;
+  docker: HealthMetric<DockerPreflightResult>;
   spend: HealthMetric<SpendReport>;
 };
 
@@ -157,7 +159,7 @@ function toSandboxMetric(
 export async function getInstanceHealth(): Promise<InstanceHealth> {
   await requireAdmin();
 
-  const [queue, migrations, spend] = await Promise.allSettled([
+  const [queue, migrations, spend, docker] = await Promise.allSettled([
     withTimeout(
       readQueueHealth(),
       METRIC_TIMEOUT_MS,
@@ -173,12 +175,25 @@ export async function getInstanceHealth(): Promise<InstanceHealth> {
       METRIC_TIMEOUT_MS,
       "Reading spend timed out",
     ),
+    /*
+     * `dockerPreflight` never throws for a bad daemon — an unreachable,
+     * refusing or rootless daemon is a RESULT, not an error, which is the
+     * whole point of it. The timeout here is only for a daemon that accepts
+     * the connection and then never answers; `dockerPreflight` has its own
+     * 10s bound (dockerode has none) and this sits outside it.
+     */
+    withTimeout(
+      dockerPreflight(),
+      METRIC_TIMEOUT_MS,
+      "Reading Docker health timed out",
+    ),
   ]);
 
   return {
     queue: toMetric(queue),
     migrations: toMetric(migrations),
     spend: toMetric(spend),
+    docker: toMetric(docker),
   };
 }
 

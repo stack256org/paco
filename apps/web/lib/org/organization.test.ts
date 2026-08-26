@@ -7,6 +7,20 @@ import { organizationMembers, organizations } from "@/lib/db/schema";
 
 mock.module("server-only", () => ({}));
 
+/**
+ * `ensureOrganizationWithOwner` calls `seedDefaultRoster` once it knows it
+ * won the creation race. Roster internals (validation, idempotence, the
+ * default agents) are `roster.test.ts`'s job — this file only needs to know
+ * whether, and for which organisation id, the call happened.
+ */
+let seedCalls: string[] = [];
+mock.module("@/lib/db/roster", () => ({
+  seedDefaultRoster: (organizationId: string) => {
+    seedCalls.push(organizationId);
+    return Promise.resolve();
+  },
+}));
+
 type Row = Record<string, unknown>;
 
 let orgs: Row[] = [];
@@ -133,6 +147,7 @@ describe("ensureOrganizationWithOwner", () => {
   test("creates the organisation and its owner on a fresh install", async () => {
     orgs = [];
     members = [];
+    seedCalls = [];
     const { ensureOrganizationWithOwner } = await modulePromise;
 
     const org = await ensureOrganizationWithOwner("user-1", "Acme");
@@ -141,6 +156,8 @@ describe("ensureOrganizationWithOwner", () => {
     expect(orgs.length).toBe(1);
     expect(members.length).toBe(1);
     expect(members[0]?.role).toBe("owner");
+    // The roster is seeded exactly once, for the organisation just created.
+    expect(seedCalls).toEqual([org.id]);
   });
 
   test("is a no-op when an organisation already exists", async () => {
@@ -148,6 +165,7 @@ describe("ensureOrganizationWithOwner", () => {
       { id: "org-1", name: "Existing", singleton: true, createdAt: new Date() },
     ];
     members = [];
+    seedCalls = [];
     const { ensureOrganizationWithOwner } = await modulePromise;
 
     const org = await ensureOrganizationWithOwner("user-2");
@@ -156,11 +174,14 @@ describe("ensureOrganizationWithOwner", () => {
     expect(orgs.length).toBe(1);
     // The second person must NOT become a second owner.
     expect(members.length).toBe(0);
+    // Nor does an already-existing organisation get re-seeded.
+    expect(seedCalls).toEqual([]);
   });
 
   test("two people signing in at the same moment produce one organisation and one owner, never two", async () => {
     orgs = [];
     members = [];
+    seedCalls = [];
     const { ensureOrganizationWithOwner } = await modulePromise;
 
     // Both callers start before either finishes — this is the race itself,
@@ -188,5 +209,9 @@ describe("ensureOrganizationWithOwner", () => {
     expect(members.length).toBe(1);
     expect(members[0]?.role).toBe("owner");
     expect(["user-a", "user-b"]).toContain(userIdOf(members[0]));
+
+    // Only the winner's call reaches seedDefaultRoster — never the loser's,
+    // and never twice.
+    expect(seedCalls).toEqual([orgFromA.id]);
   });
 });

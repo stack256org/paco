@@ -1,0 +1,1 @@
+ALTER TABLE "plugins" ADD COLUMN "ingress_secret" text;

@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { EvalsTabLink } from "@/app/sessions/[sessionId]/evals/evals-tab-link";
 import { ChatTabsWorkspaceNote } from "./chat-tabs-workspace-note";
 import { useGitPanel } from "./git-panel-context";
 
@@ -445,6 +446,10 @@ export function ChatTabs({ activeChatId }: ChatTabsProps) {
             </TooltipContent>
           </Tooltip>
         </div>
+
+        {/* Outside the scrolling container, so a session with a dozen chats
+            open does not push the only way into Evals off the strip. */}
+        <EvalsTabLink />
       </div>
 
       <ChatTabsWorkspaceNote />
