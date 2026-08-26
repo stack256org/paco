@@ -619,12 +619,16 @@ export async function updateChatActiveStreamId(
  *
  * `chats.backend` is a mutable, per-chat choice, and each backend's resume
  * token means something only to that backend's own session store — Claude
- * Code's `--resume` and OpenFX's ACP `sessionId` are not interchangeable
- * (`OpenFxBackend.loadSession` would hand a Claude Code session id straight
- * to ACP's `session/load`, and the reverse is just as wrong). Reading the
- * token under the *current* backend's key, rather than one shared column,
- * is what makes switching a chat's backend and switching it back resume
- * correctly on both sides instead of one clobbering the other.
+ * Code's `--resume` id and Poolside's `pool` session id are not
+ * interchangeable (handing one to the other backend either fails outright
+ * or, worse, resumes the wrong conversation). Reading the token under the
+ * *current* backend's key, rather than one shared column, is what makes
+ * switching a chat's backend and switching it back resume correctly on both
+ * sides instead of one clobbering the other.
+ *
+ * A key for a backend that no longer exists is never resurrected here: it
+ * is deleted from the map by migration (0015 did this for the removed
+ * `"openfx"` key), so this only ever answers for backends that can run.
  *
  * Falls back to the legacy single-column `claudeSessionId` only for
  * `"claude-code"`, and only when `resumeTokens` has nothing under that key

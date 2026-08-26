@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   domainSchema,
   emailAddressSchema,
-  openFxSchema,
+  poolsideSchema,
   smtpSchema,
 } from "./instance-settings-schemas";
 
@@ -190,47 +190,47 @@ describe("smtpSchema password normalisation", () => {
   });
 });
 
-describe("openFxSchema", () => {
+describe("poolsideSchema", () => {
   const base = { binaryPath: null, apiKey: null };
 
-  test("trims a whitespace-padded endpoint URL and accepts it", () => {
-    const result = openFxSchema.safeParse({
+  test("trims a whitespace-padded base URL and accepts it", () => {
+    const result = poolsideSchema.safeParse({
       ...base,
-      endpoint: "  https://gateway.example.com  ",
+      baseUrl: "  https://pool.example.com  ",
     });
 
     expect(result.success).toBe(true);
-    expect(result.success && result.data.endpoint).toBe(
-      "https://gateway.example.com",
+    expect(result.success && result.data.baseUrl).toBe(
+      "https://pool.example.com",
     );
   });
 
-  test("normalises a blank endpoint to null", () => {
-    const result = openFxSchema.safeParse({ ...base, endpoint: "   " });
+  test("normalises a blank base URL to null", () => {
+    const result = poolsideSchema.safeParse({ ...base, baseUrl: "   " });
 
     expect(result.success).toBe(true);
-    expect(result.success && result.data.endpoint).toBeNull();
+    expect(result.success && result.data.baseUrl).toBeNull();
   });
 
-  test("accepts a null endpoint", () => {
-    const result = openFxSchema.safeParse({ ...base, endpoint: null });
+  test("accepts a null base URL — the default Poolside service", () => {
+    const result = poolsideSchema.safeParse({ ...base, baseUrl: null });
 
     expect(result.success).toBe(true);
   });
 
-  test("rejects an invalid endpoint URL", () => {
-    const result = openFxSchema.safeParse({
+  test("rejects an invalid base URL", () => {
+    const result = poolsideSchema.safeParse({
       ...base,
-      endpoint: "not-a-url",
+      baseUrl: "not-a-url",
     });
 
     expect(result.success).toBe(false);
   });
 
   test("a blank apiKey means 'leave the stored one alone'", () => {
-    const result = openFxSchema.safeParse({
+    const result = poolsideSchema.safeParse({
       ...base,
-      endpoint: null,
+      baseUrl: null,
       apiKey: "   ",
     });
 
@@ -239,21 +239,35 @@ describe("openFxSchema", () => {
   });
 
   test("passes a real apiKey through unchanged", () => {
-    const result = openFxSchema.safeParse({
+    const result = poolsideSchema.safeParse({
       ...base,
-      endpoint: null,
-      apiKey: "sk-openfx-secret",
+      baseUrl: null,
+      apiKey: "sk-poolside-secret",
     });
 
     expect(result.success).toBe(true);
-    expect(result.success && result.data.apiKey).toBe("sk-openfx-secret");
+    expect(result.success && result.data.apiKey).toBe("sk-poolside-secret");
   });
 
   test("rejects a blank binaryPath (use null to mean unset)", () => {
-    const result = openFxSchema.safeParse({
-      endpoint: null,
+    const result = poolsideSchema.safeParse({
+      baseUrl: null,
       apiKey: null,
       binaryPath: "",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  /**
+   * The removed backend's key had its own field name. A form still POSTing
+   * `endpoint` must not slip through as a Poolside base URL by accident.
+   */
+  test("an OpenFX-shaped payload does not validate as Poolside settings", () => {
+    const result = poolsideSchema.safeParse({
+      endpoint: "https://gateway.example.com",
+      apiKey: null,
+      binaryPath: null,
     });
 
     expect(result.success).toBe(false);

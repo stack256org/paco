@@ -90,8 +90,16 @@ export const smtpSchema = z.object({
 /** The address `sendTestEmail` is asked to send to. */
 export const emailAddressSchema = z.string().trim().pipe(z.email());
 
-export const openFxSchema = z.object({
-  endpoint: z
+/**
+ * The BYO Poolside provider form.
+ *
+ * `baseUrl`, not `endpoint`: the value is forwarded to the `pool` process as
+ * `POOLSIDE_STANDALONE_BASE_URL`, so it is the base URL of a Poolside
+ * deployment and it genuinely takes effect. Blank means "use Poolside's
+ * default service", which is why `null` is accepted rather than required.
+ */
+export const poolsideSchema = z.object({
+  baseUrl: z
     .string()
     .nullable()
     .transform((value) => (value && value.trim() !== "" ? value.trim() : null))
