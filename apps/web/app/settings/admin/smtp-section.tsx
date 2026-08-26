@@ -445,7 +445,7 @@ export function SmtpSection({
               ) : (
                 <AlertTriangle aria-hidden="true" className="size-4 shrink-0" />
               )}
-              <span>{testResult.message}</span>
+              <span className="wrap-anywhere">{testResult.message}</span>
             </div>
           ) : null}
         </div>
