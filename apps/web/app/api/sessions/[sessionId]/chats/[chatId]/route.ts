@@ -20,6 +20,7 @@ import {
   updateChat,
 } from "@/lib/db/sessions";
 import { type Effort, parseEffort } from "@/lib/effort";
+import { resolveModelIdForBackend } from "@/lib/model-catalog";
 import { BAD_REQUEST, CHAT_NOT_FOUND } from "@/lib/error-copy";
 
 type RouteContext = {
@@ -151,6 +152,34 @@ export async function PATCH(req: Request, context: RouteContext) {
   }
   if (nextBackend) {
     updatePayload.backend = nextBackend;
+
+    /*
+     * A backend switch revisits the model, because the two are not
+     * independent fields however much this request body makes them look it.
+     * `modelId` and `backend` were accepted side by side and written
+     * straight through, so a chat moved to Poolside kept `opus` — an id
+     * that backend cannot run. The turn survived it (`run-step.ts`'s
+     * `resolveModelId` drops an id the backend does not accept), so the only
+     * casualty was the composer, which reads the row and duly showed "opus"
+     * on a chat whose picker offered nothing but Laguna.
+     *
+     * Reconciled here rather than in the client that sent the switch: this
+     * is the only place the write happens, and the response already carries
+     * the fresh row and capabilities the composer re-renders from, so the
+     * corrected id lands in the UI without a second round trip.
+     *
+     * `nextModelId` wins over the stored value when the same request also
+     * sets one, so a client that switches both at once is judged on what it
+     * asked for.
+     */
+    const currentModelId = nextModelId ?? chatContext.chat.modelId;
+    const reconciledModelId = resolveModelIdForBackend(
+      capabilitiesForBackend(nextBackend),
+      currentModelId,
+    );
+    if (reconciledModelId && reconciledModelId !== currentModelId) {
+      updatePayload.modelId = reconciledModelId;
+    }
   }
 
   const updatedChat = await updateChat(chatId, updatePayload);

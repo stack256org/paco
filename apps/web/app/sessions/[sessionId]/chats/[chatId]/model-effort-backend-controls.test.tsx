@@ -163,10 +163,9 @@ describe("ModelEffortBackendControls", () => {
    * makes observable about it.
    *
    * `ModelSelectorCompact` renders the SELECTED option's `shortLabel`, and
-   * falls back to the raw id when the option is not in the list it was given
-   * (`displayText = selectedOption?.shortLabel ?? value`). So a Poolside id
-   * showing as "poolside/laguna-s-2.1" rather than "Laguna S" is proof the
-   * filter removed it.
+   * falls back to the raw id when the option is not in the list it was given.
+   * So a Poolside id showing as "poolside/laguna-s-2.1" rather than
+   * "Laguna S" is proof the filter removed it.
    *
    * This is the client half of the bug `listAllModels()` opened on the
    * server: once the catalog spans vendors, handing every option to every
@@ -186,6 +185,35 @@ describe("ModelEffortBackendControls", () => {
     const html = render(claudeOnly, "claude-code", "poolside/laguna-s-2.1");
     expect(html).toContain("poolside/laguna-s-2.1");
     expect(html).not.toContain("Laguna S");
+  });
+
+  /**
+   * ...and the raw id it falls back to must not read as a working selection.
+   *
+   * The screenshot that opened this bug showed a Poolside chat whose composer
+   * said "opus": the id was not in the filtered list, so the trigger rendered
+   * it verbatim, with the provider icon dropped and nothing else changed. It
+   * looked exactly like a chosen model. The id is still shown — "opus" says
+   * what is wrong where an empty button says nothing — but as a warning, and
+   * the tooltip names the problem.
+   */
+  test("marks a model the backend cannot run instead of passing it off as chosen", () => {
+    const html = render(POOLSIDE_CAPABILITIES, "poolside", "opus");
+
+    expect(html).toContain("opus");
+    expect(html).toContain("text-warning");
+    expect(html).toContain("isn&#x27;t available on this backend");
+  });
+
+  test("does not mark a model the backend does run", () => {
+    const html = render(
+      POOLSIDE_CAPABILITIES,
+      "poolside",
+      "poolside/laguna-s-2.1",
+    );
+
+    expect(html).not.toContain("text-warning");
+    expect(html).toContain("Change model (⌘⌥/)");
   });
 
   /** And the mirror: Poolside's own id survives its own list. */

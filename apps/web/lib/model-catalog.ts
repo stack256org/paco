@@ -2,7 +2,7 @@ import "server-only";
 
 import type { BackendCapabilities } from "@paco/agent-backend";
 import { POOLSIDE_MODEL_IDS } from "@paco/poolside-backend";
-import type { AvailableModel } from "./models";
+import { APP_DEFAULT_MODEL_ID, type AvailableModel } from "./models";
 
 /**
  * Models offered in the picker.
@@ -181,4 +181,54 @@ export function listAllModels(): AvailableModel[] {
 /** Whether an id names a model this build actually offers, on any backend. */
 export function isKnownModelId(modelId: string): boolean {
   return ALL_MODELS.some((model) => model.id === modelId);
+}
+
+/**
+ * The `modelId` a chat should hold once it is running on this backend.
+ *
+ * Switching a chat's backend used to leave `chats.model_id` alone, so a chat
+ * moved to Poolside still stored `opus`. The turn itself was fine —
+ * `run-step.ts`'s `resolveModelId` refuses to forward an id the backend does
+ * not accept — but the composer read the row and showed "opus" on a chat
+ * that could only run Laguna. Rather than teach the trigger to hide that,
+ * the row stops holding it.
+ *
+ * What it becomes is the new backend's DEFAULT, never `null`:
+ *
+ * - `null` would be the honest "the backend decides" value, and `run-step`
+ *   would handle it correctly, but the composer renders its whole
+ *   model/effort/backend row behind `chatInfo.modelId &&`. Clearing the id
+ *   takes the BACKEND selector down with the model one, stranding the chat
+ *   on the backend it was just switched to with no control left to switch
+ *   back. A default is also the truthful answer: the backend does resolve a
+ *   model when handed none, and naming it is what lets the picker show a tick.
+ * - The default is `APP_DEFAULT_MODEL_ID` when the backend accepts it, so a
+ *   chat coming back to Claude Code lands on `opus` rather than on whatever
+ *   sorted first; otherwise the first model the PICKER offers for that
+ *   backend — the top of the list the person is looking at, which for
+ *   Poolside is `poolside/laguna-s-2.1`, the same id `pool` reports as its
+ *   own `currentValue`. So the picker agrees with the service default.
+ * - A backend that offers nothing to pick keeps whatever the row held. There
+ *   is no id to move it to, and clearing it would hide the composer row for
+ *   the reason above. Nothing displays the stale value in that case: the
+ *   picker is not rendered at all.
+ *
+ * An id the backend already accepts is returned untouched, so this is safe
+ * to call on every write.
+ */
+export function resolveModelIdForBackend(
+  capabilities: Pick<BackendCapabilities, "models"> | undefined,
+  currentModelId: string | null | undefined,
+): string | null {
+  const offered = listAvailableModels(capabilities);
+  if (currentModelId && offered.some((model) => model.id === currentModelId)) {
+    return currentModelId;
+  }
+  if (offered.length === 0) {
+    return currentModelId ?? null;
+  }
+  const appDefault = offered.find(
+    (model) => model.id === APP_DEFAULT_MODEL_ID,
+  )?.id;
+  return appDefault ?? offered[0]?.id ?? currentModelId ?? null;
 }

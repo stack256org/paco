@@ -136,3 +136,105 @@ describe("isKnownModelId", () => {
     expect(isKnownModelId("not-a-model")).toBe(false);
   });
 });
+
+describe("resolveModelIdForBackend", () => {
+  /**
+   * Bug 1's data half. Switching a chat to Poolside used to leave
+   * `chats.model_id` holding `opus`, and the composer — which renders the
+   * stored id — duly said "opus" on a chat whose picker offered nothing but
+   * Laguna.
+   */
+  test("moves a stranded id onto the new backend's default", async () => {
+    const { resolveModelIdForBackend } = await modulePromise;
+    const { POOLSIDE_MODEL_IDS, POOLSIDE_DEFAULT_MODEL } =
+      await import("@paco/poolside-backend");
+
+    const resolved = resolveModelIdForBackend(
+      capabilities({ id: "poolside", models: POOLSIDE_MODEL_IDS }),
+      "opus",
+    );
+
+    expect(resolved).toBe(POOLSIDE_DEFAULT_MODEL);
+    // Whatever it is, the backend has to accept it. That is the whole point.
+    expect(POOLSIDE_MODEL_IDS).toContain(resolved as string);
+  });
+
+  test("leaves an id the backend already accepts alone", async () => {
+    const { resolveModelIdForBackend } = await modulePromise;
+
+    expect(
+      resolveModelIdForBackend(
+        capabilities({ id: "poolside", models: ["poolside/laguna-xs-2.1"] }),
+        "poolside/laguna-xs-2.1",
+      ),
+    ).toBe("poolside/laguna-xs-2.1");
+    expect(
+      resolveModelIdForBackend(capabilities({ id: "claude-code" }), "sonnet"),
+    ).toBe("sonnet");
+  });
+
+  /**
+   * Coming back the other way. `APP_DEFAULT_MODEL_ID` wins whenever the
+   * backend accepts it, so a chat returning to Claude Code lands on the model
+   * a new chat would start on rather than on whatever happens to sort first.
+   */
+  test("prefers the app default when the backend accepts it", async () => {
+    const { resolveModelIdForBackend } = await modulePromise;
+
+    expect(
+      resolveModelIdForBackend(
+        capabilities({ id: "claude-code" }),
+        "poolside/laguna-s-2.1",
+      ),
+    ).toBe("opus");
+  });
+
+  /**
+   * "First" is the first the PICKER offers — catalog order, which is the top
+   * of the list the person is looking at — not the order the backend happened
+   * to list its accepted ids in.
+   */
+  test("falls back to the first offered model when the app default is not on offer", async () => {
+    const { resolveModelIdForBackend } = await modulePromise;
+
+    expect(
+      resolveModelIdForBackend(
+        capabilities({ id: "claude-code", models: ["haiku", "sonnet"] }),
+        "poolside/laguna-s-2.1",
+      ),
+    ).toBe("sonnet");
+  });
+
+  /**
+   * Never `null` while there is something to pick — the composer hides its
+   * whole model/effort/backend row behind `chatInfo.modelId &&`, so clearing
+   * the id would take the backend selector down with it and strand the chat
+   * on the backend it was just switched to.
+   */
+  test("fills in a null model id for a backend that offers models", async () => {
+    const { resolveModelIdForBackend } = await modulePromise;
+
+    expect(
+      resolveModelIdForBackend(capabilities({ id: "claude-code" }), null),
+    ).toBe("opus");
+  });
+
+  /**
+   * A backend that resolves its own model has no id to move the row onto, and
+   * clearing it would hide the composer row for the reason above. Nothing
+   * renders the stale value in that case: the picker is not shown at all.
+   */
+  test("keeps the stored id when the backend offers nothing to pick", async () => {
+    const { resolveModelIdForBackend } = await modulePromise;
+
+    expect(
+      resolveModelIdForBackend(
+        capabilities({ id: "other", models: [] }),
+        "opus",
+      ),
+    ).toBe("opus");
+    expect(
+      resolveModelIdForBackend(capabilities({ id: "other", models: [] }), null),
+    ).toBeNull();
+  });
+});
