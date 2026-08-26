@@ -15,17 +15,25 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 
-/** `chats.backend`'s enum — see `lib/db/schema.ts` and `lib/agent/backend-factory.ts`. */
-export type ChatBackendSelection = "claude-code" | "openfx";
+/**
+ * `chats.backend`'s enum — see `lib/db/schema.ts` and the `ChatBackendId`
+ * this mirrors in `lib/agent/backend-factory.ts`.
+ *
+ * Declared here rather than imported from there because that module is
+ * `server-only`: it constructs the backends themselves. The two are kept in
+ * step by `tsc`, since every server boundary a selection crosses (the PATCH
+ * route, `capabilitiesForBackend`) is typed in terms of both.
+ */
+export type ChatBackendSelection = "claude-code" | "poolside";
 
 const BACKEND_LABELS: Record<ChatBackendSelection, string> = {
   "claude-code": "Claude Code",
-  openfx: "OpenFX",
+  poolside: "Poolside",
 };
 
 const BACKEND_DESCRIPTIONS: Record<ChatBackendSelection, string> = {
   "claude-code": "Anthropic's CLI agent. Supports reasoning effort.",
-  openfx: "Your own OpenFX endpoint — configured in Settings > Models.",
+  poolside: "Poolside's pool CLI — configured in Settings > Models.",
 };
 
 interface BackendSelectorCompactProps {
@@ -41,10 +49,13 @@ interface BackendSelectorCompactProps {
  * Sits beside the model and effort selectors (same popover/command shape as
  * `EffortSelectorCompact`), rather than folded into `ModelSelectorCompact`'s
  * own list: a chat's backend isn't one of that list's entries — it decides
- * which *kind* of process a model choice even means (see
- * `OpenFxBackend.capabilities()`'s `effort: false`) — and a chat rarely
- * switches backend mid-conversation the way it switches model, so a small,
- * separate control next to it reads more honestly than a cross-product.
+ * which *kind* of process a model choice even means (Poolside's own model
+ * ids are not Claude Code's tier aliases) — and a chat rarely switches
+ * backend mid-conversation the way it switches model, so a small, separate
+ * control next to it reads more honestly than a cross-product.
+ *
+ * The list is `BACKEND_LABELS`' keys, so it is exactly the `chats.backend`
+ * enum and cannot drift into offering a backend the column would reject.
  */
 export function BackendSelectorCompact({
   value,

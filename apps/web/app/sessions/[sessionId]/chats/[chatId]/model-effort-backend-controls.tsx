@@ -16,11 +16,19 @@ interface ModelEffortBackendControlsProps {
   backend: ChatBackendSelection;
   /**
    * What the chat's *current* backend actually supports — capability-driven
-   * UI (Section 7 Task 5): the effort control below is hidden whenever
-   * `capabilities.effort` is `false`, and the model control whenever
-   * `capabilities.models` leaves nothing to choose, rather than this
-   * component checking `backend === "openfx"` itself. A future backend that
-   * also lacks either hides the same way with no change here.
+   * UI: the effort control below is hidden whenever `capabilities.effort` is
+   * `false`, and the model control whenever `capabilities.models` leaves
+   * nothing to choose, rather than this component testing the `backend` prop
+   * against a literal id.
+   *
+   * That distinction is what makes the row survive a backend swap. Under
+   * OpenFX both controls happened to disappear together, so a
+   * `backend === "openfx"` check would have looked correct; Poolside splits
+   * them — it publishes its own model list through `session/new`'s
+   * `configOptions`, so the model picker STAYS, while its only
+   * reasoning knob is a two-valued `thought_level` that does not map onto
+   * Paco's effort levels, so the effort control still goes. Neither outcome
+   * is written down here; both fall out of the object.
    */
   capabilities: BackendCapabilities;
   disabled: boolean;
@@ -56,8 +64,11 @@ export function ModelEffortBackendControls({
    * server, re-applied here because a chat's backend is switched from this
    * very row: `modelOptions` was rendered for whichever backend the page
    * loaded on. `capabilities.models` is the backend's own list of accepted
-   * ids — `undefined` means the whole catalog, an empty list means it
-   * resolves its own model (OpenFX) and there is nothing left to pick.
+   * ids — `undefined` means the whole catalog applies (Claude Code, whose
+   * tier aliases the catalog is written in), and a list means exactly those
+   * ids and no others. An EMPTY list is the degenerate case of that, not a
+   * separate rule: a backend that takes no id from the picker leaves nothing
+   * to render and the control disappears on its own.
    */
   const accepted = capabilities.models;
   const visibleModelOptions =

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { renderToStaticMarkup } from "react-dom/server";
 import type { BackendCapabilities } from "@paco/agent-backend";
+import { renderToStaticMarkup } from "react-dom/server";
+import type { ChatBackendSelection } from "@/components/backend-selector-compact";
 import type { ModelOption } from "@/lib/model-options";
 import { ModelEffortBackendControls } from "./model-effort-backend-controls";
 
@@ -17,6 +18,12 @@ const MODEL_OPTIONS: ModelOption[] = [
     shortLabel: "Haiku",
     provider: "anthropic",
   },
+  {
+    id: "poolside/laguna-s-2.1",
+    label: "Poolside Laguna S",
+    shortLabel: "Laguna S",
+    provider: "poolside",
+  },
 ];
 
 const CLAUDE_CAPABILITIES: BackendCapabilities = {
@@ -28,28 +35,38 @@ const CLAUDE_CAPABILITIES: BackendCapabilities = {
   subagents: true,
 };
 
-const OPENFX_CAPABILITIES: BackendCapabilities = {
-  id: "openfx",
+/**
+ * Poolside's shape, and the reason this file is worth having.
+ *
+ * OpenFX reported `effort: false` AND `models: []`, so both controls vanished
+ * together and a `backend === "openfx"` check would have passed every test
+ * here. Poolside splits them: `pool`'s `session/new` answers with a `model`
+ * select, so the picker stays, while its only reasoning knob is a two-valued
+ * `thought_level` that does not map onto Paco's effort levels, so the effort
+ * control goes. A component that hid on the id rather than on the object
+ * would now hide the wrong half.
+ */
+const POOLSIDE_CAPABILITIES: BackendCapabilities = {
+  id: "poolside",
   resume: true,
   steering: "restart",
   mcp: true,
   effort: false,
   subagents: true,
-  customAgents: false,
-  structuredOutput: false,
-  // The binary resolves its own model; the picker's Claude tier aliases
-  // mean nothing to it.
-  models: [],
+  models: ["poolside/laguna-s-2.1"],
 };
 
 const noop = () => {
   // no-op: only the rendered markup is asserted below
 };
 
-function render(capabilities: BackendCapabilities) {
+function render(
+  capabilities: BackendCapabilities,
+  backend: ChatBackendSelection = "claude-code",
+) {
   return renderToStaticMarkup(
     <ModelEffortBackendControls
-      backend={capabilities.id === "openfx" ? "openfx" : "claude-code"}
+      backend={backend}
       capabilities={capabilities}
       disabled={false}
       effort={null}
@@ -70,7 +87,7 @@ describe("ModelEffortBackendControls", () => {
   });
 
   test("hides the effort control when the backend reports effort: false", () => {
-    const html = render(OPENFX_CAPABILITIES);
+    const html = render(POOLSIDE_CAPABILITIES, "poolside");
 
     expect(html).not.toContain("Change how hard Paco thinks");
   });
@@ -82,15 +99,14 @@ describe("ModelEffortBackendControls", () => {
   });
 
   /**
-   * The picker was Claude-only: it offered opus/sonnet/haiku whatever the
-   * chat ran on, and the chosen alias went to OpenFX as `--model`. Hidden
-   * the same way the effort control already is, so a backend switch does not
-   * leave a control on screen that decides nothing.
+   * The half of the row Poolside keeps. The picker is not "the Claude
+   * picker": it renders whatever ids the backend accepts, which for Poolside
+   * are its own `poolside/laguna-*` models.
    */
-  test("hides the model control when the backend takes no model from the picker", () => {
-    const html = render(OPENFX_CAPABILITIES);
+  test("keeps the model control for Poolside, which publishes its own models", () => {
+    const html = render(POOLSIDE_CAPABILITIES, "poolside");
 
-    expect(html).not.toContain("Change model");
+    expect(html).toContain("Change model");
   });
 
   /**
@@ -105,12 +121,51 @@ describe("ModelEffortBackendControls", () => {
     expect(html).toContain("Change model");
   });
 
+  test("hides the model control when the backend takes no model from the picker", () => {
+    const html = render({ ...POOLSIDE_CAPABILITIES, models: [] }, "poolside");
+
+    expect(html).not.toContain("Change model");
+  });
+
+  /**
+   * The anti-regression test for the whole file: the `backend` prop says
+   * `"claude-code"` while the capability object says otherwise, and the
+   * capability object has to win. Any reintroduced `backend === …` check
+   * fails here even though every other test in this file would still pass.
+   */
+  test("follows the capability object, not the backend id, when they disagree", () => {
+    const effortlessClaude = render({
+      ...CLAUDE_CAPABILITIES,
+      effort: false,
+    });
+    expect(effortlessClaude).not.toContain("Change how hard Paco thinks");
+
+    const capablePoolside = render(
+      { ...POOLSIDE_CAPABILITIES, effort: true },
+      "poolside",
+    );
+    expect(capablePoolside).toContain("Change how hard Paco thinks");
+  });
+
   test("always shows the backend control regardless of capabilities", () => {
     const claudeHtml = render(CLAUDE_CAPABILITIES);
-    const openfxHtml = render(OPENFX_CAPABILITIES);
+    const poolsideHtml = render(POOLSIDE_CAPABILITIES, "poolside");
 
-    for (const html of [claudeHtml, openfxHtml]) {
+    for (const html of [claudeHtml, poolsideHtml]) {
       expect(html).toContain("Change agent backend");
     }
+  });
+
+  /**
+   * The selector offers exactly the `chats.backend` enum. Asserted from the
+   * composer because that is the only place it is rendered, and asserted on
+   * the trigger's own label so a chat that is already on Poolside shows
+   * Poolside rather than silently falling back to Claude Code.
+   */
+  test("names the chat's backend on the trigger", () => {
+    expect(render(POOLSIDE_CAPABILITIES, "poolside")).toContain(
+      "Backend: Poolside",
+    );
+    expect(render(CLAUDE_CAPABILITIES)).toContain("Backend: Claude Code");
   });
 });

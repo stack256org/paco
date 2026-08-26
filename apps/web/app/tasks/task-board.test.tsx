@@ -172,7 +172,7 @@ describe("TaskColumns", () => {
       task({
         status: "blocked",
         resultSummary:
-          'Not reviewed: backend "openfx" cannot produce structured output.',
+          'Not reviewed: backend "poolside" cannot produce structured output.',
       }),
     ]);
 
