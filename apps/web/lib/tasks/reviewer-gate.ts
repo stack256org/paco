@@ -329,8 +329,8 @@ type ReviewerVerdictOutcome = {
  * when the chat row could not be read, in which case `runAgentTurn`'s
  * `normalizeBackendId(undefined)` falls back to `"claude-code"` — the same
  * fallback every other unreadable-backend path takes, and the reason this
- * is threaded at all: a chat explicitly switched to OpenFX used to have its
- * work reviewed on Claude Code without that appearing anywhere.
+ * is threaded at all: a chat explicitly switched to Poolside would otherwise
+ * have its work reviewed on Claude Code without that appearing anywhere.
  */
 async function runReviewerTurn(
   task: Task,
@@ -475,7 +475,7 @@ export async function runReviewerGate(
    * Can this chat's backend actually produce a verdict?
    *
    * The reviewer answers through `structuredOutput`, and a backend that
-   * reports `structuredOutput: false` (OpenFX) returns free text no matter
+   * reports `structuredOutput: false` (Poolside) returns free text no matter
    * what schema it is handed — `runAgentTurn` warns and hands back
    * `undefined`. Running the turn anyway would spend a full agent turn to
    * reach an answer that is unusable by construction, and this gate would

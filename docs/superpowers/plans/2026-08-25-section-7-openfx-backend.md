@@ -18,6 +18,17 @@
 > Left in the plan rather than edited out, because the plan is the record of
 > what was intended; this note is the record of what shipped.
 
+> **Superseded.** Section 7 shipped as described above and has since been
+> replaced: the second backend is now Poolside (`pool acp`), and
+> `packages/openfx-backend` has been deleted along with the `openfx_*`
+> settings columns (migration `0015`). The plan body below is left exactly as
+> written, because it is the record of a plan that was carried out — read it
+> as history, not as a description of the product. Two of its claims are
+> specifically no longer true of the backend that replaced it: the BYO
+> endpoint corrected above **does** work on Poolside (forwarded as
+> `POOLSIDE_STANDALONE_BASE_URL`), and MCP is genuinely passed through rather
+> than declared and dropped. See `docs/self-hosting.md` §18.
+
 ## Global Constraints
 
 - Section 1 plan's Global Constraints apply. Zero-customer ruling. Nothing deferred.

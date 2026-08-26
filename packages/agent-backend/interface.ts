@@ -6,7 +6,7 @@ import type { TurnFinishReason, TurnUsage } from "./events.ts";
  * workflow adapt instead of breaking when a backend lacks a feature (spec 1b).
  */
 export interface BackendCapabilities {
-  /** Stable identifier, e.g. "claude-code", "openfx". */
+  /** Stable identifier, e.g. "claude-code", "poolside". */
   id: string;
   /** Can a later turn resume this backend's own conversation state? */
   resume: boolean;
@@ -23,8 +23,11 @@ export interface BackendCapabilities {
    * agents, with their per-agent model tiers)?
    *
    * Distinct from `subagents`, which only says the backend delegates at
-   * all: OpenFX runs a roster of its own but its protocol carries no way
-   * to define one, so it reports `subagents: true, customAgents: false`.
+   * all: Poolside runs a roster of its own — its usage `_meta` reports
+   * `poolside/subagentTotals` — but the only handle its protocol offers,
+   * `_meta["poolside/session_agent_config"]`, SELECTS an agent that is
+   * already defined rather than defining one. So it reports
+   * `subagents: true, customAgents: false`.
    *
    * Optional, and `undefined` means "yes" — the assumption every backend
    * written before this field existed was built on, and the one
@@ -46,12 +49,22 @@ export interface BackendCapabilities {
   /**
    * The model ids this backend accepts from Paco's picker.
    *
-   * `undefined` means the app's own catalog applies unchanged (Claude
-   * Code, whose tier aliases the catalog is written in). An EMPTY array
-   * means the backend resolves its own model and takes none from the
-   * picker — the honest answer for OpenFX, where `--model opus` would be a
-   * Claude alias handed to a binary that has never heard of it, and where
-   * the model comes from the binary's own config instead.
+   * Three distinct answers, and the difference between the last two is
+   * what callers get wrong:
+   *
+   * - `undefined` — the app's own catalog applies unchanged (Claude Code,
+   *   whose tier aliases the catalog is written in).
+   * - A NON-EMPTY array — a narrowing, not a loss. The picker still
+   *   applies; it just offers these ids. Poolside reports its two
+   *   `poolside/laguna-*` ids, read off a live `session/new`'s `model`
+   *   config option. They are not Claude tier aliases, which is the whole
+   *   reason the list has to be declared: handing `opus` to a backend that
+   *   has never heard of it is the failure this field prevents.
+   * - An EMPTY array — the backend resolves its own model and takes none
+   *   from the picker, so the control has nothing to show and is hidden.
+   *   No shipped backend answers this way today; it stays because "I
+   *   choose my own model" is a real thing for a backend to say, and the
+   *   UI must not read it as "every model is allowed".
    */
   models?: readonly string[];
 }

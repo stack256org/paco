@@ -319,6 +319,13 @@ Thin by design; Section 2 did the work.
 
 ## Section 7: OpenFX as the second backend
 
+> **Superseded, and kept as written.** This section was implemented, then
+> replaced: the second backend is Poolside (`pool acp`), not OpenFX, and
+> `packages/openfx-backend` no longer exists. The design goal — a real seam
+> with honestly reported capabilities — is what survived, and is what the
+> replacement was measured against. The specifics below are history; for what
+> the second backend actually does today, see `docs/self-hosting.md` §18.
+
 - `packages/openfx-backend` implements `AgentBackend` over OpenFX's ACP
   server, mapping ACP sessions and permission requests to session events
   and the existing approval flow.

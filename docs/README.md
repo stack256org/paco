@@ -8,7 +8,7 @@
   (start with the `APP_SECRET` warning), who may sign in and who becomes the
   administrator, DNS/TLS/previews, disk usage and cleanup, one section each
   for plugins, memory, tasks, the agent roster, design mode, schedules and the
-  OpenFX backend, every environment variable, and troubleshooting.
+  Poolside backend, every environment variable, and troubleshooting.
 - **[Plugins](plugins.md)** — installing a plugin and granting it
   capabilities, how an inbound webhook is authenticated (and what
   `self-verified` does not enforce), and a worked example wiring up the

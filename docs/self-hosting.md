@@ -1017,7 +1017,7 @@ data dir, keyed by id, and have no relationship to a repository at all.
   for an admin to review.
 
 Two costs worth stating plainly. **Distillation and reflection are always
-Claude Code**, not the chat's backend — so a chat you moved to OpenFX
+Claude Code**, not the chat's backend — so a chat you moved to Poolside
 specifically to avoid Claude still has its memory distilled by Claude
 (`lib/memory/distill.ts` says so at the call site). And **organisation memory
 is injected into every member's turns**, so a promoted entry is shared context
@@ -1064,10 +1064,10 @@ operator are the ones that end somewhere else:
    task reaches `done` without anything having reviewed it. That only happens
    if someone disabled the seeded `reviewer` (§15); builtin agents cannot be
    deleted.
-3. **A chat running on OpenFX.** The reviewer answers through structured
-   output, which OpenFX cannot produce (§18). The gate detects this *before*
+3. **A chat running on Poolside.** The reviewer answers through structured
+   output, which Poolside cannot produce (§18). The gate detects this *before*
    spending a turn and blocks the task with
-   `Not reviewed: backend "openfx" cannot produce structured output …`. It
+   `Not reviewed: backend "poolside" cannot produce structured output …`. It
    deliberately does not pass the task, does not fail it, and does not try to
    read a verdict out of free text.
 4. **The 200-turn cap.** An unattended task gets `TASK_DEFAULT_MAX_TURNS`
@@ -1294,28 +1294,39 @@ a job already enqueued for a tick at the moment the schedule was disabled, and
 
 ---
 
-## 18. The OpenFX backend
+## 18. The Poolside backend
 
-A chat can run on **OpenFX** instead of Claude Code — a second agent backend,
-driven over ACP (`openfx acp`, one process per turn) rather than the Claude
-Code CLI. It is chosen per chat, from the composer's backend control, and it
-exists so an instance is not tied to one provider.
+A chat can run on **Poolside** instead of Claude Code — a second agent
+backend, driven over ACP (`pool acp`, one process per turn) rather than the
+Claude Code CLI. It is chosen per chat, from the composer's backend control,
+and it exists so an instance is not tied to one provider.
 
 ### You install the binary; nothing here does
 
-**Paco does not ship, download, or build `openfx`.** It spawns whatever
-`openfx` is on `PATH`, or the absolute path you put in **Settings → Models →
-OpenFX**. On a native install that means the binary has to be reachable by the
-`paco` service user, and `PATH` under systemd is not your login shell's — give
-it an absolute path rather than relying on `PATH` picking it up.
+**Paco does not ship, download, or build `pool`.** You install it with
+Poolside's own installer. Paco spawns whatever `pool` is on `PATH`, or the
+absolute path you put in **Settings → Models → Poolside**. On a native install
+that means the binary has to be reachable by the `paco` service user, and
+`PATH` under systemd is not your login shell's — give it an absolute path
+rather than relying on `PATH` picking it up.
 
-Configure it in **Settings → Models → OpenFX** (admin only):
+The environment that process gets is **built from scratch**, not inherited
+from the service: `PATH`, `HOME`, `XDG_CONFIG_HOME`, and the credentials
+below. Two consequences worth knowing before you debug one of them:
+
+- Putting `POOLSIDE_API_KEY` in the instance's `.env` does nothing. The key
+  comes from Settings, and only from there.
+- `pool login` still works, because `HOME`/`XDG_CONFIG_HOME` are passed
+  through and `pool` reads `~/.config/poolside/credentials.json` under them —
+  but it is the **service user's** home that counts, not yours.
+
+Configure it in **Settings → Models → Poolside** (admin only):
 
 | Field | What it does |
 | --- | --- |
-| **Binary path** | Absolute path to `openfx`. Unset, Paco spawns the bare name `openfx` and relies on the service's `PATH`. |
-| **API key** | Passed to the process as `AI_GATEWAY_API_KEY`. Sealed with `APP_SECRET` the same way GitHub tokens and the SMTP password are, and never sent back to the browser. |
-| **Endpoint** | **Rendered, but permanently disabled and not forwarded anywhere.** There is no flag or environment variable that moves where the `openfx` binary sends provider traffic — only credential variables — so the field is stored for forward-compatibility and nothing more. Do not read it as a BYO-endpoint setting; it is not one. |
+| **Binary path** | Absolute path to `pool`. Unset, Paco spawns the bare name `pool` and relies on the service's `PATH`. |
+| **API key** | Passed to the process as `POOLSIDE_API_KEY`. Sealed with `APP_SECRET` the same way GitHub tokens and the SMTP password are, and never sent back to the browser. Unset, `pool` falls back to the credentials `pool login` wrote in the service user's home. |
+| **Base URL** | Passed to the process as `POOLSIDE_STANDALONE_BASE_URL`, and genuinely honoured — point it at your own Poolside deployment. Unset, `pool` uses its own default (`inference.poolside.ai`). |
 
 Settings are read fresh on every turn rather than cached, so an edit takes
 effect on the very next turn with no restart.
@@ -1323,36 +1334,67 @@ effect on the very next turn with no restart.
 ### Prove it before a chat depends on it
 
 **Test connection** on that same page spawns the binary, exchanges the
-`initialize` handshake, and tears the process down — the same first two frames
-a real turn exchanges, with a 15-second timeout, without creating a session or
+`initialize` handshake, and tears the process down — the same first frame a
+real turn exchanges, with a 15-second timeout, without creating a session or
 running a prompt. A missing binary, a wrong path, or a process that never
-answers is reported here with the host's own error text.
+answers is reported here with the host's own error text. It runs against a
+temporary directory, so nothing in a chat's worktree affects the result.
 
-Be clear about what a green result proves: **the binary starts and speaks the
-protocol.** It creates no session and runs no prompt, so it does not exercise
-the API key against a provider. A working handshake and a failing first turn is
-a credential problem, not a path problem.
+It uses the *same* settings-to-process mapping a real turn uses, so a green
+result is a statement about the configuration a turn would actually run with,
+not a hand-written approximation of it.
 
-### What a chat gives up by running on OpenFX
+A green result also reports **the endpoint the binary resolved** — read out of
+the handshake's own `poolside/service_mode`, `provider: inference.poolside.ai`
+by default. Check it against what you typed: a wrong **Base URL** is the
+likeliest mistake on this form, and a handshake succeeds against the wrong
+endpoint exactly as happily as the right one. (Some builds do not report it;
+then the result simply makes the weaker claim.)
+
+Be clear about what a green result proves: **the binary starts, speaks the
+protocol, and resolved that endpoint.** It creates no session and runs no
+prompt, so it does not exercise the API key against a provider — `initialize`
+does not authenticate. A working handshake and a failing first turn is a
+credential problem, not a path problem.
+
+### What a Poolside chat keeps
+
+Worth stating first, because a second backend is usually assumed to be a
+stripped-down one. These are not degraded on Poolside:
+
+- **Memory, skills, and project instructions.** They ride in ahead of the
+  prompt on every turn, so the agent has the same briefing a Claude Code chat
+  gets (§13).
+- **Plugin MCP servers and any project MCP configuration.** They are really
+  spawned and handshaken by `pool`, not merely accepted and dropped.
+- **Session resume.** A later turn reattaches to Poolside's own session rather
+  than replaying the conversation.
+- **The model picker**, narrowed to the model ids Poolside publishes for
+  itself. They are Poolside's own — not Claude tier names — so the picker
+  offers what the backend will actually accept.
+- **Approvals.** Every tool call arrives as a permission request and is
+  answered by Paco's own approval policy, the same gate a Claude Code chat
+  passes through.
+
+### What a chat gives up by running on Poolside
 
 These are not opinions about the backend; they are the capabilities it reports
 as unsupported, each with a visible consequence:
 
 | Not supported | Consequence |
 | --- | --- |
-| **Reasoning effort** | ACP has no setter for it. The effort control is hidden on OpenFX chats. |
-| **Model selection** | The model comes from the OpenFX binary's own config, not Paco's picker, which is hidden on OpenFX chats. |
-| **Custom subagents** | Paco's roster (§15) and its per-agent model tiers have no way in. OpenFX delegates to its own internal subagents instead. |
+| **Reasoning effort** | Poolside has a thinking level of its own, but with two settings against Paco's five — there is no honest mapping, so the instruction is simply not passed on. The effort control is hidden and the chat runs at Poolside's own default. It is not thinking less hard; it is not taking the instruction. |
+| **Custom subagents** | Paco's roster (§15) and its per-agent model tiers have no way in — Poolside's protocol can select an agent it already defines, but not define one. Poolside delegates to its own internal subagents instead. |
 | **Structured output** | Turns that need a schema-shaped answer cannot run. Concretely: the task board's reviewer gate blocks the task rather than guessing a verdict (§14), and task planning does not use a chat backend at all. |
 
 The composer hides the controls that do not apply, and Settings → Models lists
-the same four lines, so choosing OpenFX is a visible trade rather than a silent
-downgrade.
+these same lines — derived from what the backend reports, not written out by
+hand — so choosing Poolside is a visible trade rather than a silent downgrade.
 
 One cost that is *not* on that list, because it is not a capability: **memory
 distillation and daily reflection always run on Claude Code** regardless of a
-chat's backend (§13). An instance that moved to OpenFX to avoid Claude entirely
-will still see Claude usage from those two paths.
+chat's backend (§13). An instance that moved to Poolside to avoid Claude
+entirely will still see Claude usage from those two paths.
 
 ---
 
@@ -1668,8 +1710,8 @@ problem — a symlink in its tree, or its files changing on disk since install
 ### A task is stuck in `blocked` and nobody knows why
 
 Read the task's own summary on the card — it says which of the four cases it
-is (§14). `Not reviewed: backend "openfx" cannot produce structured output`
-is the one that surprises people: the chat was moved to OpenFX, and the
+is (§14). `Not reviewed: backend "poolside" cannot produce structured output`
+is the one that surprises people: the chat was moved to Poolside, and the
 reviewer cannot return a verdict there (§18).
 
 ### A design candidate's preview is blank or unreachable
@@ -1684,12 +1726,17 @@ reviewer cannot return a verdict there (§18).
   reconciliation sweep reclaims those (§16); give it a minute before
   concluding anything.
 
-### OpenFX chats fail on the first turn, but Test connection passed
+### Poolside chats fail on the first turn, but Test connection passed
 
 Test connection proves the binary starts and completes the `initialize`
 handshake. It creates no session and runs no prompt, so it never exercises
 the API key against a provider (§18). A green test and a failing first turn
-points at the credential, not the path.
+points at the credential, not the path — either the API key in Settings, or
+the `pool login` credentials it falls back to, which live in the *service
+user's* home and not yours.
+
+If instead the turns succeed but reach the wrong deployment, compare the
+endpoint Test connection reports with the **Base URL** you typed (§18).
 
 ### An admin is refused somewhere, but not everywhere
 

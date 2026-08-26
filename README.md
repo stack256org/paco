@@ -39,11 +39,15 @@ Browser  ->  Next.js + durable workflow  ->  Claude Code (host)  ->  Docker sand
   token volume goes. The roster of subagents — who they are, what model tier
   and tools each gets — is editable per organisation in **Settings → Agents**.
 - **A second backend, chosen per chat.** A chat runs on the Claude Code CLI by
-  default, or on OpenFX over ACP if you install that `openfx` binary yourself
-  and configure it in **Settings → Models**. Choosing it
-  is a visible trade, not a silent one: the effort and model controls
-  disappear, Paco's subagent roster does not apply, and turns that need a
-  schema-shaped answer — the task board's review gate — cannot run there.
+  default, or on Poolside over ACP (`pool acp`) if you install that `pool`
+  binary yourself and configure it in **Settings → Models**. Memory, skills,
+  project instructions and plugin MCP servers all reach a Poolside turn, and it
+  resumes its own sessions and publishes its own model list. What it does not
+  take is Paco's effort setting — its thinking control has two positions where
+  Paco's picker has five, so the instruction is not passed on — or Paco's
+  subagent roster, and turns that need a schema-shaped answer (the task board's
+  review gate) cannot run there. The composer hides exactly the controls that
+  do not apply, so the trade is visible rather than silent.
 
 ## Beyond one chat
 
@@ -217,7 +221,7 @@ operator needs: the file layout, upgrading, what `apt remove` keeps versus
 what `apt purge` destroys, the DNS records for the app and for previews, the
 full `paco` command reference, backup and restore, every environment variable,
 one section each for plugins, memory, tasks, the agent roster, design mode,
-schedules and the OpenFX backend, and troubleshooting.
+schedules and the Poolside backend, and troubleshooting.
 [docs/README.md](docs/README.md) indexes the rest of the documentation.
 
 ## Contributing
