@@ -12,7 +12,7 @@ import {
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { buildCandidatePreviews } from "@/lib/design/candidate-preview-url";
 import { buildModelOptions } from "@/lib/model-options";
-import { listAvailableModels } from "@/lib/model-catalog";
+import { listAllModels } from "@/lib/model-catalog";
 import { enabledPluginRenderers } from "@/lib/plugins/renderer-info";
 import { getServerSession } from "@/lib/session/get-server-session";
 import { readInstanceSettings } from "@/lib/settings/instance-settings";
@@ -40,9 +40,18 @@ function isOptimisticChatId(chatId: string): boolean {
 const OPTIMISTIC_CHAT_RETRY_DELAY_MS = 100;
 const OPTIMISTIC_CHAT_RETRY_ATTEMPTS = 50;
 
+/**
+ * Every model, across every backend — not just the one this chat currently
+ * runs on.
+ *
+ * The composer filters these client-side against `capabilities.models`
+ * (`ModelEffortBackendControls`), and its backend selector can switch the
+ * chat after this page was rendered. Narrowing the list here would leave
+ * that switch with nothing to reveal.
+ */
 function getInitialModels() {
   try {
-    return listAvailableModels();
+    return listAllModels();
   } catch {
     return [];
   }

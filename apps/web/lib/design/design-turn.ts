@@ -389,7 +389,7 @@ async function defaultRunCandidateTurn(
     originalMessages: [],
     maxTurns: params.maxTurns,
     // Spread rather than passed unconditionally: `run-step.ts` keys the
-    // hook (and the OpenFX in-process approval handler) off `approval &&
+    // hook (and Poolside's in-process approval handler) off `approval &&
     // chatId` both being present, and an explicit `approval: undefined`
     // reads, at every call site that logs or forwards these, as "this turn
     // deliberately has no gate" rather than "this caller had nothing to
@@ -449,7 +449,7 @@ export interface RunDesignTurnParams {
    * is actually set to.
    *
    * Without it `runAgentTurn` resolves `normalizeBackendId(undefined)` to
-   * `"claude-code"`, and a chat explicitly switched to OpenFX would run its
+   * `"claude-code"`, and a chat explicitly switched to Poolside would run its
    * design turn on Claude Code without saying so anywhere.
    */
   chatBackend?: BackendSelectionInput["backend"];

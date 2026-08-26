@@ -12,11 +12,11 @@ import {
   DEFAULT_AGENTS,
 } from "@paco/claude-code";
 import type {
-  OpenFxBackendOptions,
-  OpenFxStdioMcpServer,
-} from "@paco/openfx-backend";
+  PoolsideBackendOptions,
+  PoolsideMcpServer,
+} from "@paco/poolside-backend";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
-import { createOpenFxApprovalHandler } from "./approvals/openfx-approval";
+import { createPoolsideApprovalHandler } from "./approvals/poolside-approval";
 import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
 import { buildAppendSystemPrompt } from "./system-prompt";
 import type { AgentCallOptions, SteerController } from "./types";
@@ -34,7 +34,7 @@ export interface AgentStepResult<UI extends UIMessage> {
    * `lib/db/sessions.ts`). Left named `claudeSessionId` rather than
    * renamed, to avoid rippling the change through every caller for a field
    * whose meaning ("this turn's resume token") was already documented as
-   * backend-neutral before OpenFX existed.
+   * backend-neutral before a second backend existed.
    */
   claudeSessionId: string;
   costUsd?: number;
@@ -85,10 +85,15 @@ function resolveAgents(
  *
  * `capabilities().models` is the backend's own answer to "which of the
  * picker's ids do I accept": `undefined` means the app's catalog applies
- * unchanged (Claude Code, whose tier aliases the catalog is written in), and
- * an empty array means the backend resolves its own model and takes none.
- * Forwarding regardless is how `--model opus` — a Claude tier alias — was
- * being handed to the OpenFX binary, which has never heard of it.
+ * unchanged (Claude Code, whose tier aliases the catalog is written in), a
+ * list means exactly those ids, and an empty array means the backend
+ * resolves its own model and takes none.
+ *
+ * Forwarding regardless is how a Claude tier alias like `opus` used to reach
+ * a second backend that had never heard of it. Poolside is the case that
+ * makes the list form real rather than theoretical: it accepts its OWN ids
+ * (`poolside/laguna-*`) over ACP, so this filter is what stops `opus` going
+ * one way and lets `poolside/laguna-xs-2.1` through the other.
  */
 function resolveModelId(
   capabilities: BackendCapabilities,
@@ -118,37 +123,25 @@ function githubTokenEnv(token: string | undefined): Record<string, string> {
 }
 
 /**
- * Paco's name-keyed MCP config, as the array OpenFX's parser wants.
+ * Paco's name-keyed MCP config, as the array Poolside's `session/new` wants.
  *
  * Two shapes, not one: the Claude Code CLI takes `--mcp-config`'s
  * `{ "<name>": { command, args, env } }` record, while ACP's `session/new`
- * takes a list whose entries each carry their own `name`
- * (`openfx/src/acp/mcp_servers.zig:177-221`). The same source rejects a
- * relative `command` outright (`CommandNotAbsolute`), which would fail the
- * WHOLE session rather than just that one server — so a relative command is
- * dropped with a warning instead, leaving the rest of the turn's servers
- * working. In practice nothing hits that: `buildPluginMcpConfig` uses
- * `process.execPath`.
+ * takes a list whose entries each carry their own `name`. Nothing else
+ * differs — no filtering, no dropped entries. A relative `command` is fine
+ * (the package verified a bare `node` resolves on `PATH`), so every server
+ * Paco configures reaches the turn; in practice they are absolute anyway,
+ * since `buildPluginMcpConfig` uses `process.execPath`.
  */
-function toOpenFxMcpServers(
+function toPoolsideMcpServers(
   mcpServers: NonNullable<AgentCallOptions["mcpServers"]>,
-): OpenFxStdioMcpServer[] {
-  const servers: OpenFxStdioMcpServer[] = [];
-  for (const [name, server] of Object.entries(mcpServers)) {
-    if (!server.command.startsWith("/")) {
-      console.warn(
-        `[run-step] Skipping MCP server "${name}" for OpenFX: its command must be an absolute path, got "${server.command}".`,
-      );
-      continue;
-    }
-    servers.push({
-      name,
-      command: server.command,
-      args: server.args,
-      env: server.env,
-    });
-  }
-  return servers;
+): PoolsideMcpServer[] {
+  return Object.entries(mcpServers).map(([name, server]) => ({
+    name,
+    command: server.command,
+    args: server.args,
+    env: server.env,
+  }));
 }
 
 /**
@@ -236,30 +229,40 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
 
   /*
    * Each backend gets its own options shape (`ClaudeBackendOptions` vs.
-   * `OpenFxBackendOptions` — `TurnContext.backendOptions` is an intentionally
-   * untyped bag per backend, see `@paco/agent-backend`'s `interface.ts`), so
-   * this branches on which backend was actually resolved rather than trying
-   * to force one shape to describe both.
+   * `PoolsideBackendOptions` — `TurnContext.backendOptions` is an
+   * intentionally untyped bag per backend, see `@paco/agent-backend`'s
+   * `interface.ts`), so this branches on which backend was actually resolved
+   * rather than trying to force one shape to describe both.
+   *
+   * The branches are deliberately near-symmetric now. They used to not be:
+   * the second backend got a two-field bag (`model`, `onApprovalRequest`)
+   * while everything the turn had been built with — the system prompt, the
+   * MCP servers, the user's GitHub token — was assembled and then dropped on
+   * the floor. Poolside accepts all three, so it receives all three; the
+   * only fields it does not get are the ones its `capabilities()` declares
+   * it cannot take, which is what lets the UI stop offering them instead of
+   * letting them vanish silently.
    */
-  const backendOptions: ClaudeBackendOptions | OpenFxBackendOptions =
-    backendId === "openfx"
+  const backendOptions: ClaudeBackendOptions | PoolsideBackendOptions =
+    backendId === "poolside"
       ? ({
           ...(modelId ? { model: modelId } : {}),
           /*
            * The same instructions the Claude branch passes as
-           * `appendSystemPrompt`. ACP has no system-prompt parameter, so
-           * `OpenFxBackendOptions.systemContext` rides in as a leading text
-           * block on `session/prompt` (see its doc for why that is a real
-           * mechanism and not a workaround). Dropping it — which is what
-           * used to happen — takes memory, skills, project instructions,
-           * the environment details and the "## Running the app" briefing
-           * with it, and an agent without that last one starts its dev
-           * server on the host, where the container's preview URL cannot
-           * reach it.
+           * `appendSystemPrompt`. ACP has no system-prompt parameter, and
+           * the package established against the real binary that Poolside's
+           * `poolside/system_prompt` capability is a read-only GETTER for
+           * the effective prompt rather than a setter — so this rides in as
+           * a leading text block on `session/prompt`. Dropping it — which is
+           * what used to happen — takes memory, skills, project
+           * instructions, the environment details and the "## Running the
+           * app" briefing with it, and an agent without that last one starts
+           * its dev server on the host, where the container's preview URL
+           * cannot reach it.
            */
           ...(appendSystemPrompt && { systemContext: appendSystemPrompt }),
           /*
-           * One `openfx acp` process per turn, so per-turn env reaches the
+           * One `pool acp` process per turn, so per-turn env reaches the
            * agent's own `gh`. Unlike the Claude branch there are no
            * PACO_APPROVAL_* vars: approvals come back over the ACP
            * connection itself, not through a spawned hook.
@@ -268,32 +271,48 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
             ? { env: githubTokenEnv(params.githubToken) }
             : {}),
           ...(options.mcpServers && {
-            mcpServers: toOpenFxMcpServers(options.mcpServers),
+            mcpServers: toPoolsideMcpServers(options.mcpServers),
           }),
           /*
-           * Not passed, because OpenFX cannot take them — declared as
-           * `customAgents: false` / `structuredOutput: false` /
-           * `models: []` on its capabilities rather than left as a silent
-           * omission here: `agents` (no ACP method installs a roster),
-           * `jsonSchema` (no shaped output), `effort` (no ACP setter —
-           * PROTOCOL.md §7), `tools`/`disallowedTools`/`permissionMode`
-           * (tool policy is the `session/request_permission` handler
-           * below, not a flag), and `maxTurns`.
+           * Not passed, because Poolside cannot take them — declared as
+           * `customAgents: false` / `structuredOutput: false` on its
+           * capabilities rather than left as a silent omission here:
+           * `agents` (nothing in the ACP surface installs a caller-defined
+           * roster; Poolside runs its own) and `jsonSchema` (no
+           * schema-constrained output). `tools`/`disallowedTools` are not
+           * passed either: tool policy is the `session/request_permission`
+           * handler below, not a flag.
+           *
+           * `effort` is not passed, and `capabilities().effort` is `false`.
+           * Poolside DOES have a reasoning knob — `thought_level`, with
+           * values `max` and `none` — but Paco's picker has five levels, so
+           * forwarding one would collapse `low`/`medium` onto `none` and
+           * `high`/`xhigh`/`max` onto `max` with nothing on screen saying
+           * four of the five choices were indistinguishable. Declaring
+           * `false` hides the control instead, which is the honest answer
+           * until `BackendCapabilities` can express an accepted-values list
+           * for effort the way it already does for `models`.
+           *
+           * `permissionMode` is deliberately left unset so the session stays
+           * in ACP's `default` mode and every tool call comes back as a
+           * permission request. The package exposes an `always-allow` escape
+           * hatch; using it would take `decideApproval` out of the loop
+           * entirely, which is the one thing this handler exists to prevent.
            */
           // ACP delivers `session/request_permission` over the connection
           // this backend already owns, so the same `decideApproval` policy
           // Claude's PreToolUse hook uses is wired in-process here instead
           // of through a spawned hook + HTTP round trip — see
-          // `openfx-approval.ts`'s doc.
+          // `poolside-approval.ts`'s doc.
           ...(params.approval && params.chatId
             ? {
-                onApprovalRequest: createOpenFxApprovalHandler({
+                onApprovalRequest: createPoolsideApprovalHandler({
                   chatId: params.chatId,
                   worktree: hostCwd,
                 }),
               }
             : {}),
-        } satisfies OpenFxBackendOptions)
+        } satisfies PoolsideBackendOptions)
       : ({
           ...(params.approval && params.chatId
             ? { settings: buildApprovalSettings() }

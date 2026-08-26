@@ -444,7 +444,7 @@ describe("runDesignTurn — approval and backend", () => {
         token: "approval-secret",
       },
       chatId: "chat-1",
-      chatBackend: "openfx",
+      chatBackend: "poolside",
       onProgress: () => Promise.resolve(),
       onChunk: () => Promise.resolve(),
       runTurn,
@@ -458,7 +458,7 @@ describe("runDesignTurn — approval and backend", () => {
         token: "approval-secret",
       });
       expect(call.chatId).toBe("chat-1");
-      expect(call.chatBackend).toBe("openfx");
+      expect(call.chatBackend).toBe("poolside");
     }
   });
 
@@ -500,7 +500,7 @@ describe("the default candidate turn runner", () => {
         token: "approval-secret",
       },
       chatId: "chat-1",
-      chatBackend: "openfx",
+      chatBackend: "poolside",
       onProgress: () => Promise.resolve(),
       onChunk: () => Promise.resolve(),
       commitCandidate: noopCommit,
@@ -513,7 +513,7 @@ describe("the default candidate turn runner", () => {
       token: "approval-secret",
     });
     expect(call?.chatId).toBe("chat-1");
-    expect(call?.chatBackend).toBe("openfx");
+    expect(call?.chatBackend).toBe("poolside");
   });
 
   test("omits approval, chat id and backend entirely when the design turn had none", async () => {

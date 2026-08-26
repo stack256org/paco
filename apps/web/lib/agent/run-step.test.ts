@@ -136,17 +136,23 @@ function makeStructuredOutputOptions() {
 }
 
 /**
- * The fixture for the OpenFX parity tests: every field that used to be built
- * and then dropped on the floor whenever a chat was switched to OpenFX.
+ * The fixture for the Poolside parity tests: every field that used to be
+ * built and then dropped on the floor whenever a chat was switched off
+ * Claude Code.
+ *
+ * `model: { id: "opus" }` is a Claude tier alias on purpose — Poolside
+ * declares its own ids, so this fixture is what proves the alias is filtered
+ * out rather than handed to a binary that has never heard of it. The
+ * companion fixture below supplies an id Poolside really accepts.
  */
-function makeOpenFxOptions() {
+function makePoolsideOptions() {
   return {
     sandbox: {
       state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
       environmentDetails: "Container: paco-sandbox-1",
       currentBranch: "chat/abc",
     },
-    model: { id: "opus" },
+    model: { id: "opus", effort: "high" },
     customInstructions: "Always run the linter.",
     memorySection: "## Memory\n\n- The user prefers pnpm.",
     mcpServers: {
@@ -164,16 +170,26 @@ interface SpyBackend extends AgentBackend {
 }
 
 /**
- * A spy reporting OpenFX's real capability set — including the three fields
- * that say what it cannot carry, which is what the parity tests below turn
- * on.
+ * A spy reporting Poolside's real capability set — copied from
+ * `PoolsideBackend.capabilities()`, including the fields that say what it
+ * cannot carry, which is what the parity tests below turn on.
+ *
+ * `models` is a real list rather than the empty array the previous ACP
+ * backend reported: Poolside accepts its own model ids over ACP's `model`
+ * config option, so `resolveModelId` has something to let through as well as
+ * something to filter out.
  */
-function createOpenFxSpyBackend(): SpyBackend {
+const POOLSIDE_MODELS = [
+  "poolside/laguna-s-2.1",
+  "poolside/laguna-xs-2.1",
+] as const;
+
+function createPoolsideSpyBackend(): SpyBackend {
   const spy: SpyBackend = {
     lastCtx: undefined,
     capabilities(): BackendCapabilities {
       return {
-        id: "openfx",
+        id: "poolside",
         resume: true,
         steering: "restart",
         mcp: true,
@@ -181,7 +197,7 @@ function createOpenFxSpyBackend(): SpyBackend {
         subagents: true,
         customAgents: false,
         structuredOutput: false,
-        models: [],
+        models: POOLSIDE_MODELS,
       };
     },
     startTurn(ctx: TurnContext): TurnHandle {
@@ -194,7 +210,7 @@ function createOpenFxSpyBackend(): SpyBackend {
           finishReason: "stop",
           isError: false,
           usage: zeroUsage(),
-          resumeToken: "openfx-session-1",
+          resumeToken: "poolside-session-1",
         }),
         steer: () => Promise.resolve(),
         interrupt: () => {
@@ -389,40 +405,10 @@ describe("runAgentTurn", () => {
     expect(env.PACO_APPROVAL_CHAT_ID).toBe("chat-123");
   });
 
-  test("builds OpenFxBackendOptions, not Claude's shape, when the resolved backend reports id 'openfx'", async () => {
+  test("builds PoolsideBackendOptions, not Claude's shape, when the resolved backend reports id 'poolside'", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy: SpyBackend = {
-      lastCtx: undefined,
-      capabilities(): BackendCapabilities {
-        return {
-          id: "openfx",
-          resume: true,
-          steering: "restart",
-          mcp: true,
-          effort: false,
-          subagents: true,
-        };
-      },
-      startTurn(ctx: TurnContext): TurnHandle {
-        spy.lastCtx = ctx;
-        return {
-          chunks: (async function* () {
-            // no chunks: this backend only exists to record its TurnContext
-          })(),
-          result: Promise.resolve({
-            finishReason: "stop",
-            isError: false,
-            usage: zeroUsage(),
-            resumeToken: "openfx-session-1",
-          }),
-          steer: () => Promise.resolve(),
-          interrupt: () => {
-            // no-op: not exercised here
-          },
-        };
-      },
-    };
+    const spy = createPoolsideSpyBackend();
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
@@ -444,33 +430,40 @@ describe("runAgentTurn", () => {
       string,
       unknown
     >;
-    // Claude-only fields must not leak into an OpenFX turn's options.
+    // Claude-only fields must not leak into a Poolside turn's options.
     expect(backendOptions.permissionMode).toBeUndefined();
     expect(backendOptions.agents).toBeUndefined();
     expect(backendOptions.settings).toBeUndefined();
     expect(backendOptions.sessionId).toBeUndefined();
-    // The approval handler is wired in-process (see openfx-approval.ts),
+    // The approval handler is wired in-process (see poolside-approval.ts),
     // not via PACO_APPROVAL_URL/env vars.
     expect(typeof backendOptions.onApprovalRequest).toBe("function");
     expect(backendOptions.env).toBeUndefined();
   });
 
   /**
-   * Section 7's Critical: `appendSystemPrompt` was built unconditionally and
-   * spread in only on the `claude-code` branch, so flipping a chat to OpenFX
-   * silently dropped memory, skills, project instructions, the environment
-   * details and the "## Running the app" briefing — the last of which is why
-   * an agent starts its dev server on the host and the preview comes up
-   * blank.
+   * THE regression this rewrite exists to prevent, in one assertion.
+   *
+   * `appendSystemPrompt` and `mcpServers` were both built unconditionally
+   * and then spread in only on the `claude-code` branch, so flipping a chat
+   * to the second backend silently dropped memory, skills, project
+   * instructions, the environment details, the "## Running the app" briefing
+   * — the last of which is why an agent starts its dev server on the host
+   * and the preview comes up blank — AND every MCP server, while the
+   * backend's own `capabilities()` went on claiming `mcp: true`.
+   *
+   * Deliberately asserted together: a turn is only correctly wired if BOTH
+   * arrive, and splitting them into two tests is how one of them gets
+   * quietly deleted.
    */
-  test("an OpenFX turn carries the memory section, instructions and environment briefing as systemContext", async () => {
+  test("a Poolside turn RECEIVES the system context and the mcpServers", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createOpenFxSpyBackend();
+    const spy = createPoolsideSpyBackend();
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
-      options: makeOpenFxOptions(),
+      options: makePoolsideOptions(),
       messageId: "assistant-42",
       originalMessages: [],
       backend: spy,
@@ -483,21 +476,49 @@ describe("runAgentTurn", () => {
       string,
       unknown
     >;
+
     const systemContext = backendOptions.systemContext as string;
     expect(systemContext).toContain("The user prefers pnpm.");
     expect(systemContext).toContain("Always run the linter.");
     expect(systemContext).toContain("Container: paco-sandbox-1");
     expect(systemContext).toContain("## Running the app");
+
+    // An array, each entry carrying its own `name` — ACP's `session/new`
+    // shape, not the Claude Code CLI's name-keyed record.
+    expect(backendOptions.mcpServers).toEqual([
+      {
+        name: "paco-plugins",
+        command: "/usr/bin/node",
+        args: ["/opt/paco/plugin-mcp-server.ts"],
+        env: { PACO_INTERNAL_TOKEN: "secret" },
+      },
+    ]);
   });
 
-  test("an OpenFX turn carries the plugin mcpServers, in the shape OpenFX's parser requires", async () => {
+  /**
+   * The previous ACP backend rejected a relative `command` outright, failing
+   * the whole session, so `run-step` dropped such a server with a warning.
+   * Poolside resolves a bare command on `PATH`, so nothing is dropped — a
+   * filter kept "just in case" would be the silent-drop bug all over again,
+   * in the one place this file is meant to have eliminated it.
+   */
+  test("a Poolside turn keeps an MCP server whose command is not an absolute path", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createOpenFxSpyBackend();
+    const spy = createPoolsideSpyBackend();
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
-      options: makeOpenFxOptions(),
+      options: {
+        sandbox: {
+          state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
+          environmentDetails: "",
+          currentBranch: "main",
+        },
+        mcpServers: {
+          relative: { command: "node", args: ["server.ts"], env: {} },
+        },
+      } as never,
       messageId: "assistant-42",
       originalMessages: [],
       backend: spy,
@@ -510,26 +531,19 @@ describe("runAgentTurn", () => {
       string,
       unknown
     >;
-    // An array, each entry carrying the `name` OpenFX rejects a server
-    // without — not the Claude Code CLI's name-keyed record.
     expect(backendOptions.mcpServers).toEqual([
-      {
-        name: "paco-plugins",
-        command: "/usr/bin/node",
-        args: ["/opt/paco/plugin-mcp-server.ts"],
-        env: { PACO_INTERNAL_TOKEN: "secret" },
-      },
+      { name: "relative", command: "node", args: ["server.ts"], env: {} },
     ]);
   });
 
-  test("an OpenFX turn carries the user's GitHub token, so `gh` is not the host keyring's account", async () => {
+  test("a Poolside turn carries the user's GitHub token, so `gh` is not the host keyring's account", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createOpenFxSpyBackend();
+    const spy = createPoolsideSpyBackend();
 
     await runAgentTurn<UIMessage>({
       prompt: "open a pull request",
-      options: makeOpenFxOptions(),
+      options: makePoolsideOptions(),
       messageId: "assistant-42",
       originalMessages: [],
       backend: spy,
@@ -548,14 +562,15 @@ describe("runAgentTurn", () => {
     expect(env.GITHUB_TOKEN).toBe("gh-token-abc");
   });
 
-  test("a backend reporting models: [] is not handed the picker's Claude tier alias", async () => {
+  test("a backend that names model ids is not handed the picker's Claude tier alias", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createOpenFxSpyBackend();
+    const spy = createPoolsideSpyBackend();
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
-      options: makeOpenFxOptions(),
+      // The fixture's model is `opus`.
+      options: makePoolsideOptions(),
       messageId: "assistant-42",
       originalMessages: [],
       backend: spy,
@@ -568,8 +583,74 @@ describe("runAgentTurn", () => {
       string,
       unknown
     >;
-    // "opus" means nothing to `openfx --model`; the binary resolves its own.
+    // "opus" means nothing to Poolside; it resolves its own default instead.
     expect(backendOptions.model).toBeUndefined();
+  });
+
+  /**
+   * The other half of the same rule, and the half the previous ACP backend
+   * could never exercise because it accepted no ids at all: a model the
+   * backend DOES declare is forwarded rather than filtered, so the picker is
+   * not decorative.
+   */
+  test("a model id the backend declares is forwarded", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy = createPoolsideSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: {
+        sandbox: {
+          state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
+          environmentDetails: "",
+          currentBranch: "main",
+        },
+        model: { id: "poolside/laguna-xs-2.1" },
+      } as never,
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    expect(backendOptions.model).toBe("poolside/laguna-xs-2.1");
+  });
+
+  /**
+   * `capabilities().effort` is `false` for Poolside, so the picker's effort
+   * is not forwarded. Poolside does have a reasoning knob, but it holds two
+   * values against Paco's five — see `poolsideThoughtLevel`'s doc in the
+   * package. The fixture sets `effort: "high"`; nothing should carry it.
+   */
+  test("a Poolside turn is not handed Paco's five-level effort setting", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const spy = createPoolsideSpyBackend();
+
+    await runAgentTurn<UIMessage>({
+      prompt: "build the thing",
+      options: makePoolsideOptions(),
+      messageId: "assistant-42",
+      originalMessages: [],
+      backend: spy,
+      onChunk: async () => {
+        // no-op
+      },
+    });
+
+    const backendOptions = spy.lastCtx?.backendOptions as Record<
+      string,
+      unknown
+    >;
+    expect(backendOptions.effort).toBeUndefined();
+    expect(backendOptions.thoughtLevel).toBeUndefined();
   });
 
   test("surfaces a backend's structuredOutput on the step result", async () => {

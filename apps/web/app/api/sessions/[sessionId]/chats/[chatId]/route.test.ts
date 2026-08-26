@@ -365,12 +365,12 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
       sessionId: "session-1",
       title: "Updated",
       modelId: "model-updated",
-      backend: "openfx",
+      backend: "poolside",
     };
     const { PATCH } = await routeModulePromise;
 
     const response = await PATCH(
-      createPatchRequest({ backend: "openfx" }),
+      createPatchRequest({ backend: "poolside" }),
       createContext(),
     );
     const body = (await response.json()) as {
@@ -382,9 +382,9 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
 
     expect(response.status).toBe(200);
     expect(updateChatCalls).toEqual([
-      { chatId: "chat-1", patch: { backend: "openfx" } },
+      { chatId: "chat-1", patch: { backend: "poolside" } },
     ]);
-    expect(body.chat.capabilities?.id).toBe("openfx");
+    expect(body.chat.capabilities?.id).toBe("poolside");
     expect(body.chat.capabilities?.effort).toBe(false);
   });
 

@@ -2,10 +2,10 @@ import { describe, expect, mock, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PermissionRequestParams } from "@paco/openfx-backend";
+import type { PermissionRequestParams } from "@paco/poolside-backend";
 
-// Both `openfx-approval.ts` and `@paco/claude-code`'s approval policy import
-// "server-only"; the marker throws outside a server component.
+// Both `poolside-approval.ts` and `@paco/claude-code`'s approval policy
+// import "server-only"; the marker throws outside a server component.
 mock.module("server-only", () => ({}));
 
 const requestApprovalCalls: Array<{
@@ -28,9 +28,9 @@ mock.module("./store", () => ({
   },
 }));
 
-const modulePromise = import("./openfx-approval");
+const modulePromise = import("./poolside-approval");
 
-const worktree = mkdtempSync(join(tmpdir(), "paco-openfx-approval-"));
+const worktree = mkdtempSync(join(tmpdir(), "paco-poolside-approval-"));
 
 function makeRequest(
   overrides: Partial<PermissionRequestParams["toolCall"]> & {
@@ -56,10 +56,10 @@ function makeRequest(
   };
 }
 
-describe("createOpenFxApprovalHandler", () => {
+describe("createPoolsideApprovalHandler", () => {
   test("a read-only kind is auto-allowed without asking the user", async () => {
-    const { createOpenFxApprovalHandler } = await modulePromise;
-    const handler = createOpenFxApprovalHandler({
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
       chatId: "chat-1",
       worktree,
     });
@@ -74,8 +74,8 @@ describe("createOpenFxApprovalHandler", () => {
   });
 
   test("an edit inside the worktree is auto-allowed", async () => {
-    const { createOpenFxApprovalHandler } = await modulePromise;
-    const handler = createOpenFxApprovalHandler({
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
       chatId: "chat-1",
       worktree,
     });
@@ -95,8 +95,8 @@ describe("createOpenFxApprovalHandler", () => {
   });
 
   test("an edit outside the worktree asks the user, and allow selects allow_once", async () => {
-    const { createOpenFxApprovalHandler } = await modulePromise;
-    const handler = createOpenFxApprovalHandler({
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
       chatId: "chat-42",
       worktree,
     });
@@ -120,8 +120,8 @@ describe("createOpenFxApprovalHandler", () => {
   });
 
   test("a denied outcome selects reject_once", async () => {
-    const { createOpenFxApprovalHandler } = await modulePromise;
-    const handler = createOpenFxApprovalHandler({
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
       chatId: "chat-42",
       worktree,
     });
@@ -141,8 +141,8 @@ describe("createOpenFxApprovalHandler", () => {
   });
 
   test("an unrecognised kind is treated as unknown and always asks", async () => {
-    const { createOpenFxApprovalHandler } = await modulePromise;
-    const handler = createOpenFxApprovalHandler({
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
       chatId: "chat-1",
       worktree,
     });
@@ -157,9 +157,36 @@ describe("createOpenFxApprovalHandler", () => {
     });
   });
 
+  /**
+   * The upgrade over the previous ACP backend, whose `tool_call` updates
+   * never carried `rawInput`: Poolside populates it, so the approval card
+   * shows the user what the agent actually wants to do instead of `{}`.
+   */
+  test("the approval card's detail carries the tool call's real arguments", async () => {
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
+      chatId: "chat-1",
+      worktree,
+    });
+    requestApprovalCalls.length = 0;
+    nextOutcome = "deny";
+
+    await handler(
+      makeRequest({
+        kind: "execute",
+        title: "Run a command",
+        rawInput: { command: "rm -rf /etc/nginx" },
+      }),
+    );
+
+    expect(requestApprovalCalls).toHaveLength(1);
+    expect(requestApprovalCalls[0]?.toolName).toBe("Run a command");
+    expect(requestApprovalCalls[0]?.detail).toContain("rm -rf /etc/nginx");
+  });
+
   test("falls back to cancelled when no matching option was offered", async () => {
-    const { createOpenFxApprovalHandler } = await modulePromise;
-    const handler = createOpenFxApprovalHandler({
+    const { createPoolsideApprovalHandler } = await modulePromise;
+    const handler = createPoolsideApprovalHandler({
       chatId: "chat-1",
       worktree,
     });

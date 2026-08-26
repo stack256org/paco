@@ -1,10 +1,19 @@
-import { listAvailableModels } from "@/lib/model-catalog";
+import { listAllModels } from "@/lib/model-catalog";
 
 const CACHE_CONTROL = "private, no-store";
 
+/**
+ * Every model, across every backend — not narrowed to the chat's own.
+ *
+ * `useModelOptions` replaces the server-rendered options with this response
+ * once it loads, and the composer filters them client-side against
+ * `capabilities.models`. Narrowing here would empty the picker for a
+ * Poolside chat the moment the fetch resolved, and there is no per-user data
+ * in the list to gate anyway.
+ */
 export function GET() {
   try {
-    const models = listAvailableModels();
+    const models = listAllModels();
 
     return Response.json(
       { models },

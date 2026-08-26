@@ -591,7 +591,7 @@ async function runDesignTurnStep(params: {
    * durable workflow runtime, and both things taken off the row decide how
    * the turn actually runs — the policy that is logged with it, and the
    * BACKEND its candidates run on. Leaving `chatBackend` unset silently ran
-   * a chat explicitly set to OpenFX on Claude Code, because
+   * a chat explicitly set to Poolside on Claude Code, because
    * `normalizeBackendId(undefined)` falls back to claude-code.
    */
   const chat = await getChatById(params.chatId);
@@ -1971,8 +1971,9 @@ const runAgentStep = async (
       messageId,
       originalMessages,
       // `claudeSessionId` is `runAgentTurn`'s neutral resume-token field
-      // (see its own doc — the name predates OpenFX and is not renamed
-      // here) fed with THIS backend's own token, never the other one's.
+      // (see its own doc — the name predates the second backend and is not
+      // renamed here) fed with THIS backend's own token, never the other
+      // one's.
       ...(resumeToken ? { claudeSessionId: resumeToken } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(githubToken ? { githubToken } : {}),

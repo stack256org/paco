@@ -9,7 +9,10 @@ import {
 } from "@/lib/sandbox/chat-worktree-removal";
 import type { WebAgentUIMessage } from "@/app/types";
 import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
-import type { ChatBackendId } from "@/lib/agent/backend-factory";
+import {
+  type ChatBackendId,
+  isKnownBackendId,
+} from "@/lib/agent/backend-factory";
 import {
   deleteChat,
   getChatMessages,
@@ -22,12 +25,6 @@ import { BAD_REQUEST, CHAT_NOT_FOUND } from "@/lib/error-copy";
 type RouteContext = {
   params: Promise<{ sessionId: string; chatId: string }>;
 };
-
-/** `chats.backend`'s enum — see `schema.ts` and `backend-factory.ts`. */
-const KNOWN_CHAT_BACKENDS: ReadonlySet<string> = new Set<ChatBackendId>([
-  "claude-code",
-  "openfx",
-]);
 
 interface UpdateChatRequest {
   title?: string;
@@ -109,11 +106,26 @@ export async function PATCH(req: Request, context: RouteContext) {
   const nextTitle = body.title?.trim();
   const nextModelId = body.modelId?.trim();
   const hasEffort = "effort" in body;
-  const nextBackend = body.backend?.trim();
+  const requestedBackend = body.backend?.trim();
 
-  if (nextBackend && !KNOWN_CHAT_BACKENDS.has(nextBackend)) {
+  /*
+   * Rejected, not normalized. `normalizeBackendId` is the right rule for
+   * READING a row that already holds something unrecognised, but a write is
+   * the one moment the value can still be refused — quietly storing
+   * `"claude-code"` in response to a client asking for something else would
+   * report success for a switch that did not happen. `isKnownBackendId` is
+   * the same membership test that rule is built on (both read
+   * `CHAT_BACKEND_IDS`), so the two can never disagree about which ids
+   * exist, and its type predicate is what lets `updatePayload.backend`
+   * below be assigned without a cast.
+   */
+  if (requestedBackend && !isKnownBackendId(requestedBackend)) {
     return Response.json({ error: BAD_REQUEST }, { status: 400 });
   }
+  const nextBackend: ChatBackendId | undefined =
+    requestedBackend && isKnownBackendId(requestedBackend)
+      ? requestedBackend
+      : undefined;
 
   if (!(nextTitle || nextModelId || hasEffort || nextBackend)) {
     return Response.json({ error: BAD_REQUEST }, { status: 400 });
@@ -138,7 +150,7 @@ export async function PATCH(req: Request, context: RouteContext) {
     updatePayload.effort = parseEffort(body.effort);
   }
   if (nextBackend) {
-    updatePayload.backend = nextBackend as ChatBackendId;
+    updatePayload.backend = nextBackend;
   }
 
   const updatedChat = await updateChat(chatId, updatePayload);

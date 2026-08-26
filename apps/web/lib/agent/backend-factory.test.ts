@@ -5,11 +5,32 @@ import { describe, expect, mock, test } from "bun:test";
 // with what is being tested.
 mock.module("server-only", () => ({}));
 
-let openfxSettings = {
-  endpoint: null as string | null,
+/**
+ * Stands in for the id of the backend Poolside replaced.
+ *
+ * Written as a constant rather than that id's literal text because nothing
+ * in `normalizeBackendId` special-cases it — the behaviour under test is the
+ * general "a row holding an id this build does not know" rule, and naming
+ * the retired backend here would only reintroduce a reference to it.
+ */
+const RETIRED_BACKEND_ID = "a-retired-backend";
+
+let poolsideSettings = {
+  baseUrl: null as string | null,
   apiKey: null as string | null,
   binaryPath: null as string | null,
 };
+
+/**
+ * The settings row `resolveBackend` reads. Recorded rather than only
+ * returned, so a test can prove the row actually reached the config the
+ * backend was constructed with.
+ */
+const configCalls: Array<{
+  baseUrl: string | null;
+  apiKey: string | null;
+  binaryPath: string | null;
+}> = [];
 
 mock.module("@/lib/settings/instance-settings", () => ({
   readInstanceSettings: async () => ({
@@ -24,9 +45,50 @@ mock.module("@/lib/settings/instance-settings", () => ({
       password: null,
       from: null,
     },
-    openfx: openfxSettings,
+    poolside: poolsideSettings,
     onboardingCompletedAt: null,
   }),
+}));
+
+/**
+ * `@paco/poolside-backend` spawns a `pool acp` process on `startTurn`.
+ * Nothing here starts a turn, but the module is stubbed anyway so the test
+ * exercises the FACTORY — which id it resolves, and which settings it hands
+ * the constructor — without depending on the real package's internals.
+ *
+ * `buildPoolsideBackendConfig` is the package's own mapping (one place
+ * decides which env var carries which field); the stub records its argument
+ * so `resolveBackend` can be proven to pass the stored row through rather
+ * than a hand-built approximation of it.
+ */
+mock.module("@paco/poolside-backend", () => ({
+  buildPoolsideBackendConfig: (settings: {
+    baseUrl: string | null;
+    apiKey: string | null;
+    binaryPath: string | null;
+  }) => {
+    configCalls.push(settings);
+    return (settings.binaryPath ? { executable: settings.binaryPath } : {});
+  },
+  PoolsideBackend: class {
+    config: unknown;
+    constructor(config?: unknown) {
+      this.config = config;
+    }
+    capabilities() {
+      return {
+        id: "poolside" as const,
+        resume: true,
+        steering: "restart" as const,
+        mcp: true,
+        effort: false,
+        subagents: true,
+        customAgents: false,
+        structuredOutput: false,
+        models: ["poolside/laguna-s-2.1", "poolside/laguna-xs-2.1"],
+      };
+    }
+  },
 }));
 
 const modulePromise = import("./backend-factory");
@@ -67,19 +129,61 @@ describe("resolveBackend", () => {
     }
   });
 
-  test("resolves the openfx backend, reading its settings from instanceSettings", async () => {
-    openfxSettings = {
-      endpoint: "https://gateway.example.com",
-      apiKey: "sk-openfx-secret",
-      binaryPath: "/usr/local/bin/openfx",
+  /**
+   * The retired backend's id was a real value of `chats.backend` before
+   * Poolside replaced it. Migration `0015_poolside_backend.sql` rewrites
+   * those rows, but a row it somehow missed must still resolve to something
+   * runnable rather than to a backend this build no longer contains.
+   */
+  test("a chat still holding the retired backend id runs on claude-code", async () => {
+    const { resolveBackend } = await modulePromise;
+    const originalWarn = console.warn;
+    console.warn = () => {
+      // Silenced: this case warns on purpose.
     };
+
+    try {
+      const backend = await resolveBackend({ backend: RETIRED_BACKEND_ID });
+
+      expect(backend.capabilities().id).toBe("claude-code");
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("resolves the poolside backend, reading its settings from instanceSettings", async () => {
+    poolsideSettings = {
+      baseUrl: "https://poolside.example.com",
+      apiKey: "sk-poolside-secret",
+      binaryPath: "/usr/local/bin/pool",
+    };
+    configCalls.length = 0;
     const { resolveBackend } = await modulePromise;
 
-    const backend = await resolveBackend({ backend: "openfx" });
+    const backend = await resolveBackend({ backend: "poolside" });
 
-    const capabilities = backend.capabilities();
-    expect(capabilities.id).toBe("openfx");
-    expect(capabilities.effort).toBe(false);
+    expect(backend.capabilities().id).toBe("poolside");
+    // The stored row reached the package's config mapping intact — including
+    // the base URL, which the backend this replaced accepted and then
+    // forwarded nowhere.
+    expect(configCalls).toEqual([
+      {
+        baseUrl: "https://poolside.example.com",
+        apiKey: "sk-poolside-secret",
+        binaryPath: "/usr/local/bin/pool",
+      },
+    ]);
+  });
+
+  test("resolves poolside even with nothing configured, so `pool` on PATH still works", async () => {
+    poolsideSettings = { baseUrl: null, apiKey: null, binaryPath: null };
+    configCalls.length = 0;
+    const { resolveBackend } = await modulePromise;
+
+    const backend = await resolveBackend({ backend: "poolside" });
+
+    expect(backend.capabilities().id).toBe("poolside");
+    expect(configCalls).toHaveLength(1);
   });
 });
 
@@ -88,7 +192,7 @@ describe("normalizeBackendId", () => {
     const { normalizeBackendId } = await modulePromise;
 
     expect(normalizeBackendId("claude-code")).toBe("claude-code");
-    expect(normalizeBackendId("openfx")).toBe("openfx");
+    expect(normalizeBackendId("poolside")).toBe("poolside");
   });
 
   test("falls back to claude-code for null and undefined", async () => {
@@ -123,7 +227,8 @@ describe("normalizeBackendId", () => {
     const { normalizeBackendId, resolveBackend } = await modulePromise;
     const inputs = [
       "claude-code",
-      "openfx",
+      "poolside",
+      RETIRED_BACKEND_ID,
       "some-future-backend",
       "",
       null,
@@ -145,42 +250,22 @@ describe("normalizeBackendId", () => {
   });
 });
 
-describe("buildOpenFxBackendConfig", () => {
-  test("maps a fully configured settings row onto executable + env", async () => {
-    const { buildOpenFxBackendConfig } = await modulePromise;
+describe("CHAT_BACKEND_IDS / isKnownBackendId", () => {
+  /**
+   * The PATCH route validates a backend switch against `isKnownBackendId`
+   * rather than a set of its own. This is the test that keeps that honest:
+   * one list, and the two functions built on it answer the same way.
+   */
+  test("every id in the list is known, and nothing else is", async () => {
+    const { CHAT_BACKEND_IDS, isKnownBackendId, normalizeBackendId } =
+      await modulePromise;
 
-    const config = buildOpenFxBackendConfig({
-      endpoint: "https://gateway.example.com",
-      apiKey: "sk-openfx-secret",
-      binaryPath: "/usr/local/bin/openfx",
-    });
-
-    expect(config.executable).toBe("/usr/local/bin/openfx");
-    expect(config.env).toEqual({ AI_GATEWAY_API_KEY: "sk-openfx-secret" });
-  });
-
-  test("omits executable/env when nothing is configured", async () => {
-    const { buildOpenFxBackendConfig } = await modulePromise;
-
-    const config = buildOpenFxBackendConfig({
-      endpoint: null,
-      apiKey: null,
-      binaryPath: null,
-    });
-
-    expect(config.executable).toBeUndefined();
-    expect(config.env).toBeUndefined();
-  });
-
-  test("does not forward endpoint to any env var (PROTOCOL.md §1: no override exists)", async () => {
-    const { buildOpenFxBackendConfig } = await modulePromise;
-
-    const config = buildOpenFxBackendConfig({
-      endpoint: "https://gateway.example.com",
-      apiKey: null,
-      binaryPath: null,
-    });
-
-    expect(config.env).toBeUndefined();
+    expect(CHAT_BACKEND_IDS).toEqual(["claude-code", "poolside"]);
+    for (const id of CHAT_BACKEND_IDS) {
+      expect(isKnownBackendId(id)).toBe(true);
+      expect(normalizeBackendId(id)).toBe(id);
+    }
+    expect(isKnownBackendId(RETIRED_BACKEND_ID)).toBe(false);
+    expect(isKnownBackendId("")).toBe(false);
   });
 });

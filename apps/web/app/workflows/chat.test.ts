@@ -211,18 +211,17 @@ let testChatRecord: {
   sessionId: string;
   modelId: string | null;
   turnPolicy: "steer" | "queue";
-  backend: "claude-code" | "openfx";
+  backend: "claude-code" | "poolside";
 };
 /**
  * Backs the `resolveChatResumeToken`/`setChatResumeToken` mock below, one
  * slot per backend id — this chat's resume token is scoped by backend
- * (Section 7 Task 5 follow-up), so a Claude Code token and an OpenFX token
- * must be able to coexist without one clobbering the other across a
- * backend switch.
+ * so a Claude Code token and a Poolside token must be able to coexist
+ * without one clobbering the other across a backend switch.
  */
 let testResumeTokens: Record<string, string | null> = {
   "claude-code": null,
-  openfx: null,
+  poolside: null,
 };
 /** What the mocked `runAgentTurn` reports as this turn's resume token. */
 let agentResumeTokenToReturn = "claude-session-1";
@@ -798,7 +797,7 @@ beforeEach(() => {
     turnPolicy: "steer",
     backend: "claude-code",
   };
-  testResumeTokens = { "claude-code": null, openfx: null };
+  testResumeTokens = { "claude-code": null, poolside: null };
   agentResumeTokenToReturn = "claude-session-1";
   testPreferences = {
     defaultModelId: "anthropic/claude-haiku-4.5",
@@ -2180,11 +2179,11 @@ describe("turn steering", () => {
 /**
  * Resume tokens are scoped per backend (`chats.resumeTokens`, keyed by
  * backend id) rather than one shared column — the CRITICAL bug this closes:
- * `OpenFxBackend.loadSession({sessionId: <a Claude Code session id>})` (or
- * the reverse, `--resume <an ACP session id>` handed to Claude Code) is what
- * a single shared `claudeSessionId` column produced the moment a chat's
- * backend was switched mid-conversation. See `resolveChatResumeToken`'s doc
- * in `lib/db/sessions.ts`.
+ * `PoolsideBackend` calling `session/load` with a Claude Code session id
+ * (or the reverse, `--resume <an ACP session id>` handed to Claude Code) is
+ * what a single shared `claudeSessionId` column produced the moment a
+ * chat's backend was switched mid-conversation. See
+ * `resolveChatResumeToken`'s doc in `lib/db/sessions.ts`.
  */
 describe("resume tokens scoped per backend", () => {
   test("switching backends never resumes with the other backend's token, and switching back resumes the original", async () => {
@@ -2195,15 +2194,15 @@ describe("resume tokens scoped per backend", () => {
     agentResumeTokenToReturn = "claude-session-1";
     await runAgentWorkflow(makeOptions());
 
-    // Turn 2: switched to openfx. Must NOT attempt to resume with the
-    // Claude Code session id from turn 1 — this is the bug: OpenFX would
+    // Turn 2: switched to poolside. Must NOT attempt to resume with the
+    // Claude Code session id from turn 1 — this is the bug: Poolside would
     // call `session/load` with a session id it never created.
-    testChatRecord.backend = "openfx";
-    agentResumeTokenToReturn = "openfx-session-1";
+    testChatRecord.backend = "poolside";
+    agentResumeTokenToReturn = "poolside-session-1";
     await runAgentWorkflow(makeOptions());
 
     // Turn 3: switched back to claude-code. Must resume with the ORIGINAL
-    // claude-code token from turn 1, not undefined and not openfx's token.
+    // claude-code token from turn 1, not undefined and not poolside's.
     testChatRecord.backend = "claude-code";
     agentResumeTokenToReturn = "claude-session-1-continued";
     await runAgentWorkflow(makeOptions());
@@ -2214,17 +2213,17 @@ describe("resume tokens scoped per backend", () => {
         claudeSessionId: undefined,
       }),
       expect.objectContaining({
-        chatBackend: "openfx",
+        chatBackend: "poolside",
         // The critical assertion: no resume token crosses from
-        // claude-code's session into openfx's turn. `undefined` here is
-        // what tells `resolveBackend`'s `OpenFxBackend` to start a fresh
+        // claude-code's session into poolside's turn. `undefined` here is
+        // what tells `resolveBackend`'s `PoolsideBackend` to start a fresh
         // `session/new` rather than `session/load`.
         claudeSessionId: undefined,
       }),
       expect.objectContaining({
         chatBackend: "claude-code",
         // Resumes the ORIGINAL claude-code token from turn 1 — proving the
-        // openfx turn in between did not overwrite or clear it.
+        // poolside turn in between did not overwrite or clear it.
         claudeSessionId: "claude-session-1",
       }),
     ]);
@@ -2233,7 +2232,7 @@ describe("resume tokens scoped per backend", () => {
     // produced it, never under the other one's key.
     expect(setChatResumeTokenSpy.mock.calls).toEqual([
       ["chat-1", "claude-code", "claude-session-1"],
-      ["chat-1", "openfx", "openfx-session-1"],
+      ["chat-1", "poolside", "poolside-session-1"],
       ["chat-1", "claude-code", "claude-session-1-continued"],
     ]);
   });
@@ -2378,7 +2377,7 @@ describe("design mode", () => {
     // driven by arbitrary prompt text, so the PreToolUse gate is the only
     // thing between it and Write/Edit/Bash. Without a chatId AND an approval
     // url+token, `run-step.ts` installs no hook at all.
-    testChatRecord.backend = "openfx";
+    testChatRecord.backend = "poolside";
 
     await runAgentWorkflow(makeOptions({ mode: "design" }));
 
@@ -2390,9 +2389,9 @@ describe("design mode", () => {
     expect(runCall.approval?.url).toContain("/api/internal/approvals");
     expect(runCall.approval?.token).toBeTruthy();
     expect(runCall.chatId).toBe("chat-1");
-    // Without this a chat explicitly set to OpenFX silently ran its design
+    // Without this a chat explicitly set to Poolside silently ran its design
     // turn on Claude Code.
-    expect(runCall.chatBackend).toBe("openfx");
+    expect(runCall.chatBackend).toBe("poolside");
   });
 
   test("iterating refines the existing candidate instead of recreating them", async () => {
