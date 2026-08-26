@@ -124,10 +124,6 @@ import { ArchivedWorkspaceNotice } from "./archived-workspace-notice";
 import { ContextUsageIndicator } from "./context-usage-indicator";
 import { MessageActions } from "./message-actions";
 import { GitDataPartCard } from "./git-data-part-card";
-import { DesignPanel } from "@/components/design-mode/design-panel";
-import { useDesignModeController } from "@/components/design-mode/design-mode-context";
-import { DesignToggle } from "@/components/design-mode/design-toggle";
-import type { DesignCandidatePreview } from "@/lib/design/candidate-preview-url";
 import { ModelEffortBackendControls } from "./model-effort-backend-controls";
 import { useStreamRecovery } from "./hooks/use-stream-recovery";
 import { useAutoCommitStatus } from "./hooks/use-auto-commit-status";
@@ -220,7 +216,6 @@ export function SessionChatContent({
   messageStartedAtMap,
   lastUserMessageSentAt,
   pluginRenderers,
-  designCandidatePreviews,
 }: {
   initialIsOnlyChatInSession: boolean;
   /** Pre-computed generation duration (ms) per assistant message ID */
@@ -237,14 +232,6 @@ export function SessionChatContent({
    * renders in a sandboxed iframe instead of the generic fallback.
    */
   pluginRenderers: PluginRendererInfo[];
-  /**
-   * Where each design candidate's preview would be reachable, derived on the
-   * server from the configured preview base domain
-   * (`lib/design/candidate-preview-url.ts`). Empty when no base domain is
-   * configured — the design panel then says so rather than embedding a URL
-   * that routes nowhere.
-   */
-  designCandidatePreviews: DesignCandidatePreview[];
 }) {
   const router = useRouter();
   const [input, setInput] = useState("");
@@ -1202,9 +1189,6 @@ export function SessionChatContent({
   const sendMessageWithPendingState = useCallback(
     async (
       message: Parameters<typeof sendMessage>[0],
-      // Per-send request-body extras. Design mode is the only caller: the
-      // composer's toggle decides how *this* message runs, so `mode` travels
-      // with the send rather than living on the chat.
       options?: Parameters<typeof sendMessage>[1],
     ) => {
       setHasPendingResponse(true);
@@ -1223,42 +1207,6 @@ export function SessionChatContent({
     },
     [chatInfo.id, sendMessage, setChatStreaming],
   );
-
-  /*
-   * Design mode: the composer's toggle, and the panel a design turn opens.
-   *
-   * All of its state lives in `useDesignModeController`
-   * (`components/design-mode/design-mode-context.tsx`) rather than here —
-   * this file is already long enough that AGENTS.md asks for new feature
-   * behaviour to arrive as a colocated hook.
-   */
-  const sendDesignMessage = useCallback(
-    async (text: string, extraBody: Record<string, unknown>) => {
-      await sendMessageWithPendingState({ text }, { body: extraBody });
-    },
-    [sendMessageWithPendingState],
-  );
-
-  const appendDesignMessage = useCallback(
-    (message: WebAgentUIMessage) => {
-      setMessages((current) => [...current, message]);
-    },
-    [setMessages],
-  );
-
-  const design = useDesignModeController({
-    appendMessage: appendDesignMessage,
-    candidatePreviews: designCandidatePreviews,
-    chatId: chatInfo.id,
-    messages,
-    sendDesignMessage,
-    sessionId: session.id,
-    turnInFlight: isChatInFlight,
-  });
-
-  // Aliased only so the JSX handler prop reads as a handler: it is the
-  // `useState` setter the controller hands back, already stable.
-  const handleDesignToggle = design.setDesignModeEnabled;
 
   const handleFixChecks = useCallback(
     async (failedRuns: CheckRun[]) => {
@@ -3003,14 +2951,6 @@ export function SessionChatContent({
 
               {/* Input */}
               <div className="p-4 pb-2 sm:pb-8">
-                {/*
-                  Above the composer and outside its column: the candidates
-                  are wider than a message, and the whole point of the panel
-                  is comparing them side by side.
-                */}
-                {design.panelProps ? (
-                  <DesignPanel {...design.panelProps} />
-                ) : null}
                 <div className="mx-auto max-w-4xl space-y-2">
                   {/*
                     Above the composer, not in the transcript: the agent is
@@ -3265,25 +3205,8 @@ export function SessionChatContent({
                                 });
                             }
                           }
-                          /*
-                            Design mode is per message: the toggle arms the
-                            next send and disarms itself once that send is
-                            away, so the expensive N-candidate turn is always
-                            a deliberate press rather than a mode the chat
-                            sits in and forgets about.
-                          */
-                          const designSendBody = design.sendBody;
-                          if (designSendBody) {
-                            design.setDesignModeEnabled(false);
-                          }
-
                           try {
-                            await sendMessageWithPendingState(
-                              messagePayload,
-                              designSendBody
-                                ? { body: designSendBody }
-                                : undefined,
-                            );
+                            await sendMessageWithPendingState(messagePayload);
                           } catch (err) {
                             if (pendingOptimisticTitleChatIdRef.current) {
                               void clearChatTitle(
@@ -3497,11 +3420,6 @@ export function SessionChatContent({
                                 )}
                               </Button>
                             )}
-                            <DesignToggle
-                              active={design.designModeEnabled}
-                              disabled={isArchived || design.toggleDisabled}
-                              onToggle={handleDesignToggle}
-                            />
                             {chatInfo.modelId && (
                               /*
                                * Model, effort, and backend read as one

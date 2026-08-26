@@ -15,12 +15,11 @@ import { HOOK_SOURCE, installHookAt } from "./approval";
 
 /**
  * `buildApprovalSettings` writes the `PreToolUse` hook to a fixed host path
- * (`~/.paco/hooks/pre-tool-use.mjs`) on every call, via `installHookAt`. A
- * design turn's parallel candidate fan-out (Section 5 Task 2) calls
- * `runAgentTurn` — and therefore this — N times concurrently, which used to
- * be a rare race and is now the common case: a hook process spawned
- * mid-write by one concurrent turn could read a torn file written by
- * another and fail the tool call it was supposed to gate.
+ * (`~/.paco/hooks/pre-tool-use.mjs`) on every call, via `installHookAt`.
+ * Concurrent turns — separate chats, separate workflows — call
+ * `runAgentTurn`, and therefore this, at the same time: a hook process
+ * spawned mid-write by one turn could read a torn file written by another
+ * and fail the tool call it was supposed to gate.
  *
  * Exercised directly against a throwaway path rather than through
  * `buildApprovalSettings()`/`hookPath()`: `os.homedir()` cannot be relied on

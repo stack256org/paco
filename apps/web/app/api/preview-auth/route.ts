@@ -1,14 +1,8 @@
 import type { NextRequest } from "next/server";
 import { appUrl } from "@/lib/app-url";
 import { findChatOwnerByPreviewSlug } from "@/lib/preview/authorize";
-import {
-  decideCandidatePreviewAccess,
-  decidePreviewAccess,
-} from "@/lib/preview/decide-access";
-import {
-  parsePreviewHostSlug,
-  previewSlugFromHost,
-} from "@/lib/preview/hostname";
+import { decidePreviewAccess } from "@/lib/preview/decide-access";
+import { previewSlugFromHost } from "@/lib/preview/hostname";
 import {
   PREVIEW_GRANT_CONSUME_PATH,
   PREVIEW_GRANT_COOKIE_NAME,
@@ -147,13 +141,6 @@ export async function GET(req: NextRequest) {
     return deny();
   }
 
-  // A design-candidate host (`<chatSlug>-d<n>.<baseDomain>`) carries no
-  // access rules of its own — see `parsePreviewHostSlug`'s doc comment —
-  // so the chat lookup below always targets the BASE chat's slug, never
-  // the candidate label itself. `candidateIndex` only ever picks which
-  // `decidePreviewAccess`-flavored function makes the actual call, below.
-  const { chatSlug, candidateIndex } = parsePreviewHostSlug(label);
-
   const forwardedUri = req.headers.get("x-forwarded-uri") ?? "/";
   const { path, query } = parseForwardedUri(forwardedUri);
 
@@ -167,7 +154,7 @@ export async function GET(req: NextRequest) {
 
   let chat: Awaited<ReturnType<typeof findChatOwnerByPreviewSlug>>;
   try {
-    chat = await findChatOwnerByPreviewSlug(chatSlug);
+    chat = await findChatOwnerByPreviewSlug(label);
   } catch {
     // The auth check itself failing must fail closed, not leak a stack
     // trace to an unauthenticated caller or — worse — let a thrown error
@@ -193,11 +180,7 @@ export async function GET(req: NextRequest) {
   }
 
   const session = await getSessionFromReq(req);
-  const decideAccess =
-    candidateIndex === null
-      ? decidePreviewAccess
-      : decideCandidatePreviewAccess;
-  const decision = decideAccess({
+  const decision = decidePreviewAccess({
     chat,
     requesterUserId: session?.user?.id,
   });

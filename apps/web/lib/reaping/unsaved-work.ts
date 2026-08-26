@@ -18,12 +18,13 @@ const GIT_TIMEOUT_MS = 30_000;
  * Three things are asked, in the session repository:
  *
  * - **Uncommitted files**, summed over the repository *and* every worktree
- *   under it — chat worktrees (`chats/<chatId>/`) and design-candidate
- *   worktrees (`designs/<chatId>/<n>/`) alike. A branch checked out in its own
- *   directory is invisible to a `git status` in the repository, so each one is
- *   asked directly. Candidates were missed here at first, which meant a design
- *   candidate holding the only copy of what the user asked for read as a clean
- *   workspace and the delete-session safety gate let it go.
+ *   under it — chat worktrees (`chats/<chatId>/`) and any worktree left
+ *   behind by design mode (`designs/<chatId>/<n>/`) alike. A branch checked
+ *   out in its own directory is invisible to a `git status` in the
+ *   repository, so each one is asked directly. The second kind was missed
+ *   here at first, which meant a worktree holding the only copy of what the
+ *   user asked for read as a clean workspace and the delete-session safety
+ *   gate let it go.
  * - **Unpushed commits**, as commits on any branch that no remote-tracking ref
  *   contains. With no remote configured, that is every commit, which is
  *   correct: nothing is backed up.

@@ -166,32 +166,6 @@ export class TurnEventRecorder {
     ]);
   }
 
-  /**
-   * Log one complete assistant message for this turn.
-   *
-   * The chunk route (`chunk()`) is what a single streaming turn uses, and
-   * the projection prefers it. This exists for a turn that fans out into
-   * SEVERAL model runs at once — a design turn's N parallel candidates —
-   * where `assistant/chunk` cannot be used: it carries no discriminator, so
-   * N interleaved streams under one `turnId` would replay as one garbled
-   * message. `messageId` is the discriminator instead, and design turns set
-   * it to `design-candidate-<index>` to match the `data-design-progress`
-   * part ids the same candidates stream to the client.
-   */
-  async assistantMessage(params: {
-    messageId: string;
-    message: unknown;
-  }): Promise<void> {
-    await this.enqueue([
-      {
-        type: "assistant/message",
-        turnId: this.turnId,
-        messageId: params.messageId,
-        message: params.message,
-      },
-    ]);
-  }
-
   chunk(chunk: unknown): void {
     this.pendingChunks.push({
       type: "assistant/chunk",

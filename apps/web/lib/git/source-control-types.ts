@@ -5,7 +5,7 @@ import { z } from "zod";
  *
  * Separate from `source-control-actions.ts` because a `"use server"` module may
  * only export async functions — a schema or a type exported from there is a
- * build error, not a lint nit. Same split as `design-action-schemas.ts`.
+ * build error, not a lint nit.
  */
 
 /**

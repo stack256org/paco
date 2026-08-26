@@ -20,11 +20,10 @@
  *
  * And a fourth: the preview reconciliation sweep
  * (`lib/preview/reconcile-job.ts`), which keeps nginx's generated preview
- * routing in step with what is actually running and reclaims the ports and
- * worktrees design candidates leave behind. An in-process timer rather than a
- * pg-boss job, because everything it reconciles is state on THIS host — see
- * its own doc comment. Nothing here awaits it: it schedules itself and
- * swallows its own failures.
+ * routing in step with what is actually running. An in-process timer rather
+ * than a pg-boss job, because everything it reconciles is state on THIS
+ * host — see its own doc comment. Nothing here awaits it: it schedules
+ * itself and swallows its own failures.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") {

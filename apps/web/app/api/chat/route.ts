@@ -1,12 +1,11 @@
 import { createUIMessageStreamResponse } from "ai";
-import { BAD_REQUEST, NOT_YOURS } from "@/lib/error-copy";
+import { NOT_YOURS } from "@/lib/error-copy";
 import { submitChatMessage } from "@/lib/chat/submit-message";
 import { getServerSession } from "@/lib/session/get-server-session";
 import {
   requireAuthenticatedUser,
   requireOwnedSessionChat,
 } from "./_lib/chat-context";
-import { parseChatDesignOptions } from "./_lib/design-options";
 import { parseChatRequestBody, requireChatIdentifiers } from "./_lib/request";
 
 const STILL_WORKING =
@@ -29,15 +28,6 @@ export async function POST(req: Request) {
   }
 
   const { messages } = parsedBody.body;
-
-  // Design mode travels with the message, not on the chat row: the composer's
-  // toggle decides how this one send runs. Rejected here rather than left to
-  // the workflow's own guard, which can only fail a durable run that has
-  // already started.
-  const designOptions = parseChatDesignOptions(parsedBody.body);
-  if (!designOptions.ok) {
-    return Response.json({ error: BAD_REQUEST }, { status: 400 });
-  }
 
   // 2. Require sessionId and chatId to ensure sandbox ownership verification
   const chatIdentifiers = requireChatIdentifiers(parsedBody.body);
@@ -68,7 +58,6 @@ export async function POST(req: Request) {
     authSession: session ?? null,
     sessionStatus: sessionRecord.status,
     activeStreamId: chat.activeStreamId,
-    ...designOptions.options,
   });
 
   switch (outcome.kind) {

@@ -13,14 +13,9 @@ let session: TestSession;
 let previewBaseDomain: string | null;
 let tlsEnabled: boolean;
 
-// Matches strictly on the BASE chat slug ("chat-abc"), never on a
-// candidate label ("chat-abc-d2") — this is what makes the
-// design-candidate tests below actually exercise `parsePreviewHostSlug`
-// inside route.ts, instead of a mock that returns `chat` regardless of
-// what slug it was called with (which would pass even if the route
-// regressed to looking a candidate host up by its raw, unstripped label —
-// exactly the bug `chats.previewSlug` being a generated column with no
-// `-d<n>` suffix would otherwise hide).
+// Matches strictly on the chat's own slug, so a route that looked a host
+// up by anything other than its exact preview label would fail here rather
+// than pass against a mock that answers regardless of what it was asked.
 mock.module("@/lib/preview/authorize", () => ({
   findChatOwnerByPreviewSlug: async (slug: string) =>
     slug === "chat-abc" ? chat : null,
@@ -44,7 +39,6 @@ mock.module("@/lib/settings/instance-settings", () => ({
 
 const routeModulePromise = import("./route");
 const previewAuthRouteModulePromise = import("../route");
-const previewGrantModulePromise = import("@/lib/preview/preview-grant");
 
 function createRequest(url: string): NextRequest {
   return { url } as NextRequest;
@@ -192,133 +186,68 @@ describe("GET /api/preview-auth/grant", () => {
     expect(location.searchParams.get("returnTo")).toBe("/");
   });
 
-  describe("design-candidate hosts (a private chat's `<slug>-d<n>` preview)", () => {
-    // Regression coverage for the bug this suite's `findChatOwnerByPreviewSlug`
-    // mock (above) was tightened to catch: this endpoint used to pass a
-    // candidate host's raw, unstripped label (e.g. "chat-abc-d2") straight
-    // into `findChatOwnerByPreviewSlug`, which always misses — `chats.previewSlug`
-    // is a generated column that never carries a `-d<n>` suffix — so an
-    // owner could never mint a grant for a private chat's candidate preview
-    // at all. `route.ts` (this endpoint) must resolve the BASE chat slug
-    // first; the token it mints must still bind to the FULL candidate host.
+  /*
+   * The two routes together, which neither file covers alone: minting a
+   * grant is only meaningful if forward auth then honours it.
+   *
+   * The preview host never carries Paco's own session cookie (it is
+   * host-only by design), so `session` is dropped before the second call —
+   * that is what makes this a test of the grant rather than one that would
+   * pass on the session alone.
+   */
+  test("real round trip: owner mints a grant, then forward auth allows on the grant alone", async () => {
+    session = { user: { id: "owner-1" } };
+    chat = {
+      chatId: "chat-abc",
+      ownerUserId: "owner-1",
+      visibility: "private",
+    };
+    const { GET: mintGrant } = await routeModulePromise;
+    const { GET: forwardAuth } = await previewAuthRouteModulePromise;
 
-    test("mints a grant for the owner, bound to the full candidate host (not the base chat's)", async () => {
-      session = { user: { id: "owner-1" } };
-      chat = {
-        chatId: "chat-abc",
-        ownerUserId: "owner-1",
-        visibility: "private",
-      };
-      const { GET } = await routeModulePromise;
+    const mintResponse = await mintGrant(
+      createRequest(
+        "https://paco.example.com/api/preview-auth/grant?host=chat-abc.previews.example.com",
+      ),
+    );
+    expect(mintResponse.status).toBe(302);
+    const consumeLocation = new URL(mintResponse.headers.get("Location") ?? "");
+    const grant = consumeLocation.searchParams.get("grant");
+    expect(grant).toBeTruthy();
 
-      const response = await GET(
-        createRequest(
-          "https://paco.example.com/api/preview-auth/grant?host=chat-abc-d2.previews.example.com&returnTo=%2Ffoo",
-        ),
-      );
+    session = undefined;
 
-      expect(response.status).toBe(302);
-      const location = new URL(response.headers.get("Location") ?? "");
-      expect(location.origin).toBe("https://chat-abc-d2.previews.example.com");
-      expect(location.pathname).toBe("/__paco-preview-auth/consume");
-      const grant = location.searchParams.get("grant");
-      expect(grant).toBeTruthy();
+    const allowedResponse = await forwardAuth(
+      createForwardAuthRequest({
+        forwardedHost: "chat-abc.previews.example.com",
+        cookie: `paco_preview_grant=${grant}`,
+      }),
+    );
+    expect(allowedResponse.status).toBe(200);
+  });
 
-      const { verifyPreviewGrantToken } = await previewGrantModulePromise;
-      // Bound to the candidate's own full host — not the base chat's host,
-      // and not usable against any other candidate of the same chat.
-      expect(
-        verifyPreviewGrantToken(grant, "chat-abc-d2.previews.example.com"),
-      ).toBe(true);
-      expect(
-        verifyPreviewGrantToken(grant, "chat-abc.previews.example.com"),
-      ).toBe(false);
-      expect(
-        verifyPreviewGrantToken(grant, "chat-abc-d3.previews.example.com"),
-      ).toBe(false);
-    });
+  test("real round trip: a non-owner cannot mint, so forward auth keeps denying", async () => {
+    chat = {
+      chatId: "chat-abc",
+      ownerUserId: "owner-1",
+      visibility: "private",
+    };
+    session = { user: { id: "someone-else" } };
+    const { GET: mintGrant } = await routeModulePromise;
+    const { GET: forwardAuth } = await previewAuthRouteModulePromise;
 
-    test("403s for a candidate host when the session isn't the chat's owner", async () => {
-      session = { user: { id: "someone-else" } };
-      chat = {
-        chatId: "chat-abc",
-        ownerUserId: "owner-1",
-        visibility: "private",
-      };
-      const { GET } = await routeModulePromise;
+    const mintResponse = await mintGrant(
+      createRequest(
+        "https://paco.example.com/api/preview-auth/grant?host=chat-abc.previews.example.com",
+      ),
+    );
+    expect(mintResponse.status).toBe(403);
 
-      const response = await GET(
-        createRequest(
-          "https://paco.example.com/api/preview-auth/grant?host=chat-abc-d2.previews.example.com",
-        ),
-      );
-
-      expect(response.status).toBe(403);
-    });
-
-    test("real round trip: owner mints a grant for a candidate host, then preview-auth allows it on the grant alone", async () => {
-      session = { user: { id: "owner-1" } };
-      chat = {
-        chatId: "chat-abc",
-        ownerUserId: "owner-1",
-        visibility: "private",
-      };
-      const { GET: mintGrant } = await routeModulePromise;
-      const { GET: forwardAuth } = await previewAuthRouteModulePromise;
-
-      const mintResponse = await mintGrant(
-        createRequest(
-          "https://paco.example.com/api/preview-auth/grant?host=chat-abc-d2.previews.example.com",
-        ),
-      );
-      expect(mintResponse.status).toBe(302);
-      const consumeLocation = new URL(
-        mintResponse.headers.get("Location") ?? "",
-      );
-      const grant = consumeLocation.searchParams.get("grant");
-      expect(grant).toBeTruthy();
-
-      // The preview host itself never carries Paco's own session cookie
-      // (host-only, by design) — dropping `session` to `undefined` here is
-      // what makes this an honest test of the grant mechanism rather than
-      // one that would pass on session alone.
-      session = undefined;
-
-      const allowedResponse = await forwardAuth(
-        createForwardAuthRequest({
-          forwardedHost: "chat-abc-d2.previews.example.com",
-          cookie: `paco_preview_grant=${grant}`,
-        }),
-      );
-      expect(allowedResponse.status).toBe(200);
-    });
-
-    test("real round trip: a non-owner can never mint a grant, so forward-auth keeps denying them", async () => {
-      chat = {
-        chatId: "chat-abc",
-        ownerUserId: "owner-1",
-        visibility: "private",
-      };
-      session = { user: { id: "someone-else" } };
-      const { GET: mintGrant } = await routeModulePromise;
-      const { GET: forwardAuth } = await previewAuthRouteModulePromise;
-
-      const mintResponse = await mintGrant(
-        createRequest(
-          "https://paco.example.com/api/preview-auth/grant?host=chat-abc-d2.previews.example.com",
-        ),
-      );
-      expect(mintResponse.status).toBe(403);
-
-      const deniedResponse = await forwardAuth(
-        createForwardAuthRequest({
-          forwardedHost: "chat-abc-d2.previews.example.com",
-        }),
-      );
-      // No session cookie carried on the preview host either way, but the
-      // point stands: with no valid grant, a stranger to a private chat's
-      // candidate is never allowed.
-      expect(deniedResponse.status).not.toBe(200);
-    });
+    const deniedResponse = await forwardAuth(
+      createForwardAuthRequest({
+        forwardedHost: "chat-abc.previews.example.com",
+      }),
+    );
+    expect(deniedResponse.status).not.toBe(200);
   });
 });

@@ -6,7 +6,7 @@ import {
   type UIMessageChunk,
 } from "ai";
 import type { ClaudeAgentDefinition, ClaudeRunUsage } from "@paco/claude-code";
-import type { SessionEvent, TurnPolicy } from "@paco/agent-backend";
+import type { TurnPolicy } from "@paco/agent-backend";
 import type { SkillMetadata } from "@paco/sandbox";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
@@ -30,7 +30,6 @@ import { assistantFileLinkPrompt } from "@/lib/assistant-file-links";
 import { addLanguageModelUsage } from "./usage-utils";
 import type {
   WebAgentCommitDataPart,
-  WebAgentDesignProgressDataPart,
   WebAgentMessageMetadata,
   WebAgentPrData,
   WebAgentPrDataPart,
@@ -62,7 +61,6 @@ import {
   renderAttachmentSection,
   type StagedAttachment,
 } from "@/lib/chat/attachment-prompt";
-import { deriveAssistantMessage } from "@/lib/chat/derive-from-events";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
@@ -74,10 +72,6 @@ import type {
 import { resolveChatModelSelection } from "../api/chat/_lib/model-selection";
 import { resolveChatSandboxRuntime } from "./chat-sandbox-runtime";
 import { takeChatCheckpoint } from "./chat-checkpoint";
-import type {
-  DesignCandidateOutcome,
-  DesignProgress,
-} from "@/lib/design/design-turn";
 
 type AuthSessionContext = Pick<AuthSession, "user"> | null;
 
@@ -97,24 +91,6 @@ type Options = {
   autoCommitEnabled?: boolean;
   autoPushEnabled?: boolean;
   autoCreatePrEnabled?: boolean;
-  /**
-   * Runs this turn as a design turn (Section 5 Task 2) instead of a normal
-   * agent turn: N parallel designer candidates, each in its own worktree,
-   * rather than one turn on the chat's own branch. Off (the send path's
-   * default) means nothing here changes — Task 4 wires the composer toggle
-   * that sets this.
-   */
-  mode?: "design";
-  /** How many design candidates to run. Defaults to `DEFAULT_DESIGN_CANDIDATE_COUNT`. */
-  designCandidateCount?: 2 | 3;
-  /**
-   * Refine ONE existing candidate in its own worktree instead of generating
-   * a fresh set. Set by the design panel's "Iterate" control (Task 4): the
-   * candidate the user annotated keeps its direction and its history, so
-   * `createCandidates` — which destroys and recreates every candidate from
-   * the chat's branch — must not run.
-   */
-  designIterateCandidate?: 1 | 2 | 3;
 };
 
 type ChatModelRuntime = {
@@ -371,40 +347,6 @@ function buildPrData(
   };
 }
 
-/** One `data-design-progress` part per candidate, from its final outcome. */
-function buildDesignProgressPart(
-  outcome: DesignCandidateOutcome,
-): WebAgentDesignProgressDataPart {
-  return {
-    type: "data-design-progress",
-    id: `design-candidate-${outcome.index}`,
-    data: {
-      candidate: outcome.index,
-      status: outcome.status,
-      ...(outcome.error ? { error: outcome.error } : {}),
-    },
-  };
-}
-
-/** The assistant message's own text for a finished design turn. */
-function buildDesignSummaryText(outcomes: DesignCandidateOutcome[]): string {
-  const completedCount = outcomes.filter(
-    (outcome) => outcome.status === "completed",
-  ).length;
-
-  const lines = [
-    `Generated ${completedCount} of ${outcomes.length} design candidates.`,
-  ];
-  for (const outcome of outcomes) {
-    lines.push(
-      outcome.status === "completed"
-        ? `- Candidate ${outcome.index}: ready${outcome.committed ? "" : " (nothing to commit)"}`
-        : `- Candidate ${outcome.index}: failed — ${outcome.error ?? "unknown error"}`,
-    );
-  }
-  return lines.join("\n");
-}
-
 function upsertAssistantDataPart(
   message: WebAgentUIMessage,
   part: WebAgentCommitDataPart | WebAgentPrDataPart,
@@ -454,296 +396,11 @@ async function sendDataPart(
  * aimed at a closed port would not error loudly. It would silently approve
  * every tool call.
  *
- * One function rather than an expression at each call site because BOTH turn
- * paths need it: an ordinary turn and a design turn's candidates have to be
- * gated by the same hook at the same address, or the candidates — which run
- * `bypassPermissions` on arbitrary prompt text — are gated by nothing.
+ * One function rather than an expression at each call site, so every turn is
+ * gated by the same hook at the same address.
  */
 function approvalHookUrl(): string {
   return `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
-}
-
-/**
- * Run a design turn's N parallel candidate variants, as a workflow step.
- *
- * Everything this needs — the org's roster (for the designer persona), the
- * session workspace root, `createCandidates`, and `runDesignTurn` itself
- * (which shells out to git for the per-candidate auto-commit) — touches the
- * filesystem or the database, so it is dynamically imported here rather than
- * statically at the top of the file, exactly like `resolveWorkCwd` and
- * `resolveChatAgents` are inside `runAgentStep` below: the `"use workflow"`
- * body this feeds cannot import Node modules at all.
- *
- * Progress is streamed to the client as it happens — `onProgress` below
- * writes straight to `writable`, the same way `sendDataPart` does for the
- * commit/PR parts elsewhere in this file — so the caller only needs the
- * final `outcomes` once every candidate has finished, succeeded or not.
- *
- * A `DesignTurnAllFailedError` (every candidate failed) is caught here
- * rather than left to propagate: the outer workflow's generic error handler
- * reports "workspace setup failed" style messages meant for provisioning
- * failures, not a design turn's own per-candidate reasons.
- *
- * This step also OWNS the design turn's session-event log. It has to: a
- * design turn returns from the workflow body before `runAgentStep` ever
- * runs, so nothing else in this file would ever construct a
- * `TurnEventRecorder` for it — and the workflow body itself runs in a VM
- * with no database at all, so the recording cannot live there either. Every
- * append below is inside this `"use step"` body for that reason.
- */
-async function runDesignTurnStep(params: {
-  sandboxState: AgentCallOptions["sandbox"]["state"];
-  chatId: string;
-  /**
-   * The user's `chatMessages` row for this design request — what
-   * `turn/start`/`user/message` name. See `TurnEventRecorder.start`.
-   */
-  userMessageId: string;
-  baseBranch: string;
-  count: 2 | 3;
-  prompt: string;
-  agentOptions: AgentCallOptions;
-  writable: Writable;
-  /** Set to refine that one existing candidate rather than create a new set. */
-  iterateCandidate?: 1 | 2 | 3;
-}): Promise<{ outcomes: DesignCandidateOutcome[]; allFailed: boolean }> {
-  "use step";
-
-  const [
-    { getOrganization },
-    { resolveChatAgents },
-    { hostWorkspaceFor },
-    { createCandidates, removeCandidates, resolveCandidate },
-    { runDesignTurn, DesignTurnAllFailedError, FALLBACK_DESIGNER_AGENT },
-  ] = await Promise.all([
-    import("@/lib/org/organization"),
-    import("@/lib/agent/chat-environment"),
-    import("@/lib/agent/workspace-paths"),
-    import("@/lib/design/candidates"),
-    import("@/lib/design/design-turn"),
-  ]);
-
-  let designerAgent = FALLBACK_DESIGNER_AGENT;
-  try {
-    const organization = await getOrganization();
-    const roster = await resolveChatAgents(organization?.id);
-    designerAgent = roster.designer ?? FALLBACK_DESIGNER_AGENT;
-  } catch (error) {
-    console.error(
-      "[workflow] Failed to resolve the designer roster entry for a design turn; using the fallback persona:",
-      error,
-    );
-  }
-
-  const sessionWorkspace = hostWorkspaceFor(params.sandboxState);
-
-  /*
-   * Read fresh here rather than threaded in from the workflow body, exactly
-   * as `runAgentStep` does: this step can replay independently under the
-   * durable workflow runtime, and both things taken off the row decide how
-   * the turn actually runs — the policy that is logged with it, and the
-   * BACKEND its candidates run on. Leaving `chatBackend` unset silently ran
-   * a chat explicitly set to Poolside on Claude Code, because
-   * `normalizeBackendId(undefined)` falls back to claude-code.
-   */
-  const chat = await getChatById(params.chatId);
-  const turnPolicy: TurnPolicy = chat?.turnPolicy ?? "steer";
-
-  const recorder = new TurnEventRecorder(params.chatId, crypto.randomUUID());
-  await recorder.start({
-    messageId: params.userMessageId,
-    prompt: params.prompt,
-    policy: turnPolicy,
-  });
-
-  /*
-   * One candidate's streamed model output, held until that candidate's turn
-   * is over and then logged as a single `assistant/message`.
-   *
-   * The per-chunk route the ordinary turn path uses (`recorder.chunk`) is
-   * not available here: `assistant/chunk` carries no discriminator beyond
-   * `turnId`, and a design turn runs N candidates in parallel under ONE
-   * turn — interleaving their chunks into one turnId would replay as a
-   * single garbled message. `assistant/message.messageId` is the
-   * discriminator instead, set to `design-candidate-<index>` to match the
-   * `data-design-progress` part ids the same candidates already stream to
-   * the client.
-   *
-   * Buffered per candidate and flushed the moment that candidate reaches a
-   * terminal status, so at most the candidates still running are held in
-   * memory rather than all N until the whole turn ends.
-   */
-  const candidateChunks = new Map<number, UIMessageChunk[]>();
-
-  const logCandidateOutput = async (index: number): Promise<void> => {
-    const chunks = candidateChunks.get(index);
-    candidateChunks.delete(index);
-    if (!chunks || chunks.length === 0) {
-      return;
-    }
-    const turnId = recorder.getTurnId();
-    // Projected through the same "chunks → message" machinery replay uses,
-    // so what is logged for a candidate is what a reader would rebuild.
-    const message = await deriveAssistantMessage(
-      chunks.map((chunk): SessionEvent => ({
-        type: "assistant/chunk",
-        turnId,
-        chunk,
-      })),
-      turnId,
-      `design-candidate-${index}`,
-    );
-    if (message) {
-      await recorder.assistantMessage({
-        messageId: `design-candidate-${index}`,
-        message,
-      });
-    }
-  };
-
-  /**
-   * Close the turn's log.
-   *
-   * Called on every exit — success, every-candidate-failed, and the throwing
-   * paths — so a design turn never leaves a `turn/start` with no `turn/end`.
-   * The remaining flush is a backstop for candidates whose terminal progress
-   * never arrived because something threw first: their model output already
-   * happened, so dropping it would make replay lie about the turn.
-   */
-  const endTurn = async (isError: boolean): Promise<void> => {
-    // `logCandidateOutput` deletes the key it just flushed. Map iterators
-    // are live and tolerate that: an entry removed after it has been visited
-    // is simply gone, and nothing is skipped.
-    for (const index of candidateChunks.keys()) {
-      await logCandidateOutput(index);
-    }
-    await recorder.finish({
-      finishReason: isError ? "error" : "stop",
-      isError,
-    });
-  };
-
-  /*
-   * `removeCandidates` (Task 1) is otherwise only ever reached from
-   * `acceptCandidate` — the "user picked a winner" path. None of the plan's
-   * three cleanup paths (accept, cancel, chat deletion) covers a design turn
-   * that never produced anything to pick from: a `createCandidates` failure
-   * partway through, or every candidate turn failing, both leave worktrees
-   * and branches `createCandidates` already made with nothing left in this
-   * codebase that will ever remove them. Every failure exit below cleans up
-   * before returning or rethrowing; only the success path — where the user
-   * still needs the candidates to choose from — leaves them in place.
-   */
-  const cleanupOrphanedCandidates = async (): Promise<void> => {
-    // An iteration never cleans up. Its siblings are untouched, finished
-    // work the user is still choosing between, and the candidate being
-    // refined keeps whatever it had committed before this pass — removing
-    // any of that because one refinement failed would throw away the whole
-    // design turn on the strength of a single failed follow-up.
-    if (params.iterateCandidate) {
-      return;
-    }
-    try {
-      await removeCandidates({ sessionWorkspace, chatId: params.chatId });
-    } catch (cleanupError) {
-      console.error(
-        "[workflow] Failed to remove design candidates after a failed design turn:",
-        cleanupError,
-      );
-    }
-  };
-
-  const onProgress = async (progress: DesignProgress) => {
-    const writer = params.writable.getWriter();
-    try {
-      await writer.write({
-        type: "data-design-progress",
-        id: `design-candidate-${progress.candidate}`,
-        data: progress,
-      } satisfies WebAgentDesignProgressDataPart);
-    } finally {
-      writer.releaseLock();
-    }
-    // A terminal status means that candidate's turn is over and nothing more
-    // will be streamed for it, so its output can be logged and released.
-    if (progress.status === "completed" || progress.status === "failed") {
-      await logCandidateOutput(progress.candidate);
-    }
-  };
-
-  try {
-    let candidates: Awaited<ReturnType<typeof createCandidates>>;
-    if (params.iterateCandidate) {
-      const existing = await resolveCandidate({
-        sessionWorkspace,
-        chatId: params.chatId,
-        index: params.iterateCandidate,
-      });
-      if (!existing) {
-        throw new Error(
-          `Design candidate ${params.iterateCandidate} is no longer there to refine. Its worktree has been removed — start a new design turn.`,
-        );
-      }
-      candidates = [existing];
-    } else {
-      try {
-        candidates = await createCandidates({
-          sessionWorkspace,
-          chatId: params.chatId,
-          baseBranch: params.baseBranch,
-          count: params.count,
-        });
-      } catch (error) {
-        await cleanupOrphanedCandidates();
-        throw error;
-      }
-    }
-
-    try {
-      const { outcomes } = await runDesignTurn({
-        candidates,
-        prompt: params.prompt,
-        agentOptions: params.agentOptions,
-        designerAgent,
-        framing: params.iterateCandidate ? "iteration" : "initial",
-        onProgress,
-        onChunk: (candidateIndex, chunk) => {
-          const existing = candidateChunks.get(candidateIndex);
-          if (existing) {
-            existing.push(chunk);
-          } else {
-            candidateChunks.set(candidateIndex, [chunk]);
-          }
-          return Promise.resolve();
-        },
-        /*
-         * A candidate runs with `permissionMode: "bypassPermissions"` and is
-         * driven by arbitrary user prompt text, so the `PreToolUse` hook is
-         * the only thing standing between it and Write/Edit/Bash.
-         * `run-step.ts` installs that hook only when BOTH `approval` and
-         * `chatId` reach it — passing neither, as this call used to, left a
-         * design candidate with no tool gate at all. These are the identical
-         * values the ordinary turn path passes, so a candidate is gated
-         * exactly like any other turn.
-         */
-        approval: { url: approvalHookUrl(), token: approvalToken() },
-        chatId: params.chatId,
-        chatBackend: chat?.backend,
-      });
-      await endTurn(false);
-      return { outcomes, allFailed: false };
-    } catch (error) {
-      await cleanupOrphanedCandidates();
-      if (error instanceof DesignTurnAllFailedError) {
-        await endTurn(true);
-        return { outcomes: error.outcomes, allFailed: true };
-      }
-      throw error;
-    }
-  } catch (error) {
-    await endTurn(true);
-    throw error;
-  }
 }
 
 /**
@@ -934,90 +591,6 @@ export async function runAgentWorkflow(options: Options) {
       sandboxState: runtime.sandboxState,
       chatId: options.chatId,
     });
-
-    /*
-     * A design turn runs N parallel candidate variants in their own
-     * worktrees instead of one turn on the chat's own branch — none of the
-     * machinery below (the chat's own checkpoint, the continuation loop,
-     * auto-commit/PR on the chat's branch, task completion, memory
-     * distillation) applies, since a design turn never touches the chat's
-     * worktree at all. Candidates commit themselves (`runDesignTurnStep`),
-     * and Task 1's `acceptCandidate` is what eventually lands one of them on
-     * this branch.
-     */
-    if (options.mode === "design") {
-      if (!runtime.currentBranch) {
-        throw new Error(
-          "Design mode requires the chat's worktree branch, but none was resolved.",
-        );
-      }
-
-      // `designCandidateCount`'s `2 | 3` type is compile-time only — Task 4
-      // starts passing this from the client, over the wire, where nothing
-      // stops an arbitrary number from arriving. Reject it here, before
-      // `createCandidates` ever runs, rather than letting it reach git with
-      // a `count` its own branch-naming rule (`design/<chatId>/<n>`, n =
-      // 1..3) was never meant to see.
-      const requestedCandidateCount = options.designCandidateCount ?? 3;
-      if (requestedCandidateCount !== 2 && requestedCandidateCount !== 3) {
-        throw new Error(
-          `Design mode requires 2 or 3 candidates, got ${requestedCandidateCount}.`,
-        );
-      }
-
-      // Same reasoning as the count above: the client picks this, so the
-      // `1 | 2 | 3` type is compile-time only. An out-of-range index would
-      // otherwise reach `resolveCandidate` and simply find nothing, which
-      // reads as "your candidate vanished" rather than "that is not a
-      // candidate index."
-      const iterateCandidate = options.designIterateCandidate;
-      if (
-        iterateCandidate !== undefined &&
-        iterateCandidate !== 1 &&
-        iterateCandidate !== 2 &&
-        iterateCandidate !== 3
-      ) {
-        throw new Error(
-          `Design mode can only iterate on candidate 1, 2 or 3, got ${iterateCandidate}.`,
-        );
-      }
-
-      const designResult = await runDesignTurnStep({
-        sandboxState: runtime.sandboxState,
-        chatId: options.chatId,
-        userMessageId:
-          extractLatestUserMessageId(options.messages) ?? assistantId,
-        baseBranch: runtime.currentBranch,
-        count: requestedCandidateCount,
-        // The same prompt the ordinary turn would have dispatched,
-        // attachments included: a design turn that silently ignores an
-        // attached mockup is the bug this file just fixed, wearing a hat.
-        prompt: turnPrompt,
-        agentOptions,
-        writable,
-        ...(iterateCandidate ? { iterateCandidate } : {}),
-      });
-
-      pendingAssistantResponse = {
-        ...pendingAssistantResponse,
-        parts: [
-          {
-            type: "text",
-            text: buildDesignSummaryText(designResult.outcomes),
-          },
-          ...designResult.outcomes.map(buildDesignProgressPart),
-        ],
-      };
-
-      await persistAssistantMessage(options.chatId, pendingAssistantResponse);
-      await Promise.all([
-        clearActiveStream(options.chatId, workflowRunId),
-        sendFinish(writable).then(() => closeStream(writable)),
-      ]);
-      streamClosed = true;
-      workflowStatus = designResult.allFailed ? "failed" : "completed";
-      return;
-    }
 
     // Before the agent touches anything, record where the worktree stands so
     // this turn can be undone. The agent edits files directly, so there is no
@@ -1561,9 +1134,8 @@ function extractLatestUserAttachments(
 /**
  * Build the single prompt this turn dispatches.
  *
- * Both turn kinds go through here — the ordinary turn and the design turn's
- * fan-out — because "the model never saw the attached mockup" and "the model
- * never saw the attached log" are the same defect.
+ * Every turn goes through here, because "the model never saw the attached
+ * mockup" and "the model never saw the attached log" are the same defect.
  *
  * The size rule matters as much as the content rule. An attachment is very
  * often a log, and a log is the thing users paste without checking its size:
@@ -1603,9 +1175,9 @@ const buildTurnPromptStep = async (params: {
   /*
    * Whether the backend THIS chat runs on can actually look at an image.
    *
-   * Read here, from the chat row, for the same reason `runAgentStep` and
-   * `runDesignTurnStep` read it: the workflow body has no `chat` in scope,
-   * only a `chatId`, and this is a `"use step"` that may do I/O.
+   * Read here, from the chat row, for the same reason `runAgentStep` reads
+   * it: the workflow body has no `chat` in scope, only a `chatId`, and this
+   * is a `"use step"` that may do I/O.
    *
    * Dynamically imported like `attachment-staging` below —
    * `backend-capabilities` instantiates the real backends, so a static

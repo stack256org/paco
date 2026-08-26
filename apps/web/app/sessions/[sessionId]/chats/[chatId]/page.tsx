@@ -10,12 +10,10 @@ import {
   getChatSummariesBySessionId,
 } from "@/lib/db/sessions";
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
-import { buildCandidatePreviews } from "@/lib/design/candidate-preview-url";
 import { buildModelOptions } from "@/lib/model-options";
 import { listAllModels } from "@/lib/model-catalog";
 import { enabledPluginRenderers } from "@/lib/plugins/renderer-info";
 import { getServerSession } from "@/lib/session/get-server-session";
-import { readInstanceSettings } from "@/lib/settings/instance-settings";
 import { parseThemePreference, THEME_COOKIE_NAME } from "@/lib/theme";
 import { getInitialIsOnlyChatInSession } from "./only-chat-in-session";
 import { SessionChatContent } from "./session-chat-content";
@@ -115,21 +113,14 @@ export default async function SessionChatPage({
   }
   // Fetch chat, messages, models, the chat list, and enabled plugins'
   // renderer slots in parallel.
-  const [
-    chat,
-    dbMessages,
-    initialModels,
-    sessionChats,
-    pluginRenderers,
-    instanceSettings,
-  ] = await Promise.all([
-    getChatByIdWithRetry(chatId, sessionId),
-    getChatMessages(chatId),
-    getInitialModels(),
-    getChatSummariesBySessionId(sessionId, session.user.id),
-    enabledPluginRenderers(),
-    readInstanceSettings(),
-  ]);
+  const [chat, dbMessages, initialModels, sessionChats, pluginRenderers] =
+    await Promise.all([
+      getChatByIdWithRetry(chatId, sessionId),
+      getChatMessages(chatId),
+      getInitialModels(),
+      getChatSummariesBySessionId(sessionId, session.user.id),
+      enabledPluginRenderers(),
+    ]);
 
   if (!chat) {
     if (isOptimisticChatId(chatId)) {
@@ -190,20 +181,6 @@ export default async function SessionChatPage({
   // `false`, without ever hardcoding a backend id.
   const initialCapabilities = capabilitiesForBackend(chat.backend);
 
-  /*
-   * A design candidate's preview URL is derived, not streamed: Section 5
-   * Task 3 shipped the hostname, the nginx route and the forward auth for
-   * `<slug>-d<n>`, but nothing that carries the resulting URLs to the
-   * browser. Computing them here — where the instance settings are already
-   * being read — keeps the design panel free of a second round trip and of
-   * any knowledge of how a preview host is built.
-   */
-  const designCandidatePreviews = buildCandidatePreviews({
-    chatId: chat.id,
-    previewBaseDomain: instanceSettings.previewBaseDomain,
-    tlsEnabled: instanceSettings.tlsEnabled,
-  });
-
   return (
     <DiffsProvider themePreference={themePreference}>
       <SessionChatProvider
@@ -214,7 +191,6 @@ export default async function SessionChatPage({
         initialModelOptions={initialModelOptions}
       >
         <SessionChatContent
-          designCandidatePreviews={designCandidatePreviews}
           initialIsOnlyChatInSession={initialIsOnlyChatInSession}
           messageDurationMap={messageDurationMap}
           messageStartedAtMap={messageStartedAtMap}

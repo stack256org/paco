@@ -74,7 +74,7 @@ async function addCandidateWorktree(
 }
 
 describe("probeUnsavedWork", () => {
-  test("counts uncommitted work in a design candidate's worktree", async () => {
+  test("counts uncommitted work in a leftover designs/ worktree", async () => {
     const { root, repo } = await makeWorkspace();
     const candidate = await addCandidateWorktree(root, repo, "c1", 2);
     await fs.writeFile(
@@ -107,7 +107,7 @@ describe("probeUnsavedWork", () => {
     expect(work?.uncommittedFiles).toBe(4);
   });
 
-  test("is unchanged for a workspace that never ran a design turn", async () => {
+  test("is unchanged for a workspace with no designs/ directory", async () => {
     const { root } = await makeWorkspace();
 
     const work = await probeUnsavedWork(root);

@@ -1,9 +1,6 @@
 import type { NextRequest } from "next/server";
 import { findChatOwnerByPreviewSlug } from "@/lib/preview/authorize";
-import {
-  parsePreviewHostSlug,
-  previewSlugFromHost,
-} from "@/lib/preview/hostname";
+import { previewSlugFromHost } from "@/lib/preview/hostname";
 import {
   createPreviewGrantToken,
   PREVIEW_GRANT_CONSUME_PATH,
@@ -57,15 +54,6 @@ export async function GET(req: NextRequest) {
     return respond(400, "That isn't a preview hostname this instance knows.");
   }
 
-  // A design-candidate host (`<chatSlug>-d<n>.<baseDomain>`) carries no
-  // access rules of its own — `chats.previewSlug` is a generated column
-  // that never carries the `-d<n>` suffix, so looking a candidate's raw
-  // label up directly always misses. Stripping it down to the BASE chat's
-  // slug first is what makes minting a grant for a candidate host possible
-  // at all; the grant itself still binds to the full `host`, `-d<n>` and
-  // all, unchanged below — see `createPreviewGrantToken`.
-  const { chatSlug } = parsePreviewHostSlug(label);
-
   const session = await getServerSession();
   if (!session?.user) {
     return respond(
@@ -74,7 +62,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const chat = await findChatOwnerByPreviewSlug(chatSlug);
+  const chat = await findChatOwnerByPreviewSlug(label);
   if (!chat) {
     return respond(404, "This preview no longer exists.");
   }

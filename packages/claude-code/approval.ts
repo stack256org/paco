@@ -49,11 +49,9 @@ export const HOOK_SOURCE =
  *
  * `buildApprovalSettings()` runs once per gated `runAgentTurn` call, and
  * this server runs many turns at once — separate chats on separate
- * workflows, plus the N parallel candidate turns of a single design turn,
- * which fan out through one `Promise.all` and each carry the chat's own
- * approval settings (`RunDesignTurnParams.approval` in
- * `apps/web/lib/design/design-turn.ts`). Two calls overlapping is therefore
- * ordinary, not exotic. A plain `writeFileSync` to this fixed path let a
+ * workflows, each carrying its own approval settings. Two calls overlapping
+ * is therefore ordinary, not exotic. A plain `writeFileSync` to this fixed
+ * path let a
  * hook process spawned mid-write (by a *different* concurrent turn) read a
  * truncated or half-overwritten file and fail the tool call it was supposed
  * to gate.

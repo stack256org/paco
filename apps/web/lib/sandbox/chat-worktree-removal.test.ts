@@ -31,27 +31,12 @@ mock.module("@/lib/sandbox/utils", () => ({
   canOperateOnSandbox: Boolean,
 }));
 
-let removeCandidatesShouldThrow = false;
-const removeCandidatesMock = mock(
-  (_params: { sessionWorkspace: string; chatId: string }) => {
-    if (removeCandidatesShouldThrow) {
-      return Promise.reject(new Error("git said no"));
-    }
-    return Promise.resolve();
-  },
-);
-mock.module("@/lib/design/candidates", () => ({
-  removeCandidates: removeCandidatesMock,
-}));
-
 const { classifyWorktreeRemoval, removeChatWorktree } =
   await import("./chat-worktree-removal");
 
 beforeEach(() => {
   execResults = [];
   execCalls.length = 0;
-  removeCandidatesShouldThrow = false;
-  removeCandidatesMock.mockClear();
   connectSandboxMock.mockClear();
 });
 
@@ -123,25 +108,8 @@ describe("classifyWorktreeRemoval", () => {
   });
 });
 
-describe("removeChatWorktree design-candidate cleanup", () => {
-  test("removes the chat's design candidates before its own worktree", async () => {
-    const outcome = await removeChatWorktree(
-      { type: "docker", sandboxName: "s1" },
-      "chat-1",
-    );
-
-    expect(outcome).toEqual({ kind: "removed" });
-    expect(removeCandidatesMock).toHaveBeenCalledTimes(1);
-    expect(removeCandidatesMock.mock.calls[0][0]).toEqual({
-      sessionWorkspace: "/workspaces/s1",
-      chatId: "chat-1",
-    });
-    expect(execCalls[0]).toContain("worktree remove");
-  });
-
-  test("a candidate cleanup failure does not block the delete", async () => {
-    removeCandidatesShouldThrow = true;
-
+describe("removeChatWorktree", () => {
+  test("removes the chat's own worktree", async () => {
     const outcome = await removeChatWorktree(
       { type: "docker", sandboxName: "s1" },
       "chat-1",
@@ -149,12 +117,14 @@ describe("removeChatWorktree design-candidate cleanup", () => {
 
     expect(outcome).toEqual({ kind: "removed" });
     expect(execCalls[0]).toContain("worktree remove");
+    expect(execCalls[0]).toContain("/workspaces/s1/chats/chat-1");
   });
 
   test("touches nothing when the workspace is not running", async () => {
     const outcome = await removeChatWorktree(null, "chat-1");
 
     expect(outcome).toEqual({ kind: "not-running" });
-    expect(removeCandidatesMock).not.toHaveBeenCalled();
+    expect(connectSandboxMock).not.toHaveBeenCalled();
+    expect(execCalls).toHaveLength(0);
   });
 });

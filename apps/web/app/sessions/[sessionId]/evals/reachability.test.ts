@@ -47,9 +47,8 @@ const SKIP_DIRS = new Set(["node_modules", ".next"]);
  *
  * The path has to be a STRING LITERAL, hence the required opening quote or
  * backtick: this same route path appears in prose inside docstrings all over
- * the codebase (`requireEvalAccess` in `chats/[chatId]/design-actions.ts`,
- * for one), and a comment mentioning a page is exactly the kind of thing
- * that makes an unreachable page look reachable.
+ * the codebase, and a comment mentioning a page is exactly the kind of
+ * thing that makes an unreachable page look reachable.
  */
 const EVALS_HREF = /["'`]\/sessions\/[^"'`\s]*\/evals/;
 

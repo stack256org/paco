@@ -146,6 +146,17 @@ export const sessionEventSchema = z.discriminatedUnion("type", [
     // verbatim and the projection re-streams it, so passthrough is correct.
     chunk: z.unknown(),
   }),
+  /*
+   * Nothing writes this any more.
+   *
+   * It existed for a turn that fanned out into several model runs at once —
+   * design mode's parallel candidates — where `assistant/chunk` could not be
+   * used, because it carries no discriminator and N interleaved streams
+   * under one `turnId` would replay as one garbled message. That feature is
+   * gone. The variant stays because this schema PARSES stored rows: a log
+   * written while design mode existed still holds these events, and dropping
+   * the variant would fail the read of a turn that was recorded correctly.
+   */
   z.object({
     type: z.literal("assistant/message"),
     turnId: z.string(),
