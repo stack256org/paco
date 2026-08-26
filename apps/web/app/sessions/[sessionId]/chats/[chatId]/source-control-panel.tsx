@@ -378,9 +378,14 @@ export function SourceControlPanel({
         )}
       >
         <div className="flex min-w-0 shrink-0 items-center gap-2 border-base-300 border-b px-3 py-2">
-          <h2 className="min-w-0 truncate font-semibold text-sm">
-            Source Control
-          </h2>
+          {/*
+            "Changes", not "Source Control": this pane is reached through a tab
+            labelled Changes, and the revert dialog tells the operator their
+            staged work lives "in Changes". A second name for one surface is a
+            second thing to reconcile. The echo with the unstaged section's
+            CHANGES header below is deliberate and reads as pane-then-group.
+          */}
+          <h2 className="min-w-0 truncate font-semibold text-sm">Changes</h2>
           {total > 0 ? (
             <span className="badge badge-neutral badge-xs shrink-0 font-mono">
               {total}

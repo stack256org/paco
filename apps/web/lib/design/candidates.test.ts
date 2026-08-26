@@ -414,7 +414,7 @@ describe("acceptCandidate", () => {
     // Names the remedy, not a host path. Since turns stopped committing, a
     // dirty chat worktree is the normal state, so this refusal is something
     // the person will actually read.
-    expect(result.error).toContain("Source Control");
+    expect(result.error).toContain("Changes tab");
     expect(result.error).not.toContain(chatWorktree);
 
     // Refused, so nothing was cleaned up.

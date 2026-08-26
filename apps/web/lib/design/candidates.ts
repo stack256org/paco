@@ -459,7 +459,7 @@ export async function acceptCandidate(params: {
     return {
       ok: false,
       error:
-        "This chat has uncommitted changes, and adopting a candidate merges a branch on top of them. Commit or discard them in the Source Control panel, then adopt the candidate.",
+        "This chat has uncommitted changes, and adopting a candidate merges a branch on top of them. Commit or discard them in the Changes tab, then adopt the candidate.",
     };
   }
 
