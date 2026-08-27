@@ -6,39 +6,59 @@ name: Release
 # architecture-specific) and the sandbox image every chat depends on. It no
 # longer publishes an app image; maintaining that second delivery mechanism
 # was upkeep for a path nobody uses once install.sh installs a package.
+#
+# A release is cut by merging to main, not by pushing a tag. `version` in
+# package.json is the source of truth: when a push to main lands a version that
+# has no tag yet, this workflow tags it, builds it, publishes it and tells
+# apt.stack256.org to reindex. When the version already has a tag, the push is
+# an ordinary one and nothing is published.
+#
+# So cutting a release is: bump "version" in package.json, merge. Nothing to
+# tag by hand — which matters here more than most places, because the tag
+# trigger this replaces did not reliably work. Pushing v0.2.0 created the tag
+# on GitHub and no workflow run, three times over, leaving the repository with
+# a tag, a merged main, and no release for either.
+#
+# WHY workflow_run RATHER THAN push: on a plain `push` trigger this workflow
+# and CI start together, so a .deb can be published from a commit whose lint,
+# typecheck, tests or production build are still running — or have already
+# failed. Chaining off CI's completion makes the two strictly sequential and
+# turns CI into a real gate: a red CI publishes nothing. main is guarded by
+# CI's own `push` trigger, so there is always a run to chain off.
+#
+# WHY THE TAG IS PUSHED FROM THE RELEASE JOB rather than a separate workflow:
+# a tag pushed with the built-in GITHUB_TOKEN does not trigger other workflows
+# — GitHub blocks that to stop runaway recursion. Splitting "create the tag"
+# and "build the tag" into two files looks tidier and quietly never builds
+# anything. That is also why the old `push: tags` trigger is gone rather than
+# kept alongside this one.
+#
+# THE SHA GOTCHA: on a workflow_run event, github.sha and github.ref point at
+# the default branch, NOT at the commit CI actually tested. Every checkout
+# below uses workflow_run.head_sha instead, so a release always lands on the
+# commit that passed.
 on:
-  push:
-    tags: ["v*"]
-  # A tag is a promise: it publishes to GHCR, cuts a GitHub release, and is
-  # what an installed host upgrades to. That makes it the wrong tool for
-  # "give me a .deb to try on a scratch VM", which is a thing worth doing far
-  # more often than a release — and the only alternative was building the
-  # package by hand on a machine of the right architecture, which tests the
-  # machine as much as the package.
-  #
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
   # A dispatch build produces the same artefact through the same script and,
   # by default, publishes none of it: `publishing` below is false, so the
   # release and the image push are both skipped. Nothing an operator installs
   # comes from a default dispatch, so a throwaway version string costs
   # nothing.
   #
-  # `publish: true` is the escape hatch for when the tag trigger does not
-  # fire. That is not hypothetical: pushing v0.2.0 created the tag on GitHub
-  # and no workflow run, three times over, while a dispatch of this same
-  # workflow ran normally — so the repository was left with a tag, a merged
-  # main, and no way to cut the release the tag was for.
-  #
-  # It grants no new privilege. Publishing already required push access, and
-  # dispatching this workflow requires the same write access that pushing a
-  # tag does, so the set of people who can publish is unchanged. What it
-  # changes is that publishing is now an explicit, audited choice in the run's
-  # own inputs rather than something only a tag can express. Point it at a tag
-  # that already exists (`--ref`), because `gh release create` needs one.
+  # `publish: true` is the escape hatch for republishing a version whose run
+  # went wrong. It grants no new privilege: dispatching this workflow requires
+  # the same write access that merging to main does, so the set of people who
+  # can publish is unchanged. Unlike before, the tag need not already exist —
+  # the release job creates it if it is missing, and reuses it if it is not.
   workflow_dispatch:
     inputs:
       version:
-        description: "Version for the .deb (no leading v), e.g. 0.2.0-test1"
-        required: true
+        description: "Version for the .deb (no leading v), e.g. 0.2.0-test1. Leave blank to use package.json."
+        required: false
         type: string
       publish:
         description: "Publish it: GHCR image, GitHub release, apt dispatch. Leave off for a throwaway build."
@@ -46,52 +66,61 @@ on:
         default: false
         type: boolean
 
+# Never two releases at once, and never cancel one midway: a half-published
+# release is a tag with no assets, which every installed host tries to upgrade
+# to and fails.
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
 # Read-only by default; each job that needs to write (the release, the
 # package registry) asks for exactly that scope itself.
 permissions:
   contents: read
 
 jobs:
-  # One place computes the tag, the bare version (no leading "v", which is
-  # what build-deb.sh and the .deb's own Version: field expect), and whether
-  # this is a stable release — every other job reads these instead of
-  # recomputing them.
+  # One place computes the tag, the bare version (no leading "v", which is what
+  # build-deb.sh and the .deb's own Version: field expect), whether this is a
+  # stable release, and whether anything is published at all — every other job
+  # reads these instead of recomputing them.
   version:
     runs-on: ubuntu-latest
+    # Only a green CI that ran on a push gets through. The `event == 'push'`
+    # half is load-bearing: CI also runs on pull_request, and a PR branch that
+    # happened to be named `main` would otherwise satisfy the branch filter on
+    # the trigger and publish from code that was never merged.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
       stable: ${{ steps.version.outputs.stable }}
       publishing: ${{ steps.version.outputs.publishing }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
       - id: version
-        # Both values reach the script as environment variables rather than
+        # Both inputs reach the script as environment variables rather than
         # `${{ }}` interpolated into the shell text: `inputs.version` is
         # attacker-controlled by anyone who can dispatch the workflow, and
         # interpolation would paste it into the script before sh ever parses
         # it. As an env var it is data no matter what it contains.
         env:
-          REF_NAME: ${{ github.ref_name }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
-            # A dispatch has no tag of its own, so the version comes from the
-            # input. It publishes only when asked to, and then against the tag
-            # that version names — which must already exist, since
-            # `gh release create` will not invent one.
+            # A dispatch may name its own version, so a throwaway build can be
+            # `0.2.0-test1` without touching package.json.
             version="${INPUT_VERSION#v}"
-            tag="v$version"
-            if [ "$INPUT_PUBLISH" = "true" ]; then
-              publishing=true
-            else
-              publishing=false
-            fi
           else
-            tag="$REF_NAME"
-            version="${tag#v}"
-            publishing=true
+            version="$(node -p "require('./package.json').version")"
           fi
+          tag="v$version"
 
           # dpkg requires a Version: that starts with a digit and otherwise
           # holds only alphanumerics and `. + ~ -`; anything else is a package
@@ -102,15 +131,29 @@ jobs:
           # steps interpolate this value into a `run:` script — the "Build the
           # .deb" step passes it to build-deb.sh as an expression, which is
           # pasted into the shell text before sh parses it. A dispatch lets
-          # anyone who
-          # can run the workflow choose the string, a version containing a
-          # quote would close that argument and run the rest as commands.
-          # Restricting the charset here is what makes those interpolations
-          # safe, so keep it strict: no quotes, no spaces, no `$`, no `;`.
+          # anyone who can run the workflow choose the string, and a version
+          # containing a quote would close that argument and run the rest as
+          # commands. Restricting the charset here is what makes those
+          # interpolations safe, so keep it strict: no quotes, no spaces, no
+          # `$`, no `;`.
           case "$version" in
-            "" | *[!A-Za-z0-9.+~-]* | [!0-9]*)
-              echo "version '$version' must start with a digit and hold only" >&2
-              echo "alphanumerics and . + ~ - (e.g. 0.2.0-test1)" >&2
+            "" | null | *[!A-Za-z0-9.+~-]* | [!0-9]*)
+              echo "::error::version '$version' must start with a digit and hold only alphanumerics and . + ~ - (e.g. 0.2.0, 0.2.0-test1). It comes from the \"version\" field of package.json unless a dispatch overrides it." >&2
+              exit 1
+              ;;
+          esac
+
+          # Shape, on top of charset. The charset check above is the one that
+          # keeps the interpolations below safe and cannot be dropped; this one
+          # is about the version now coming from a field someone edits by hand
+          # in a normal commit rather than from a tag they deliberately pushed.
+          # `0.2` is a plausible typo that passes every check above, and it
+          # would quietly create a v0.2 tag and a v0.2 release that no `apt`
+          # version comparison orders the way anyone expects.
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *)
+              echo "::error::version '$version' is not X.Y.Z or X.Y.Z-prerelease. Fix the \"version\" field in package.json." >&2
               exit 1
               ;;
           esac
@@ -124,6 +167,35 @@ jobs:
             *-*) stable=false ;;
             *) stable=true ;;
           esac
+
+          # Is this version already released? `ls-remote` rather than `git tag
+          # -l`: actions/checkout does not fetch tags, so the local view is
+          # empty and every version would look new.
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            tagged=true
+          else
+            tagged=false
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # A dispatch publishes only when explicitly asked to, tagged or
+            # not — republishing a version whose run went wrong is exactly what
+            # the escape hatch is for.
+            if [ "$INPUT_PUBLISH" = "true" ]; then
+              publishing=true
+              echo "Dispatch with publish: on. Publishing $tag."
+            else
+              publishing=false
+              echo "Dispatch with publish: off. Building $tag as a throwaway; nothing will be published."
+            fi
+          elif [ "$tagged" = "true" ]; then
+            publishing=false
+            echo "$tag is already tagged, so this push is an ordinary one and publishes nothing. To cut a release, bump \"version\" in package.json and merge."
+          else
+            publishing=true
+            echo "$tag has no tag yet, so this push is a release."
+          fi
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "stable=$stable" >> "$GITHUB_OUTPUT"
@@ -155,7 +227,12 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
+      # The commit CI tested, not the branch tip: see THE SHA GOTCHA above.
+      # Building a different tree from the one that passed is the whole class
+      # of bug this avoids, and it is invisible in a green run.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -199,6 +276,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -280,15 +359,17 @@ jobs:
 
           echo "ghcr.io/${repo}:${TAG} is publicly pullable."
 
-  # Uploads both .deb files to the GitHub Release, then tells Stack256org/apt
-  # to rebuild its signed index. That repository is the one place the signing
-  # key and the Packages/Release index live — this workflow does not sign
-  # anything itself.
+  # Tags the commit, uploads both .deb files to the GitHub Release, then tells
+  # Stack256org/apt to rebuild its signed index. That repository is the one
+  # place the signing key and the Packages/Release index live — this workflow
+  # does not sign anything itself.
   release:
     needs: [version, build-deb]
-    # Skipped for a dispatch: it cuts a GitHub Release and asks the apt
-    # repository to re-index, which together are exactly what `apt upgrade`
-    # picks up. The .deb is still on the run as an artifact to download.
+    # Skipped unless this push actually is a release, and skipped for a
+    # dispatch that did not ask to publish: this job cuts a GitHub Release and
+    # asks the apt repository to re-index, which together are exactly what
+    # `apt upgrade` picks up. The .deb is still on the run as an artifact to
+    # download either way.
     if: needs.version.outputs.publishing == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -302,6 +383,7 @@ jobs:
       # tag, which a shallow clone does not contain.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -310,17 +392,55 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The tag is created here rather than by hand, and rather than by a
+      # separate workflow: a tag pushed with GITHUB_TOKEN does not trigger
+      # other workflows, so "tag in one file, build in another" is a pipeline
+      # that quietly never builds. It is pushed only once the .deb files exist
+      # — a tag with no assets is what every installed host tries to upgrade
+      # to and fails on, so the cheap failures all happen before this point.
+      - name: Tag the released commit
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -eu
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists; reusing it. (A dispatch republishing an existing version does this.)"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$SHA" -m "$TAG"
+          git push origin "refs/tags/$TAG"
+          echo "tagged $SHA as $TAG"
+
       - name: Create the GitHub Release and upload the .deb files
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          STABLE: ${{ needs.version.outputs.stable }}
         run: |
+          set -eu
           set -- dist/*.deb
-          if [ "${{ needs.version.outputs.stable }}" = "true" ]; then
-            gh release create "${{ needs.version.outputs.tag }}" "$@" \
-              --title "${{ needs.version.outputs.tag }}" --generate-notes
+
+          # An existing release is not an error here. The dispatch escape hatch
+          # exists precisely for a version whose first attempt went wrong, and
+          # `gh release create` on a tag that already has a release fails with
+          # a message about the tag rather than about the release — which is
+          # how three consecutive red runs came to sit under a v0.2.0 that had
+          # in fact published correctly the first time. Upload into it instead,
+          # clobbering assets of the same name so a rebuilt .deb replaces the
+          # one it supersedes rather than being rejected as a duplicate.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading these .deb files into it."
+            gh release upload "$TAG" "$@" --clobber
+            exit 0
+          fi
+
+          if [ "$STABLE" = "true" ]; then
+            gh release create "$TAG" "$@" --title "$TAG" --generate-notes
           else
-            gh release create "${{ needs.version.outputs.tag }}" "$@" \
-              --title "${{ needs.version.outputs.tag }}" --generate-notes --prerelease
+            gh release create "$TAG" "$@" --title "$TAG" --generate-notes --prerelease
           fi
 
       # Stack256org/apt owns the signed index, rather than this workflow
