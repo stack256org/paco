@@ -213,6 +213,16 @@ jobs:
   # QEMU.
   build-deb:
     needs: version
+    # Two architectures, one of them on an arm64 runner, for about eight
+    # minutes. Worth it for a release and for a dispatch — building a .deb to
+    # try on a scratch VM is the whole reason the dispatch exists, whether or
+    # not it publishes. Not worth it for an ordinary merge that has already
+    # been through CI and will publish nothing, which under the old tag
+    # trigger did not run this workflow at all; without this condition, moving
+    # the trigger to main would quietly put that cost on every merge.
+    if: >-
+      needs.version.outputs.publishing == 'true' ||
+      github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
