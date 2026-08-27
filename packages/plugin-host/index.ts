@@ -9,6 +9,8 @@ export type {
   ToolOutcome,
 } from "./host.ts";
 export { PluginHost, workerEntryPath, workerPreloadPath } from "./host.ts";
+export type { LineReader, LineReaderOptions } from "./line-reader.ts";
+export { MAX_LINE_BYTES, readLines } from "./line-reader.ts";
 export type { FetchAllowDecision } from "./net-allowlist.ts";
 export { checkFetchAllowed, isFetchAllowed } from "./net-allowlist.ts";
 export type {

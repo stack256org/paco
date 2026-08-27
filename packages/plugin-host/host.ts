@@ -9,6 +9,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { Capability, PluginDescriptor } from "@paco/plugin-kit";
+import type { LineReader } from "./line-reader.ts";
+import { readLines } from "./line-reader.ts";
 import { checkFetchAllowed } from "./net-allowlist.ts";
 import {
   encodeMessage,
@@ -30,12 +32,6 @@ const DEFAULT_INGRESS_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 3000;
 /** Ceiling on retained worker stderr, so a chatty plugin cannot grow it. */
 const MAX_STDERR_BYTES = 16_000;
-/**
- * Ceiling on one protocol line, in bytes (64 KiB). Without it a worker can pin
- * the host's memory by writing forever and never sending a newline — the
- * reader would buffer the whole stream waiting for one that never comes.
- */
-const MAX_LINE_BYTES = 65_536;
 /** Capability requests a plugin may have outstanding at once. */
 const MAX_INFLIGHT_CAPABILITY_REQUESTS = 32;
 /** Worker `log` messages accepted per second before the rest are dropped. */
@@ -411,7 +407,7 @@ export class PluginHost {
   private started = false;
   private callCounter = 0;
   private readerClosed = false;
-  private lineBuffer = "";
+  private lineReader: LineReader | null = null;
   private inFlightCapabilityRequests = 0;
   private logTokens = MAX_LOGS_PER_SECOND;
   private logWindowStart = 0;
@@ -730,7 +726,7 @@ export class PluginHost {
     } finally {
       clearTimeout(forceKill);
       this.settleStoppedState();
-      this.readerClosed = true;
+      this.closeReader();
     }
   }
 
@@ -916,35 +912,26 @@ export class PluginHost {
   }
 
   /**
-   * Reads stdout in chunks rather than through `readline`, so the buffer for
-   * an unterminated line can be measured and capped. `readline` would happily
-   * accumulate a gigabyte waiting for a newline that never arrives.
+   * Reads stdout through the capped line reader rather than `readline`, which
+   * would happily accumulate a gigabyte waiting for a newline that never
+   * arrives. The framing and its cap live in `line-reader.ts`, where the chunk
+   * boundary is an argument a test can set — the bug this guards against was
+   * only reachable on chunkings the host cannot arrange for itself.
    */
   private attachStdoutReader(child: ChildProcessWithoutNullStreams): void {
+    const reader = readLines({
+      onLine: (line) => this.onLine(line),
+      onOverflow: (message) =>
+        this.forceCrash(`plugin ${this.pluginId} ${message}`),
+    });
+    this.lineReader = reader;
+
     child.stdout.setEncoding("utf-8");
     child.stdout.on("data", (chunk: string) => {
       if (this.readerClosed) {
         return;
       }
-      this.lineBuffer += chunk;
-
-      let newlineIndex = this.lineBuffer.indexOf("\n");
-      while (newlineIndex !== -1) {
-        const line = this.lineBuffer.slice(0, newlineIndex);
-        this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
-        this.onLine(line);
-        if (this.readerClosed) {
-          return;
-        }
-        newlineIndex = this.lineBuffer.indexOf("\n");
-      }
-
-      if (Buffer.byteLength(this.lineBuffer, "utf-8") > MAX_LINE_BYTES) {
-        this.lineBuffer = "";
-        this.forceCrash(
-          `plugin ${this.pluginId} wrote more than ${MAX_LINE_BYTES} bytes without a newline`,
-        );
-      }
+      reader.push(chunk);
     });
   }
 
@@ -1255,8 +1242,13 @@ export class PluginHost {
     }
   }
 
-  private forceCrash(reason: string): void {
+  private closeReader(): void {
     this.readerClosed = true;
+    this.lineReader?.close();
+  }
+
+  private forceCrash(reason: string): void {
+    this.closeReader();
     this.killProcessTree("SIGKILL");
     this.handleTermination(reason);
   }
