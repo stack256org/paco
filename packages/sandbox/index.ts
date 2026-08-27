@@ -89,6 +89,7 @@ export {
   dockerEndpoint,
   dockerPreflight,
   DockerUnusableError,
+  clampCpus,
   isRootlessInfo,
   readSecurityOptions,
 } from "./docker/index.ts";

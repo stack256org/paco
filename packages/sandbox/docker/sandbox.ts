@@ -20,7 +20,7 @@ import {
 } from "./config.ts";
 import { BASELINE_GITIGNORE } from "./baseline-gitignore.ts";
 import { ContainerIdleTimer } from "./idle-timer.ts";
-import { assertDockerUsable } from "./preflight.ts";
+import { assertDockerUsable, clampCpus } from "./preflight.ts";
 import { REPO_DIRNAME, repoDir } from "./layout.ts";
 import { migrateLegacyWorkspace } from "./worktree.ts";
 import type { DockerState } from "./state.ts";
@@ -479,7 +479,9 @@ export class DockerSandbox implements Sandbox {
     // `assertDockerUsable` also separates "the daemon is refusing this
     // process" from "there is no daemon", which used to be one error. See
     // `preflight.ts` for the measured evidence behind all three states.
-    await assertDockerUsable({ host: docker });
+    // The result is used, not just awaited: it carries the daemon's own CPU
+    // count, which is what decides the allowance below.
+    const preflight = await assertDockerUsable({ host: docker });
 
     const containerName = toContainerName(config.name);
     const hostWorkspace = path.resolve(config.hostWorkspace);
@@ -601,8 +603,22 @@ export class DockerSandbox implements Sandbox {
         PortBindings: portBindings,
         AutoRemove: false,
         ...(config.memoryBytes ? { Memory: config.memoryBytes } : {}),
+        // Clamped to what the daemon has. Docker refuses `NanoCpus` above the
+        // host's CPU count with a 400 rather than clamping it itself, and Paco
+        // asked every host for a fixed 4 — so no machine with fewer than four
+        // CPUs could create a sandbox at all. A real 2-CPU server hit exactly
+        // this, and the error reached the user as "check that Docker is
+        // running" while its daemon was perfectly healthy.
+        //
+        // Here rather than at the two call sites that pass `cpus`, because
+        // this is the narrowest point every sandbox passes through and the
+        // constraint belongs to the daemon, not to the caller's preference.
         ...(config.cpus
-          ? { NanoCpus: Math.round(config.cpus * 1_000_000_000) }
+          ? {
+              NanoCpus: Math.round(
+                clampCpus(config.cpus, preflight.cpuCount) * 1_000_000_000,
+              ),
+            }
           : {}),
       },
     });

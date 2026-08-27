@@ -92,6 +92,17 @@ export interface DockerPreflightResult {
   /** The daemon's version string, when it answered. */
   serverVersion?: string;
   /**
+   * How many CPUs the daemon reports, when it answered.
+   *
+   * Read from the same `docker info` payload as everything else here, and used
+   * to clamp a sandbox's CPU allowance — Docker refuses `NanoCpus` above this
+   * with a 400 rather than clamping it itself.
+   *
+   * The daemon's number, not `os.cpus()`: the daemon is what enforces the
+   * limit, and `DOCKER_HOST` means it is not necessarily this machine.
+   */
+  cpuCount?: number;
+  /**
    * The daemon accepted nothing and answered nothing inside the timeout.
    *
    * Reported as `docker-not-running` because that is the right advice, but
@@ -318,6 +329,54 @@ export function isRootlessInfo(info: unknown): boolean {
   return readSecurityOptions(info).includes(ROOTLESS_SECURITY_OPTION);
 }
 
+/**
+ * `NCPU` from `docker info`, when it is a number that could be a CPU count.
+ *
+ * Anything else is treated as not reported. A zero, a negative or a string is
+ * not a smaller host, it is a payload this code does not understand, and
+ * clamping to it would shrink every sandbox on that daemon to nothing.
+ */
+export function readCpuCount(info: unknown): number | undefined {
+  if (!info || typeof info !== "object") {
+    return;
+  }
+  const count = (info as { NCPU?: unknown }).NCPU;
+  if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) {
+    return;
+  }
+  return count;
+}
+
+/**
+ * The CPU allowance a container may actually be given.
+ *
+ * Docker rejects `NanoCpus` above the host's CPU count outright:
+ *
+ *   (HTTP code 400) bad parameter - range of CPUs is from 0.01 to 2.00,
+ *   as there are only 2 CPUs available
+ *
+ * Paco asked for a fixed 4 regardless of the host, so every machine with
+ * fewer than four CPUs failed to create a sandbox at all — with an error that
+ * named CPUs and reached the user as "check that Docker is running".
+ *
+ * An unknown host count passes the request through unchanged. Not knowing is
+ * not evidence of a small host, and inventing a ceiling would silently shrink
+ * sandboxes on a daemon whose payload merely failed to parse.
+ */
+export function clampCpus(
+  requested: number,
+  hostCpus: number | undefined,
+): number {
+  if (
+    typeof hostCpus !== "number" ||
+    !Number.isFinite(hostCpus) ||
+    hostCpus <= 0
+  ) {
+    return requested;
+  }
+  return Math.min(requested, hostCpus);
+}
+
 function readServerVersion(info: unknown): string | undefined {
   if (!info || typeof info !== "object") {
     return;
@@ -455,6 +514,7 @@ export async function dockerPreflight(
 
   const securityOptions = readSecurityOptions(info);
   const serverVersion = readServerVersion(info);
+  const cpuCount = readCpuCount(info);
   const state: DockerPreflightState = isRootlessInfo(info)
     ? "docker-rootless"
     : "ok";
@@ -465,6 +525,7 @@ export async function dockerPreflight(
     message: messageForState(state, socket),
     securityOptions,
     ...(serverVersion ? { serverVersion } : {}),
+    ...(cpuCount === undefined ? {} : { cpuCount }),
   };
 }
 

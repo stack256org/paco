@@ -33,6 +33,7 @@ export {
   dockerEndpoint,
   dockerPreflight,
   DockerUnusableError,
+  clampCpus,
   isRootlessInfo,
   readSecurityOptions,
 } from "./preflight.ts";

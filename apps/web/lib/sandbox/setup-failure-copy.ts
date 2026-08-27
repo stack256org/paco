@@ -88,6 +88,15 @@ export const REPO_AUTH_FAILED =
 export const DISK_FULL =
   "This computer has run out of disk space, so the workspace couldn't be set up. Free some space, then try again — nothing you've already done has been lost.";
 
+// Names CPUs, because that is what the daemon refused over, and says the
+// number is Paco's fault rather than the operator's — Paco asked every host
+// for four regardless of what it had, so a correctly-built 2-CPU server was
+// told to go and check a healthy Docker daemon. The request is clamped now, so
+// this should only be reachable by a host that stored the failure before
+// upgrading.
+export const INSUFFICIENT_CPU =
+  "This computer has fewer CPUs than Paco tried to give the workspace, so Docker refused to create it. Paco now matches the request to the machine, so upgrading to the latest version fixes this without changing anything on the server: run `sudo paco upgrade` and try again. Nothing about the Docker installation is wrong.";
+
 export const NETWORK =
   "We couldn't reach GitHub to download your project. Check this computer's internet connection, then try again.";
 
@@ -114,6 +123,7 @@ const REASON_COPY: Record<ProvisioningFailureReason, string> = {
   "repo-not-found": REPO_NOT_FOUND,
   "repo-auth-failed": REPO_AUTH_FAILED,
   "disk-full": DISK_FULL,
+  "insufficient-cpu": INSUFFICIENT_CPU,
   network: NETWORK,
   "timed-out": TIMED_OUT,
   unknown: GENERIC,
@@ -133,6 +143,8 @@ export function setupFailureMessage(reason: ProvisioningFailureReason): string {
 export function isSetupFailureRetryable(
   reason: ProvisioningFailureReason,
 ): boolean {
+  // `insufficient-cpu` is deliberately absent: nothing about pressing the
+  // button again adds a CPU, and the fix is an upgrade, not a retry.
   return (
     reason === "network" ||
     reason === "timed-out" ||
@@ -173,6 +185,21 @@ const MATCHERS: ReadonlyArray<{
   {
     test: /no space left on device|enospc|disk quota exceeded|write error: no space/,
     reason: "disk-full",
+  },
+  {
+    // Docker's own words when `NanoCpus` exceeds the host's CPU count. Ahead of
+    // every Docker matcher below because those key on the daemon and the
+    // socket, and this failure is neither: the daemon answered, and answered
+    // correctly. Verified against Docker 29.1.3 on a 2-CPU Ubuntu server:
+    //
+    //   (HTTP code 400) bad parameter - range of CPUs is from 0.01 to 2.00,
+    //   as there are only 2 CPUs available
+    //
+    // Anchored on `range of cpus`, not on `cpus`: git and Docker both mention
+    // CPUs in unrelated output, and a looser pattern would start swallowing
+    // failures that have nothing to do with sizing.
+    test: /range of cpus is from|only \d+(\.\d+)? cpus? available/,
+    reason: "insufficient-cpu",
   },
   {
     // Node's spawn error for a binary that is not on PATH. Matched before the

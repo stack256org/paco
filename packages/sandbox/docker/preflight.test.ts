@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   classifyDockerInfoError,
+  clampCpus,
   DockerUnusableError,
   dockerEndpoint,
   dockerPreflight,
   isRootlessInfo,
+  readCpuCount,
   readSecurityOptions,
   resolveDockerSocket,
   assertDockerUsable,
@@ -573,5 +575,83 @@ describe("assertDockerUsable retries only a socket that might come back", () => 
 
     expect((thrown as DockerUnusableError).state).toBe("docker-not-running");
     expect(host.calls()).toBe(1);
+  });
+});
+
+/**
+ * How many CPUs the daemon says it has, and what that means for a container.
+ *
+ * Docker refuses `NanoCpus` above the host's CPU count outright — it is a 400
+ * from the API, not a warning and not a silent clamp:
+ *
+ *   (HTTP code 400) bad parameter - range of CPUs is from 0.01 to 2.00,
+ *   as there are only 2 CPUs available
+ *
+ * Paco asked every host for 4 regardless, so no machine with fewer than four
+ * CPUs could create a sandbox at all. Reported from a real 2-CPU Ubuntu server
+ * running Docker 29.1.3, where every other part of the install was healthy.
+ *
+ * The count comes from the daemon rather than `os.cpus()` because the daemon
+ * is the thing enforcing the limit, and it is not always this machine.
+ */
+describe("readCpuCount", () => {
+  test("reads NCPU from a real info payload", () => {
+    expect(readCpuCount({ ...ROOTFUL_INFO, NCPU: 2 })).toBe(2);
+  });
+
+  test("is undefined when the daemon did not report it", () => {
+    expect(readCpuCount(ROOTFUL_INFO)).toBeUndefined();
+  });
+
+  test("is undefined for a value that is not a usable count", () => {
+    expect(readCpuCount({ NCPU: "2" })).toBeUndefined();
+    expect(readCpuCount({ NCPU: 0 })).toBeUndefined();
+    expect(readCpuCount({ NCPU: -1 })).toBeUndefined();
+    expect(readCpuCount({ NCPU: Number.NaN })).toBeUndefined();
+    expect(readCpuCount(null)).toBeUndefined();
+    expect(readCpuCount("nope")).toBeUndefined();
+  });
+
+  test("dockerPreflight carries it through", async () => {
+    const result = await dockerPreflight({
+      host: { info: () => Promise.resolve({ ...ROOTFUL_INFO, NCPU: 2 }) },
+    });
+    expect(result.state).toBe("ok");
+    expect(result.cpuCount).toBe(2);
+  });
+});
+
+describe("clampCpus", () => {
+  test("leaves a request the host can satisfy alone", () => {
+    expect(clampCpus(4, 8)).toBe(4);
+  });
+
+  test("allows exactly the host's count", () => {
+    expect(clampCpus(4, 4)).toBe(4);
+    expect(clampCpus(2, 2)).toBe(2);
+  });
+
+  /** The reported failure: 4 requested, 2 available. */
+  test("clamps a request the host cannot satisfy", () => {
+    expect(clampCpus(4, 2)).toBe(2);
+    expect(clampCpus(4, 1)).toBe(1);
+  });
+
+  /**
+   * Passing through is deliberate. An unknown count is not evidence of a small
+   * host, and inventing a limit would quietly shrink every sandbox on a daemon
+   * whose info payload we simply failed to read.
+   */
+  test("passes the request through when the count is unknown or nonsense", () => {
+    expect(clampCpus(4, undefined)).toBe(4);
+    expect(clampCpus(4, 0)).toBe(4);
+    expect(clampCpus(4, -2)).toBe(4);
+    expect(clampCpus(4, Number.NaN)).toBe(4);
+  });
+
+  test("does not round a fractional host count up past what Docker allows", () => {
+    // A cgroup-limited daemon can report a fractional count; Docker still
+    // refuses anything above it.
+    expect(clampCpus(4, 1.5)).toBe(1.5);
   });
 });

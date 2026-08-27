@@ -31,6 +31,8 @@ export const PROVISIONING_FAILURE_REASONS = [
   "network",
   /** The machine ran out of something. */
   "disk-full",
+  /** The machine is too small: fewer CPUs than a sandbox is given. */
+  "insufficient-cpu",
   "timed-out",
   /** Nothing recognised it. */
   "unknown",

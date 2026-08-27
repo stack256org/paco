@@ -13,6 +13,7 @@ import {
   DOCKER_PERMISSION,
   DOCKER_ROOTLESS,
   GENERIC,
+  INSUFFICIENT_CPU,
   isSetupFailureRetryable,
   setupFailureMessage,
 } from "./setup-failure-copy";
@@ -127,6 +128,24 @@ describe("classifySetupFailureText", () => {
       "clone exceeded its budget",
       "Failed to clone https://github.com/acme/app: Command timed out after 300000ms",
       "timed-out",
+    ],
+    /**
+     * Reported from a real 2-CPU Ubuntu server. Paco asked every host for 4
+     * vCPUs regardless of what it had, and Docker refuses the request outright
+     * rather than clamping it.
+     *
+     * The request is clamped now, so nothing should produce this again. It is
+     * classified anyway for the same reason `is not built` still is: a
+     * provisioning failure is flattened into `sessions.lifecycleError` as a
+     * plain string, so a host that hit this before upgrading still has it
+     * stored, and it should read as itself rather than as the generic
+     * sentence — which in this case sent a real operator to check a Docker
+     * daemon that was healthy the whole time.
+     */
+    [
+      "asked for more CPUs than the host has",
+      'Step "…//runProvisioning" failed after 3 retries: (HTTP code 400) bad parameter - range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available',
+      "insufficient-cpu",
     ],
     ["nothing recognisable", "something exploded", "unknown"],
   ];
@@ -291,6 +310,21 @@ describe("setupFailureMessage", () => {
   test("the rootless message says Paco does not support it", () => {
     expect(DOCKER_ROOTLESS).toMatch(/rootless/i);
     expect(DOCKER_ROOTLESS).toMatch(/does(n't| not) support/i);
+  });
+
+  test("a host too small to run a sandbox says so, and does not blame Docker", () => {
+    const copy = setupFailureMessage("insufficient-cpu");
+    expect(copy).toBe(INSUFFICIENT_CPU);
+    expect(copy).not.toBe(GENERIC);
+    // The whole point: the generic sentence told an operator to check Docker,
+    // whose daemon was fine. This one must not repeat that.
+    expect(copy).not.toMatch(/check that Docker is running/i);
+    expect(copy).toMatch(/CPU/i);
+  });
+
+  test("asking for more CPUs than the host has is not worth retrying", () => {
+    // Nothing about pressing the button again adds a CPU.
+    expect(isSetupFailureRetryable("insufficient-cpu")).toBe(false);
   });
 
   test("the generic message is reached only by the unknown reason", () => {
