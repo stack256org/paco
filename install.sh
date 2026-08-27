@@ -167,8 +167,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "  - install and start docker.io if no rootful Docker is present (a"
   echo "    rootless Docker is reported and left alone, never installed over)"
   echo "  - apt-get update && apt-get install -y paco"
-  echo "    (which also brings PostgreSQL and nginx, and puts the paco user in"
-  echo "     the docker group so chats can run)"
+  echo "    (which also brings PostgreSQL, nginx and the gh CLI, and puts the"
+  echo "     paco user in the docker group so chats can run)"
   if [ -n "$DOMAIN" ]; then
     echo "  - set APP_URL=http://$DOMAIN in $PACO_ENV and restart the paco service"
   fi

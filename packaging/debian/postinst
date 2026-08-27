@@ -419,12 +419,25 @@ if [ ! -x /usr/bin/claude ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 9. gh is not a dependency (see control) — only needed once someone connects
-# a GitHub account, and it ships from GitHub's own APT repository, not
-# Debian's.
+# 9. gh is a Recommends (see control), so apt installs it by default and this
+# warning is normally unreachable. It was a Suggests until 0.2.2, on the
+# premise that gh "ships from GitHub's own APT repository, not Debian's" —
+# which is not true on the distributions this package targets: Ubuntu carries
+# it in `universe` (noble has 2.45.0), and every command Paco runs — `api`,
+# `repo clone`, `repo create`, `auth status`, `pr create` — is far older than
+# that. The consequence of the wrong tier was that `apt install paco` and
+# install.sh both skipped it, and connecting a GitHub account failed on a
+# server that had followed the documented install exactly.
+#
+# Recommends rather than Depends, matching docker.io: an operator may have
+# gh from GitHub's own repository, or `universe` disabled, and neither should
+# make Paco refuse to install.
+#
+# Reaching this now means --no-install-recommends, or gh removed afterwards.
 if ! command -v gh >/dev/null 2>&1; then
-  echo "paco: the 'gh' CLI was not found on PATH. Connecting a GitHub account will not work until it is installed:" >&2
-  echo "        https://github.com/cli/cli/blob/trunk/docs/install_linux.md" >&2
+  echo "paco: the 'gh' CLI was not found on PATH. Connecting a GitHub account, cloning a repository and opening a pull request all go through it, and will fail until it is installed:" >&2
+  echo "        sudo apt-get install -y gh" >&2
+  echo "paco: if that reports no such package, this host has 'universe' disabled; GitHub's own repository is the alternative: https://github.com/cli/cli/blob/trunk/docs/install_linux.md" >&2
 fi
 
 echo "paco: installed. Open http://<this host>/ to finish setup."

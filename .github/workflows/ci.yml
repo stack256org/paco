@@ -94,9 +94,22 @@ jobs:
       - name: DB Check
         run: pnpm --dir apps/web db:check
 
+      # The maintainer scripts are here for the same reason install.sh is:
+      # they run on someone else's machine, and a syntax error in postinst
+      # fails `apt install paco` after 237 MB has been fetched and unpacked,
+      # leaving dpkg half-configured. Nothing else in this repo would catch it
+      # — the .deb builds fine, because these are copied in, not executed.
+      #
+      # build-deb.sh is deliberately absent: it carries an intentional SC2016
+      # and it runs in CI, where a break is loud and immediate.
       - name: Shell scripts — syntax and shellcheck
         run: |
-          for script in install.sh scripts/paco; do
+          for script in install.sh scripts/paco \
+                        packaging/debian/postinst \
+                        packaging/debian/prerm \
+                        packaging/debian/postrm \
+                        packaging/paco-entrypoint.sh \
+                        packaging/claude-wrapper.sh; do
             sh -n "$script"
             shellcheck -s sh "$script"
           done

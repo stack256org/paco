@@ -93,7 +93,8 @@ install *and* every upgrade:
 - enables and starts `paco.service`;
 - warns — without failing the install — if the bundled Claude Code CLI is
   somehow missing (that means the `.deb` itself was built or staged
-  incorrectly) or if `gh` isn't on `PATH` (it never ships bundled; see below).
+  incorrectly) or if `gh` isn't on `PATH` (it is a `Recommends`, so apt
+  normally installs it, and it never ships bundled; see below).
 
 If a domain was given, `install.sh` writes `APP_URL=http://<domain>` into
 `paco.env` afterward and restarts the service — the one place the domain
@@ -1787,8 +1788,14 @@ equivalent from that table directly until it's fixed.
 
 Two candidates. `gh` isn't installed — Paco says so plainly: *"Paco needs
 GitHub's own command-line tool to do this, and it isn't installed on this
-machine."* It's a `Suggests`, not bundled — `postinst` warns at install time
-if it's missing, but install it yourself:
+machine."* It is a `Recommends` as of 0.2.2, so `apt install paco` brings it
+and reaching this state means `--no-install-recommends`, or `gh` removed
+afterwards. Install it with `sudo apt-get install -y gh` — Ubuntu carries it
+in `universe`. It was a `Suggests` before 0.2.2, on the incorrect premise that
+it was only available from GitHub's own repository, so a server installed
+before then has no `gh` and this is exactly what it looks like. If `apt`
+reports no such package, `universe` is disabled on that host and GitHub's
+repository is the alternative:
 <https://github.com/cli/cli/blob/trunk/docs/install_linux.md>.
 
 Or the stored token no longer decrypts because `APP_SECRET` changed — see

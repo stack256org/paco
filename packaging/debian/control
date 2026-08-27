@@ -4,8 +4,8 @@ Architecture: __ARCH__
 Maintainer: Paco Maintainers <noreply@localhost>
 Homepage: https://github.com/stack256org/paco
 Depends: postgresql, postgresql-client, nginx, git, ca-certificates, adduser, sudo
-Recommends: docker.io
-Suggests: gh, certbot, python3-certbot-nginx
+Recommends: docker.io, gh
+Suggests: certbot, python3-certbot-nginx
 Description: self-hosted AI coding agent
  Paco drives the Claude Code CLI headlessly and maps its streaming output to
  a web UI, so a team can run their own coding-agent instance instead of a
