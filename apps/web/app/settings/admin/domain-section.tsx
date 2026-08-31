@@ -79,7 +79,19 @@ const LOCAL_PREVIEW_HINT =
 /** The record an operator actually has to create, in the shape a DNS panel asks for. */
 const PREVIEW_DNS_EXAMPLE = "*.previews.example.com.   A   203.0.113.10";
 
-/** A single liveness check, bounded so a hanging socket can't stall the poll. */
+/**
+ * A single liveness check, bounded so a hanging socket can't stall the poll.
+ *
+ * This only cares whether the server answers a request at all, so the
+ * endpoint it hits is incidental — `/api/settings/preferences` was picked
+ * because it takes no arguments, touches one small table, and returns 200
+ * on a fresh install with no rows in it. Do not read anything into the
+ * choice of route, but do not delete that route without pointing this at
+ * another one: it used to hit the email-delivery route under the auth
+ * surface that this phase removed entirely, and this probe silently
+ * returned `false` forever until someone noticed the restart flow never
+ * left "restarting".
+ */
 async function pingServerAlive(): Promise<boolean> {
   const controller = new AbortController();
   const timeoutId = setTimeout(
@@ -87,7 +99,7 @@ async function pingServerAlive(): Promise<boolean> {
     RESTART_POLL_REQUEST_TIMEOUT_MS,
   );
   try {
-    const response = await fetch("/api/auth/email-delivery", {
+    const response = await fetch("/api/settings/preferences", {
       cache: "no-store",
       signal: controller.signal,
     });

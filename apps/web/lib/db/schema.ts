@@ -503,9 +503,9 @@ export const instanceSettings = pgTable("instance_settings", {
   poolsideBaseUrl: text("poolside_base_url"),
   /**
    * Sealed with `lib/crypto/secret-box`, never hashed — same rationale and
-   * mechanism as `smtpPasswordSealed`: the original value is needed on every
-   * call, so there is nothing to compare a hash against. Forwarded to the
-   * `pool` process as `POOLSIDE_API_KEY`.
+   * mechanism as `githubTokens.sealedToken`: the original value is needed on
+   * every call, so there is nothing to compare a hash against. Forwarded to
+   * the `pool` process as `POOLSIDE_API_KEY`.
    */
   poolsideApiKeySealed: text("poolside_api_key_sealed"),
   /** Path to the `pool` binary on this instance, when it is not on `PATH`. */

@@ -36,8 +36,9 @@ export type ConfigProblem = {
 /**
  * The shortest `APP_SECRET` worth accepting.
  *
- * It derives the key that encrypts stored GitHub tokens and signs sessions.
- * 32 characters is the point at which a random value has enough entropy that
+ * It derives the key that encrypts the stored GitHub token — the only thing
+ * it protects, now that there are no sessions to sign. 32 characters is the
+ * point at which a random value has enough entropy that
  * guessing it is not the easiest attack; below that the encryption is theatre.
  * This was previously a warning that nothing acted on, and `secret-box.ts`
  * had no length check at all — it would happily derive a key from "hunter2".
@@ -92,17 +93,17 @@ function checkAppSecret(raw: string | undefined): ConfigProblem | null {
 
   if (!value) {
     return {
-      fix: "Generate one with `openssl rand -base64 48` and set it in the environment. Keep it: changing it signs everyone out and makes stored GitHub tokens unreadable.",
+      fix: "Generate one with `openssl rand -base64 48` and set it in the environment. Keep it: changing it later permanently orphans any GitHub token already stored under the old value.",
       problem:
-        "This signs sign-in sessions and encrypts stored GitHub tokens. Paco cannot keep anyone signed in without it.",
+        "This derives the key that encrypts the stored GitHub token. Paco refuses to start without it rather than deriving that key from nothing.",
       variable: "APP_SECRET",
     };
   }
 
   if (value.length < MIN_APP_SECRET_LENGTH) {
     return {
-      fix: "Replace it with a longer random value — `openssl rand -base64 48`. Changing it signs everyone out and makes stored GitHub tokens unreadable, so do it before inviting anyone in.",
-      problem: `It is ${value.length} characters. Anything under ${MIN_APP_SECRET_LENGTH} is short enough to guess, which would expose stored GitHub tokens.`,
+      fix: "Replace it with a longer random value — `openssl rand -base64 48`. Changing it permanently orphans any GitHub token already stored under the old value, so do it before connecting one.",
+      problem: `It is ${value.length} characters. Anything under ${MIN_APP_SECRET_LENGTH} is short enough to guess, which would expose the stored GitHub token.`,
       variable: "APP_SECRET",
     };
   }

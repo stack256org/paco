@@ -39,8 +39,10 @@ const VERSION = "v1";
 /**
  * Domain separator for the derived key.
  *
- * `APP_SECRET` also signs sessions. Deriving a distinct key per purpose means
- * a flaw that exposes one use does not hand over the other.
+ * There is only one purpose left to derive a key for — sealing the stored
+ * GitHub token — but the separator stays so a future second purpose gets its
+ * own key rather than reusing this one: a flaw that exposes one use should
+ * not hand over the other.
  */
 const KEY_INFO = "paco:secret-box:v1";
 
