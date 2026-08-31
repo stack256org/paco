@@ -64,8 +64,7 @@ const globalForKey = globalThis as typeof globalThis & {
  * Derive a purpose-specific key from `APP_SECRET`.
  *
  * Exported so other modules that need a key derived from the same root
- * secret — `lib/preview/preview-grant.ts` signs a preview-scoped cookie with
- * one — go through the same guard and the same cache as `seal`/`open`,
+ * secret go through the same guard and the same cache as `seal`/`open`,
  * rather than re-deriving their own from the raw secret. `info` is the
  * domain separator (see `KEY_INFO` below): different callers must use
  * different values, or a flaw in one use's key exposes the other's.

@@ -80,7 +80,7 @@ describe("the bearer token", () => {
     // A `!==` here leaks the correct token one byte at a time through response
     // timing, and this endpoint's token is the only thing standing between
     // anything that can reach localhost and the agent's approvals.
-    // `tools-token.ts` and `preview-grant.ts` both already do this.
+    // `tools-token.ts` already does this.
     const source = await Bun.file(
       new URL("route.ts", import.meta.url).pathname,
     ).text();

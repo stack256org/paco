@@ -11,7 +11,7 @@ mock.module("server-only", () => ({}));
 
 // `buildPluginMcpConfig` mints a real, signed token (`tools-token.ts`), which
 // derives its key from `APP_SECRET` — same fixture value convention as
-// `lib/crypto/secret-box.test.ts` and `lib/preview/preview-grant.test.ts`.
+// `lib/crypto/secret-box.test.ts`.
 process.env.APP_SECRET ??= "test-secret-for-mcp-bridge-00000000000000000";
 
 const {

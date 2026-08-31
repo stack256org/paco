@@ -73,8 +73,7 @@ function toolInputOf(value: unknown): Record<string, unknown> {
 }
 
 /** Constant-time comparison — a `!==` leaks the token one byte at a time
- * through response timing. Same shape as `lib/plugins/tools-token.ts` and
- * `lib/preview/preview-grant.ts`. */
+ * through response timing. Same shape as `lib/plugins/tools-token.ts`. */
 function safeEqual(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
