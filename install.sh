@@ -49,6 +49,8 @@ PACO_ENV="$PACO_ETC/paco.env"
 
 DOMAIN=""
 DRY_RUN=0
+PASSWORD=""
+password_given=0
 
 fail() {
   echo "install.sh: $1" >&2
@@ -64,6 +66,12 @@ Usage: install.sh [--domain HOST] [--dry-run]
                  domain at all; set one later from Settings if you skip it
                  here. Also read from PACO_DOMAIN. Passing this (even
                  --domain "") skips the interactive prompt.
+  --password PW  The password that will protect this instance in the browser
+                 (username: paco). Optional. Also read from PACO_PASSWORD.
+                 With a terminal and neither of these given, you are prompted
+                 for one. With no terminal — a piped `curl ... | sudo sh` —
+                 a strong password is generated and printed at the end.
+                 Change it any time with `sudo paco password`.
   --dry-run      Do everything except actually install packages or write
                  files — prints what would happen.
 
@@ -80,6 +88,12 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || fail "--domain needs a value"
       DOMAIN="$2"
       domain_given=1
+      shift 2
+      ;;
+    --password)
+      [ $# -ge 2 ] || fail "--password needs a value"
+      PASSWORD="$2"
+      password_given=1
       shift 2
       ;;
     --dry-run)
@@ -160,6 +174,49 @@ if [ -n "$DOMAIN" ]; then
 else
   echo "install.sh: domain: none - Paco will answer on any address that reaches this host (its IP, or a domain you point here later). Nothing else to do; the address is printed at the end."
 fi
+
+# --- 2b. The password prompt, guarded exactly as the domain prompt above. ---
+# `[ -t 0 ]` is true only when stdin is a real terminal. The advertised
+# install is `curl -fsSL ... | sudo sh`, which has none: a `read` here would
+# hang it forever. With no terminal we do not prompt and do not fail — the
+# package's postinst has already generated a password, and the summary at the
+# end prints it.
+if [ "$password_given" -eq 0 ] && [ "${PACO_PASSWORD+is_set}" = "is_set" ]; then
+  PASSWORD="$PACO_PASSWORD"
+  password_given=1
+fi
+
+if [ "$password_given" -eq 0 ] && [ -t 0 ]; then
+  printf 'Password to protect this Paco instance in the browser (username: paco).\n'
+  printf 'Leave blank to have one generated for you.\n'
+
+  printf 'Password: '
+  stty -echo 2>/dev/null || true
+  password_input=""
+  read -r password_input || true
+  stty echo 2>/dev/null || true
+  printf '\n'
+
+  if [ -n "$password_input" ]; then
+    printf 'Confirm: '
+    stty -echo 2>/dev/null || true
+    password_confirm=""
+    read -r password_confirm || true
+    stty echo 2>/dev/null || true
+    printf '\n'
+
+    if [ "$password_input" = "$password_confirm" ]; then
+      PASSWORD="$password_input"
+      password_given=1
+    else
+      # Not fatal: a generated password is a perfectly good outcome, and
+      # failing the whole install over a typo would be worse than falling
+      # back to one the operator can change with `paco password`.
+      echo "install.sh: the two entries did not match - generating a password instead."
+    fi
+  fi
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "install.sh: --dry-run - the following would happen, but nothing below actually runs:"
   echo "  - install ca-certificates, gnupg, curl if missing"
@@ -411,6 +468,15 @@ if [ -n "$DOMAIN" ] && [ -f "$PACO_ENV" ]; then
   systemctl restart paco.service
 fi
 
+# postinst has generated a password by this point. If the operator chose one,
+# replace it now — `paco password` is the single implementation, so the
+# installer never writes the htpasswd file itself. Piped on stdin, never
+# passed as an argument: `ps` shows one process's arguments to every user.
+if [ "$password_given" -eq 1 ] && [ -n "$PASSWORD" ]; then
+  printf '%s' "$PASSWORD" | paco password --stdin >/dev/null \
+    || fail "could not set the password. The instance is protected by the generated one; change it with 'sudo paco password'."
+fi
+
 echo
 if [ -n "$DOMAIN" ]; then
   echo "Paco is installed: http://$DOMAIN/"
@@ -439,6 +505,22 @@ else
   else
     echo "Paco is installed. Open http://<this host's address>/ to finish setup."
   fi
+fi
+echo
+# The username is always printed; the password only when it was generated.
+# One the operator typed is theirs already, and echoing it back would put a
+# chosen secret into the terminal scrollback for no benefit.
+if [ -f "$PACO_ETC/initial-password" ]; then
+  echo "It is protected by a password, which was generated for you:"
+  echo
+  echo "    username: paco"
+  echo "    password: $(cat "$PACO_ETC/initial-password")"
+  echo
+  echo "Write it down - this is the only time it is printed. Change it with"
+  echo "'sudo paco password'."
+else
+  echo "It is protected by the password you chose (username: paco)."
+  echo "Change it with 'sudo paco password'."
 fi
 echo
 if [ "$DOCKER_READY" -eq 1 ]; then
