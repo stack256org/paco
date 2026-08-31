@@ -33,6 +33,7 @@ This plan uses **`/etc/nginx/paco.htpasswd`** (`root:www-data`, `0640`) instead.
 **Files:**
 - Modify: `scripts/paco` — add `NGINX_HTPASSWD` next to the other path variables (near line 16), add `cmd_password()` before the dispatch block (near line 557), add a `password` case to the dispatch (line 574-580), add the command to `usage()` (line 23-86)
 - Create: `scripts/paco-password.test.ts`
+- Modify: `.github/workflows/ci.yml` — add an apache2-utils install step before the Test step
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -291,16 +292,33 @@ And in `usage()`, after the `auth [PROVIDER] [ARGS...]` entry and before the `tl
              what replaces signing out.
 ```
 
-- [ ] **Step 6: Run the test and verify it passes**
+- [ ] **Step 6: Give CI the `htpasswd` binary**
+
+These tests shell out to `htpasswd`, and `scripts/test-isolated.ts` globs `**/*.test.ts` from the repository root, so CI will run them. `htpasswd` is not guaranteed to be on a GitHub runner, and without it every test in this file fails on `htpasswd not found` rather than on anything real.
+
+In `.github/workflows/ci.yml`, add a step immediately before the `- name: Test` step:
+
+```yaml
+      # scripts/paco-password.test.ts and packaging/postinst-nginx.test.ts
+      # exercise the real `htpasswd`, because the thing worth testing is the
+      # hash nginx will actually read. It is not guaranteed on the runner
+      # image, and `paco password` refuses to run without it.
+      - name: Install htpasswd
+        run: sudo apt-get update && sudo apt-get install -y apache2-utils
+```
+
+Do not make the tests skip when `htpasswd` is missing. A skipped test on the runner looks identical to a passing one, and this is the security-critical half of the feature.
+
+- [ ] **Step 7: Run the test and verify it passes**
 
 Run: `bun test scripts/paco-password.test.ts`
 
 Expected: PASS, 7 tests.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/paco scripts/paco-password.test.ts
+git add scripts/paco scripts/paco-password.test.ts .github/workflows/ci.yml
 git commit -m "feat(cli): add 'paco password' to set the instance password"
 ```
 
