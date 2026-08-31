@@ -62,10 +62,10 @@ one is documented for operators in
   into a tree first.
 - **Schedules.** A cron expression, a session, and a goal: **Settings →
   Schedules** files and starts a task on every tick. UTC, no catch-up for
-  missed windows, admin-only to create or run.
+  missed windows.
 - **Memory.** Notes distilled out of chat turns and fed back into later ones,
-  in three scopes — yours, the organisation's, and the project's. Plain
-  markdown you can read and edit in **Settings → Memory**. A daily reflection
+  in two scopes — the instance's and the project's. Plain markdown you can
+  read and edit in **Settings → Memory**. A daily reflection
   pass looks for friction that repeats and *proposes* encoding it as a skill;
   it never writes one itself.
 - **Design mode.** A per-message toggle in the composer that runs two or three
@@ -76,7 +76,8 @@ one is documented for operators in
 - **Plugins.** Third-party code, running in a separate hardened OS process,
   that can contribute model-facing tools, receive session events, post
   messages, create tasks, or accept an inbound webhook. Nothing is granted
-  until an admin reviews what the manifest asks for, capability by capability.
+  until an operator reviews what the manifest asks for, capability by
+  capability.
   See
   [docs/plugins.md](docs/plugins.md), which walks the first-party Slack
   plugin — `@`-mention the bot and it files a task — end to end.
@@ -137,23 +138,21 @@ is already installed here, a rootful daemon rather than a rootless one.
 arrived at, so the IP the installer prints works immediately — nothing to point,
 nothing to configure first.
 
-**You do need one to finish setup.** Step 2 of the wizard asks for it and will
-not continue without it, because it is what the links Paco *sends* get built
-from — invitations and sign-in links. Left unset those are built from a
-localhost fallback, which produces a link that only this server can open,
-emailed to somebody else. That breaks days later, in someone else's inbox, and
-looks like a broken invite rather than an empty setting.
+**You do need one for the links Paco sends and for previews.** Without a
+domain, pull-request descriptions Paco opens link back to a localhost
+address that only this server can open, and preview hostnames (see
+[docs/self-hosting.md](docs/self-hosting.md)) have nothing to attach to.
 
-So: point an **A record at the IP the installer printed**, then enter the domain
-in step 2.
+So: point an **A record at the IP the installer printed**, then set the
+domain.
 
 ```text
 paco.example.com.   A   203.0.113.10
 ```
 
-`--domain` at install time does the same thing up front, and
-**Settings → Admin → Domain** changes it later. Reaching the app never depended
-on any of this — only the links it sends do.
+`--domain` at install time does this up front, and
+**Settings → Admin → Domain** changes it later. Reaching the app never
+depended on any of this — only the links it sends, and previews, do.
 
 For HTTPS, run `sudo paco tls <domain>` once the record resolves — unless
 something in front of you already terminates TLS, in which case skip it.
@@ -190,12 +189,11 @@ Building the package yourself instead is in
 ## After you install
 
 Open `http://<this host's address>/` (or `http://<domain>/`, if you passed
-`--domain` or answered the installer's prompt). First run walks you through a
-guided setup: create the admin account, confirm the address Paco is running
-on, set up an outgoing mail server (or skip it — invites just won't work
-until one is set), then done.
+`--domain` or answered the installer's prompt). Type the instance password
+and you are in the app — there is no account to create and no onboarding
+flow, because there are no accounts.
 
-A few things happen outside that flow:
+A few things still need doing:
 
 - **`sudo paco auth`** signs the service into Claude Code. The one step the
   installer cannot do for you, because it needs your account — and every turn
@@ -212,14 +210,14 @@ A few things happen outside that flow:
   — a per-hostname Let's Encrypt certificate over HTTP-01. No wildcard, no DNS
   credential, and it does not cover preview hostnames (see below and
   [docs/self-hosting.md](docs/self-hosting.md)).
-- **GitHub** is connected separately, per user, from **Settings →
-  Connections** by pasting a personal access token with `repo` access
+- **GitHub** is connected instance-wide, from **Settings → Connections** by
+  pasting a personal access token with `repo` access
   ([create one](https://github.com/settings/tokens/new?scopes=repo,workflow,read:org&description=Paco)).
   Paco drives it through the [`gh` CLI](https://cli.github.com) (`Suggests`,
   not bundled — install it yourself); there is no GitHub App and no webhook,
   which matters for a self-hosted install since GitHub cannot deliver a
   webhook to a private address anyway. The token is stored encrypted, keyed
-  from the instance's `APP_SECRET`, and scoped per user.
+  from `APP_SECRET` — the instance's only token, used for every chat.
 
 [docs/self-hosting.md](docs/self-hosting.md) covers the rest of what an
 operator needs: the file layout, upgrading, what `apt remove` keeps versus
