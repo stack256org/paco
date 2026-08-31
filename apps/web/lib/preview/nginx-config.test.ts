@@ -8,17 +8,44 @@ const base = {
 };
 
 describe("previewServerBlock", () => {
-  test("always guards with auth_request", () => {
-    // Every preview is authorised by Paco, public or private. The endpoint
-    // decides; the config must never decide for it.
-    expect(previewServerBlock({ ...base, certDir: null })).toContain(
-      "auth_request /_paco_auth",
-    );
+  test("requires the instance password", () => {
+    const block = previewServerBlock({
+      hostname: "abc123.previews.example.com",
+      upstreamPort: 5173,
+      appPort: 3000,
+      certDir: null,
+    });
+
+    expect(block).toContain('auth_basic "Paco";');
+    expect(block).toContain("auth_basic_user_file /etc/nginx/paco.htpasswd;");
   });
 
-  test("passes the real host to the auth endpoint", () => {
-    const block = previewServerBlock({ ...base, certDir: null });
-    expect(block).toContain("X-Forwarded-Host $host");
+  test("no longer delegates authorization to the app", () => {
+    const block = previewServerBlock({
+      hostname: "abc123.previews.example.com",
+      upstreamPort: 5173,
+      appPort: 3000,
+      certDir: null,
+    });
+
+    // The app no longer decides preview access: there is no public preview to
+    // decide about, so nginx answers with the instance password alone.
+    expect(block).not.toContain("auth_request");
+    expect(block).not.toContain("_paco_auth");
+    expect(block).not.toContain("preview-auth");
+  });
+
+  test("requires the password on the TLS listener too", () => {
+    const block = previewServerBlock({
+      hostname: "abc123.previews.example.com",
+      upstreamPort: 5173,
+      appPort: 3000,
+      certDir: "/etc/paco/preview-certs/abc123.previews.example.com",
+    });
+
+    expect(block).toContain('auth_basic "Paco";');
+    expect(block).toContain("auth_basic_user_file /etc/nginx/paco.htpasswd;");
+    expect(block).not.toContain("auth_request");
   });
 
   test("names the hostname exactly once as server_name", () => {
@@ -49,11 +76,6 @@ describe("previewServerBlock", () => {
     });
     expect(block).toContain("ssl_certificate");
     expect(block).toContain("return 301 https://");
-  });
-
-  test("auth subrequest targets the loopback, not the public origin", () => {
-    const block = previewServerBlock({ ...base, certDir: null });
-    expect(block).toContain("http://127.0.0.1:3000/api/preview-auth");
   });
 
   test("preview traffic proxies to the sandbox's published port", () => {
@@ -91,7 +113,6 @@ describe("previewServerBlock", () => {
     expect(block).toContain("listen 80;");
     expect(block).not.toContain("listen 443");
     expect(block).not.toContain("return 301 https://");
-    expect(block).toContain("auth_request /_paco_auth");
   });
 
   test("refuses a non-integer or out-of-range port", () => {
