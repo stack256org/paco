@@ -30,6 +30,26 @@ describe("packaging protects the instance", () => {
     expect(postinst).not.toContain("htpasswd -b");
   });
 
+  test("the generated password is validated before use", async () => {
+    const postinst = await readFile(POSTINST, "utf8");
+
+    const generatedAt = postinst.indexOf("generated_password=$(openssl");
+    const emptyCheckAt = postinst.indexOf('-z "$generated_password"');
+    const lengthCheckAt = postinst.indexOf("-ne 24");
+    const usedAt = postinst.indexOf("htpasswd -i -B -c");
+
+    expect(generatedAt).toBeGreaterThan(-1);
+    expect(emptyCheckAt).toBeGreaterThan(-1);
+    expect(lengthCheckAt).toBeGreaterThan(-1);
+    expect(usedAt).toBeGreaterThan(-1);
+    // The guard has to sit between generation and use, or an empty/short
+    // password from a failed `openssl rand` still reaches htpasswd.
+    expect(emptyCheckAt).toBeGreaterThan(generatedAt);
+    expect(lengthCheckAt).toBeGreaterThan(generatedAt);
+    expect(usedAt).toBeGreaterThan(emptyCheckAt);
+    expect(usedAt).toBeGreaterThan(lengthCheckAt);
+  });
+
   test("htpasswd is guaranteed present by a package dependency", async () => {
     const control = await readFile(CONTROL, "utf8");
 

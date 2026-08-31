@@ -75,6 +75,18 @@ if [ ! -f "$NGINX_HTPASSWD" ]; then
   # prompt by hand, so base64's +/= are a transcription hazard for no gain.
   generated_password=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | cut -c1-24)
 
+  # A pipeline's exit status in POSIX sh is that of its LAST command, and
+  # dash has no `pipefail`: if `openssl rand` fails (missing binary, broken
+  # entropy source), `tr` and `cut` both still succeed on empty input and
+  # this pipeline exits 0 regardless — `set -e` never fires. Check the
+  # result directly instead of trusting $?. Do not simplify this away:
+  # without it, a failed `openssl rand` silently hashes the empty string
+  # and ships an instance "protected" by a password of nothing.
+  if [ -z "$generated_password" ] || [ "${#generated_password}" -ne 24 ]; then
+    echo "paco: ERROR — failed to generate the instance password (openssl produced no usable output). Aborting rather than writing an empty or short password hash." >&2
+    exit 1
+  fi
+
   umask 027
   # -i keeps the password out of argv, where `ps` would show it to every user
   # on this machine; -B is bcrypt, which is what nginx reads.
