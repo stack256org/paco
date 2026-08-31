@@ -576,10 +576,30 @@ poolside_state() {
   echo "no (run 'sudo paco auth poolside', or set an API key in Settings)"
 }
 
+# Whether this instance is still using the password postinst generated.
+#
+# The marker file is what distinguishes the two, not the hash: a bcrypt hash
+# cannot be compared against anything without the original. `paco password`
+# deletes the marker, so its presence means "generated, never changed".
+password_state() {
+  if [ ! -f "$NGINX_HTPASSWD" ]; then
+    echo "NOT SET - this instance is unprotected. Run 'sudo paco password'."
+    return 0
+  fi
+
+  if [ -f "$PACO_ETC/initial-password" ]; then
+    echo "set (still the one generated at install; change with 'sudo paco password')"
+    return 0
+  fi
+
+  echo "set"
+}
+
 cmd_status() {
   echo "Unit:      $(unit_state)"
   echo "Version:   $(installed_version)"
   echo "Domain:    $(configured_domain)"
+  echo "Password:  $(password_state)"
   echo "CLI:       $(claude_cli_present)"
   echo "Claude:    $(claude_auth_state)"
   echo "Poolside:  $(poolside_state)"

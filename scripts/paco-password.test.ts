@@ -117,4 +117,13 @@ describe("paco password", () => {
 
     expect(result.stdout).toContain("password");
   });
+
+  test("status reports the password state", async () => {
+    const result = await runPaco(["status"]);
+
+    // `paco status` degrades rather than failing off a Debian host: every
+    // other row prints "unknown" here. All this asserts is that the row
+    // exists at all, which is what a regression would remove.
+    expect(result.stdout).toContain("Password:");
+  });
 });
