@@ -33,7 +33,6 @@ export async function POST(req: Request) {
   const outcome = await submitChatMessage({
     chatId,
     sessionId,
-    userId: sessionRecord.userId,
     messages,
     requestUrl: req.url,
     sessionStatus: sessionRecord.status,

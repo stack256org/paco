@@ -6,7 +6,6 @@ import {
   getGithubToken,
   saveGithubToken,
 } from "@/lib/db/github-tokens";
-import { getSoleUserId } from "@/lib/db/users";
 import { GhError, isGhMissing } from "@/lib/github/gh";
 import { inspectToken, missingScopes } from "@/lib/github/gh-account";
 import { isGhInstalled } from "@/lib/github/gh-installed";
@@ -121,7 +120,6 @@ export async function PUT(request: Request) {
   }
 
   await saveGithubToken({
-    userId: await getSoleUserId(),
     token,
     login: account.login,
     githubUserId: account.id,

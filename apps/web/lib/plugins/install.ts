@@ -212,8 +212,9 @@ async function removeQuietly(dir: string): Promise<void> {
  * failed re-install restores the previously installed copy rather than
  * deleting it.
  *
- * `plugins.installedBy` (`lib/db/schema.ts`) is left unset — there is no
- * more per-request identity to attribute an install to.
+ * Used to record `plugins.installedBy`. Phase C removed application-level
+ * identity along with the column — there is no more per-request identity to
+ * attribute an install to.
  */
 export async function installPlugin(
   source: InstallSource,

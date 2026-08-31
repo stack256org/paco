@@ -4,6 +4,9 @@ import { open, seal } from "@/lib/crypto/secret-box";
 import { db } from "./client";
 import { githubTokens } from "./schema";
 
+/** The one row `githubTokens` ever holds — see `instanceSettings`'s identical pattern. */
+const GITHUB_TOKEN_ROW_ID = true;
+
 /**
  * What the UI is allowed to know about a stored credential.
  *
@@ -65,9 +68,8 @@ export async function getGithubToken(): Promise<string | null> {
   }
 }
 
-/** Store (or replace) a user's token. The value is sealed before it is written. */
+/** Store (or replace) this instance's token. The value is sealed before it is written. */
 export async function saveGithubToken(params: {
-  userId: string;
   token: string;
   login: string;
   githubUserId: number | null;
@@ -78,14 +80,14 @@ export async function saveGithubToken(params: {
   await db
     .insert(githubTokens)
     .values({
-      userId: params.userId,
+      id: GITHUB_TOKEN_ROW_ID,
       sealedToken,
       login: params.login,
       githubUserId: params.githubUserId,
       scopes: params.scopes,
     })
     .onConflictDoUpdate({
-      target: githubTokens.userId,
+      target: githubTokens.id,
       set: {
         sealedToken,
         login: params.login,

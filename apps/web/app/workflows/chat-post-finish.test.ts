@@ -529,7 +529,6 @@ describe("hasCommitsToProposeStep", () => {
 describe("runAutoCreatePrStep", () => {
   test("connects sandbox and performs auto PR creation", async () => {
     await runAutoCreatePrStep({
-      userId: "user-1",
       sessionId: "session-1",
       chatId: "chat-1",
       baseBranch: "main",
@@ -546,7 +545,6 @@ describe("runAutoCreatePrStep", () => {
     expect(spies.performAutoCreatePr).toHaveBeenCalledTimes(1);
     expect(spies.performAutoCreatePr).toHaveBeenCalledWith(
       expect.objectContaining({
-        userId: "user-1",
         sessionId: "session-1",
         sessionTitle: "My session",
         repoOwner: "acme",
@@ -561,7 +559,6 @@ describe("runAutoCreatePrStep", () => {
     );
 
     await runAutoCreatePrStep({
-      userId: "user-1",
       sessionId: "session-1",
       chatId: "chat-1",
       baseBranch: "main",

@@ -8,21 +8,18 @@ import { usageEvents } from "./schema";
 export type UsageSource = "web";
 export type UsageAgentType = "main" | "subagent";
 
-export async function recordUsage(
-  userId: string,
-  data: {
-    source: UsageSource;
-    agentType?: UsageAgentType;
-    model: LanguageModel | string;
-    messages: UIMessage[];
-    usage: {
-      inputTokens: number;
-      cachedInputTokens: number;
-      outputTokens: number;
-    };
-    toolCallCount?: number;
-  },
-) {
+export async function recordUsage(data: {
+  source: UsageSource;
+  agentType?: UsageAgentType;
+  model: LanguageModel | string;
+  messages: UIMessage[];
+  usage: {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+  };
+  toolCallCount?: number;
+}) {
   const inferredToolCallCount = data.messages
     .flatMap((m) => m.parts)
     .filter(isToolUIPart).length;
@@ -37,7 +34,6 @@ export async function recordUsage(
 
   await db.insert(usageEvents).values({
     id: nanoid(),
-    userId,
     source: data.source,
     agentType: data.agentType ?? "main",
     provider: provider ?? null,

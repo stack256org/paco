@@ -6,7 +6,6 @@ import {
   getSessionsWithUnread,
   getUsedSessionTitles,
 } from "@/lib/db/sessions";
-import { getSoleUserId } from "@/lib/db/users";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import {
   isValidGitHubRepoName,
@@ -210,11 +209,6 @@ export async function POST(req: Request) {
   }
 
   try {
-    // `sessions.userId` is still a `NOT NULL` foreign key into `users` (a
-    // later step of this migration drops it) — `getSoleUserId` reads this
-    // instance's one real account rather than a requester, which no longer
-    // exists.
-    const userId = await getSoleUserId();
     const titlePromise = resolveSessionTitle(body);
     const preferencesPromise = getUserPreferences();
 
@@ -229,7 +223,6 @@ export async function POST(req: Request) {
     const result = await createSessionWithInitialChat({
       session: {
         id: nanoid(),
-        userId,
         title,
         status: "running",
         repoOwner,

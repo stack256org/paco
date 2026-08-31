@@ -261,7 +261,6 @@ function buildFixPrompt(problems: string[]): string {
 export async function kickExecutorFixTurn(params: {
   sessionId: string;
   chatId: string;
-  userId: string;
   problems: string[];
 }): Promise<void> {
   const [session, chat] = await Promise.all([
@@ -278,7 +277,6 @@ export async function kickExecutorFixTurn(params: {
   const outcome = await submitChatMessage({
     chatId: params.chatId,
     sessionId: params.sessionId,
-    userId: params.userId,
     messages: [
       {
         id: generateId(),
@@ -558,7 +556,6 @@ export async function runReviewerGate(
     await kickExecutorFixTurn({
       sessionId: task.sessionId,
       chatId,
-      userId: session.userId,
       problems,
     });
   } catch (error) {

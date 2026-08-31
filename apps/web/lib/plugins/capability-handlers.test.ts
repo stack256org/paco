@@ -134,7 +134,7 @@ const fakeDb = {
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
 let chatRow: { sessionId: string; activeStreamId: string | null } | undefined;
-let sessionRow: { id: string; userId: string; status: string } | undefined;
+let sessionRow: { id: string; status: string } | undefined;
 const getChatByIdSpy = mock(async (_chatId: string) => chatRow);
 const getSessionByIdSpy = mock(async (_sessionId: string) => sessionRow);
 
@@ -279,7 +279,6 @@ function pluginRow(overrides: Partial<PluginRow> = {}): PluginRow {
     consentedNetDomains: ["api.linear.app"],
     enabled: true,
     ingressSecret: null,
-    installedBy: "installer-1",
     installedAt: now,
     updatedAt: now,
     ...overrides,
@@ -1202,7 +1201,7 @@ describe("net:fetch", () => {
 function resetMocks(): void {
   organizationRow = { id: "org-1" };
   chatRow = { sessionId: "session-1", activeStreamId: null };
-  sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+  sessionRow = { id: "session-1", status: "running" };
   submitOutcome = {
     kind: "streaming",
     runId: "run-42",
@@ -1214,7 +1213,7 @@ function resetMocks(): void {
 describe("messages:post", () => {
   test("calls submitChatMessage (the route's shared submit path) for an existing chat", async () => {
     chatRow = { sessionId: "session-1", activeStreamId: null };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionRow = { id: "session-1", status: "running" };
     submitOutcome = {
       kind: "streaming",
       runId: "run-42",
@@ -1238,14 +1237,12 @@ describe("messages:post", () => {
     const call = submitChatMessageSpy.mock.calls[0]?.[0] as {
       chatId: string;
       sessionId: string;
-      userId: string;
       sessionStatus: string;
       activeStreamId: string | null;
       messages: Array<{ role: string }>;
     };
     expect(call.chatId).toBe("chat-1");
     expect(call.sessionId).toBe("session-1");
-    expect(call.userId).toBe("user-1");
     expect(call.sessionStatus).toBe("running");
     expect(call.activeStreamId).toBeNull();
     expect(call.messages).toHaveLength(1);
@@ -1254,7 +1251,7 @@ describe("messages:post", () => {
 
   test("attributes the posted message to the plugin via metadata.postedBy", async () => {
     chatRow = { sessionId: "session-1", activeStreamId: null };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionRow = { id: "session-1", status: "running" };
     submitOutcome = {
       kind: "streaming",
       runId: "run-42",
@@ -1303,7 +1300,7 @@ describe("messages:post", () => {
 
   test("surfaces a conflicting active stream as a rejection", async () => {
     chatRow = { sessionId: "session-1", activeStreamId: "run-existing" };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionRow = { id: "session-1", status: "running" };
     submitOutcome = { kind: "conflict" };
 
     const handlers = buildCapabilityHandlers(pluginRow());

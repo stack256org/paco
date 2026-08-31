@@ -89,31 +89,11 @@ function validatePluginRow(row: PluginRow): PluginRow | undefined {
     return;
   }
 
-  // The security principal (`plugins.installedBy`). Unlike the columns
-  // above this is plain `text`, so it cannot be structurally malformed —
-  // but it is the one column an authorization decision is made from, so it
-  // is narrowed here too, and anything that is not a non-empty string
-  // becomes `null`. Null means "no principal", which every capability that
-  // authorizes through it treats as a refusal, so the failure mode of this
-  // guard is a denied plugin rather than a plugin acting as `""`.
-  const installedByResult = z
-    .string()
-    .min(1)
-    .nullable()
-    .safeParse(row.installedBy);
-  if (!installedByResult.success) {
-    console.error("plugins: invalid installedBy, treating as no installer", {
-      id: row.id,
-      error: installedByResult.error.message,
-    });
-  }
-
   return {
     ...row,
     manifest: manifestResult.data,
     grantedCapabilities: grantsResult.data,
     consentedNetDomains: consentedNetDomainsResult.data,
-    installedBy: installedByResult.success ? installedByResult.data : null,
   };
 }
 
@@ -203,15 +183,6 @@ export async function upsertPlugin(row: NewPluginRow): Promise<void> {
     manifestNetDomains.includes(domain),
   );
 
-  // `plugins.installedBy` (`lib/db/schema.ts`) — a vestige of the
-  // per-request identity this instance no longer has. Nothing sets it
-  // anymore; a re-install just carries forward whatever value (or lack of
-  // one) the row already had.
-  const installedBy =
-    row.installedBy !== undefined
-      ? row.installedBy
-      : (existing?.installedBy ?? null);
-
   const updatedAt = new Date();
   if (existing) {
     await db
@@ -220,7 +191,6 @@ export async function upsertPlugin(row: NewPluginRow): Promise<void> {
         ...row,
         grantedCapabilities,
         consentedNetDomains,
-        installedBy,
         updatedAt,
       })
       .where(eq(plugins.id, row.id));
@@ -229,7 +199,6 @@ export async function upsertPlugin(row: NewPluginRow): Promise<void> {
       ...row,
       grantedCapabilities,
       consentedNetDomains,
-      installedBy,
       updatedAt,
     });
   }

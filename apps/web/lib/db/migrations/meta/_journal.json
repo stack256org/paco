@@ -127,6 +127,20 @@
       "when": 1788175916734,
       "tag": "0017_previous_jane_foster",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1788189039337,
+      "tag": "0018_cynical_albert_cleary",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1788189077177,
+      "tag": "0019_small_patch",
+      "breakpoints": true
     }
   ]
 }

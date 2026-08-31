@@ -20,7 +20,6 @@ import {
   type NewSession,
   sessions,
 } from "./schema";
-import { getSoleUserId } from "./users";
 
 /*
  * Session rows used to be rewritten on the way out of the database.
@@ -307,16 +306,15 @@ export async function getUsedSessionTitles(): Promise<Set<string>> {
 }
 
 /**
- * Columns that say whose session this is, and when it began.
+ * Columns that say which session this is, and when it began.
  *
  * The type signatures below already exclude them, but a type is not a guard: a
  * `PATCH /api/sessions/:id` body reached `updateSession` through a cast, was
- * spread into `.set()`, and drizzle wrote every key that named a real column —
- * so `{"userId": "<someone else>"}` handed the session to another account. The
- * route now validates its input, and this makes the guarantee hold for any
- * caller, including one written later that forgets to.
+ * spread into `.set()`, and drizzle wrote every key that named a real column.
+ * The route now validates its input, and this makes the guarantee hold for
+ * any caller, including one written later that forgets to.
  */
-const IMMUTABLE_SESSION_COLUMNS = ["id", "userId", "createdAt"];
+const IMMUTABLE_SESSION_COLUMNS = ["id", "createdAt"];
 
 function withoutImmutableColumns<T extends object>(data: T): T {
   const sanitized = { ...data } as Record<string, unknown>;
@@ -328,7 +326,7 @@ function withoutImmutableColumns<T extends object>(data: T): T {
 
 export async function updateSession(
   sessionId: string,
-  data: Partial<Omit<NewSession, "id" | "userId" | "createdAt">>,
+  data: Partial<Omit<NewSession, "id" | "createdAt">>,
 ) {
   const [session] = await db
     .update(sessions)
@@ -341,7 +339,7 @@ export async function updateSession(
 
 export async function updateSessionIfNotArchived(
   sessionId: string,
-  data: Partial<Omit<NewSession, "id" | "userId" | "createdAt">>,
+  data: Partial<Omit<NewSession, "id" | "createdAt">>,
 ) {
   const [session] = await db
     .update(sessions)
@@ -723,9 +721,6 @@ type ForkChatThroughMessageResult =
 export async function forkChatThroughMessage(
   input: ForkChatThroughMessageInput,
 ): Promise<ForkChatThroughMessageResult> {
-  // See `markChatRead`'s comment: `chatReads.userId` is still a `NOT NULL`
-  // foreign key this migration hasn't dropped yet.
-  const userId = await getSoleUserId();
   return db.transaction(async (tx) => {
     const sourceMessages = await tx
       .select({
@@ -785,14 +780,13 @@ export async function forkChatThroughMessage(
     await tx
       .insert(chatReads)
       .values({
-        userId,
         chatId: forkedChat.id,
         lastReadAt: now,
         createdAt: now,
         updatedAt: now,
       })
       .onConflictDoUpdate({
-        target: [chatReads.userId, chatReads.chatId],
+        target: chatReads.chatId,
         set: {
           lastReadAt: now,
           updatedAt: now,
@@ -993,21 +987,15 @@ export async function isFirstChatMessage(chatId: string, messageId: string) {
 
 export async function markChatRead(chatId: string) {
   const now = new Date();
-  // `chatReads.userId` is still a `NOT NULL` foreign key into `users` (a
-  // later step of this migration drops it and keys the table on `chatId`
-  // alone) — `getSoleUserId` reads this instance's one real account rather
-  // than a requester, which no longer exists.
-  const userId = await getSoleUserId();
   const [chatRead] = await db
     .insert(chatReads)
     .values({
-      userId,
       chatId,
       lastReadAt: now,
       updatedAt: now,
     })
     .onConflictDoUpdate({
-      target: [chatReads.userId, chatReads.chatId],
+      target: chatReads.chatId,
       set: {
         lastReadAt: now,
         updatedAt: now,

@@ -11,10 +11,6 @@ let createResult: CreatedRepo | Error;
 let createCalls: Array<Record<string, unknown>>;
 let sessionUpdates: Array<Record<string, unknown>>;
 
-mock.module("@/lib/db/users", () => ({
-  getSoleUserId: async () => "user-1",
-}));
-
 mock.module("@/lib/db/github-tokens", () => ({
   getGithubToken: async () => storedToken,
 }));

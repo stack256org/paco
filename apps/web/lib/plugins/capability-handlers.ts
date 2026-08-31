@@ -793,7 +793,6 @@ async function handleMessagesPost(
   const outcome = await submitChatMessage({
     chatId,
     sessionId: sessionRecord.id,
-    userId: sessionRecord.userId,
     messages: [message],
     requestUrl: appUrl().toString(),
     sessionStatus: sessionRecord.status,

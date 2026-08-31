@@ -393,7 +393,6 @@ function delay(ms: number) {
 }
 
 export async function recordWorkflowUsage(
-  userId: string,
   modelId: string,
   totalUsage: LanguageModelUsage | undefined,
   responseMessage: WebAgentUIMessage,
@@ -421,7 +420,6 @@ export async function recordWorkflowUsage(
           id: workflowRun.workflowRunId,
           chatId: workflowRun.chatId,
           sessionId: workflowRun.sessionId,
-          userId,
           modelId,
           status: workflowRun.status,
           startedAt: workflowRun.startedAt,
@@ -436,7 +434,7 @@ export async function recordWorkflowUsage(
 
     // Record main agent usage
     if (totalUsage) {
-      await recordUsage(userId, {
+      await recordUsage({
         source: "web",
         agentType: "main",
         model: modelId,
@@ -491,7 +489,7 @@ export async function recordWorkflowUsage(
       }
 
       for (const [eventModelId, modelUsage] of subagentUsageByModel) {
-        await recordUsage(userId, {
+        await recordUsage({
           source: "web",
           agentType: "subagent",
           model: eventModelId,
@@ -646,7 +644,6 @@ export async function hasCommitsToProposeStep(params: {
 }
 
 export async function runAutoCreatePrStep(params: {
-  userId: string;
   sessionId: string;
   chatId: string;
   sessionTitle: string;
@@ -663,7 +660,6 @@ export async function runAutoCreatePrStep(params: {
     const sandbox = await connectSandbox(params.sandboxState);
     const result = await performAutoCreatePr({
       sandbox,
-      userId: params.userId,
       sessionId: params.sessionId,
       chatId: params.chatId,
       sessionTitle: params.sessionTitle,

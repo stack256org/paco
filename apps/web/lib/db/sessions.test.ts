@@ -22,7 +22,6 @@ let lastUpdateSet: Record<string, unknown> = {};
 
 const fakeSessionRow = {
   id: "session-1",
-  userId: "user-1",
   title: "Original",
   sandboxState: null,
 };
@@ -161,11 +160,10 @@ describe("updateSession", () => {
     expect(lastUpdateSet.updatedAt).toBeInstanceOf(Date);
   });
 
-  test("never writes the columns that say whose session this is", async () => {
+  test("never writes the columns that say which session this is", async () => {
     // The signature already excluded them, and a type is erased at runtime: the
     // PATCH handler cast its request body straight into here, and drizzle sets
-    // every key that names a real column — so `{"userId": "<someone else>"}`
-    // reassigned the row's owner.
+    // every key that names a real column.
     const { updateSession } = await sessionsModulePromise;
 
     await updateSession(
@@ -173,14 +171,12 @@ describe("updateSession", () => {
       unvalidated({
         title: "Renamed",
         id: "session-2",
-        userId: "user-2",
         createdAt: new Date(0),
       }),
     );
 
     expect(lastUpdateSet.title).toBe("Renamed");
     expect(lastUpdateSet).not.toHaveProperty("id");
-    expect(lastUpdateSet).not.toHaveProperty("userId");
     expect(lastUpdateSet).not.toHaveProperty("createdAt");
   });
 
@@ -188,11 +184,11 @@ describe("updateSession", () => {
     // Sanitising by mutation would edit an object the caller still holds —
     // `archiveSession` builds one update and reuses it.
     const { updateSession } = await sessionsModulePromise;
-    const data = unvalidated({ title: "Renamed", userId: "user-2" });
+    const data = unvalidated({ title: "Renamed", id: "session-2" });
 
     await updateSession("session-1", data);
 
-    expect(data).toHaveProperty("userId", "user-2");
+    expect(data).toHaveProperty("id", "session-2");
   });
 
   test("updateSessionIfNotArchived drops the same columns", async () => {
@@ -200,11 +196,11 @@ describe("updateSession", () => {
 
     await updateSessionIfNotArchived(
       "session-1",
-      unvalidated({ status: "running", userId: "user-2" }),
+      unvalidated({ status: "running", id: "session-2" }),
     );
 
     expect(lastUpdateSet.status).toBe("running");
-    expect(lastUpdateSet).not.toHaveProperty("userId");
+    expect(lastUpdateSet).not.toHaveProperty("id");
   });
 });
 

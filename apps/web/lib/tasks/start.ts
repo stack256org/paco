@@ -183,7 +183,6 @@ export async function startTask(
     const outcome = await submitChatMessage({
       chatId: chat.id,
       sessionId: node.sessionId,
-      userId: session.userId,
       messages: [
         {
           id: generateId(),

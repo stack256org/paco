@@ -22,7 +22,6 @@ import { generatePullRequestContentFromSandbox } from "@/lib/github/pr-content";
 
 export interface AutoCreatePrParams {
   sandbox: Sandbox;
-  userId: string;
   sessionId: string;
   chatId: string;
   sessionTitle: string;

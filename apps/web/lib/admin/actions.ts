@@ -24,7 +24,7 @@ export async function revokeAllGitHubTokens(): Promise<{
   try {
     const deleted = await db
       .delete(githubTokens)
-      .returning({ userId: githubTokens.userId });
+      .returning({ id: githubTokens.id });
 
     return { success: true, deletedConnections: deleted.length };
   } catch (error) {

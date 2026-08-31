@@ -76,7 +76,6 @@ type Options = {
   messages: WebAgentUIMessage[];
   chatId: string;
   sessionId: string;
-  userId: string;
   requestUrl: string;
   selectedModelId?: string;
   modelId?: string;
@@ -137,7 +136,6 @@ function shouldRefreshDiffCacheForParts(
  */
 
 async function resolveChatModelRuntime(params: {
-  userId: string;
   sessionId: string;
   chatId: string;
   requestUrl: string;
@@ -155,9 +153,6 @@ async function resolveChatModelRuntime(params: {
 
   if (!sessionRecord) {
     throw new Error("Session not found");
-  }
-  if (sessionRecord.userId !== params.userId) {
-    throw new Error("Unauthorized");
   }
   if (!chat || chat.sessionId !== params.sessionId) {
     throw new Error("Chat not found");
@@ -451,13 +446,11 @@ export async function runAgentWorkflow(options: Options) {
     ? Promise.resolve()
     : persistInputMessages(options.chatId, options.messages);
   const modelRuntimePromise = resolveChatModelRuntime({
-    userId: options.userId,
     sessionId: options.sessionId,
     chatId: options.chatId,
     requestUrl: options.requestUrl,
   });
   const runtimePromise = resolveChatSandboxRuntime({
-    userId: options.userId,
     sessionId: options.sessionId,
     chatId: options.chatId,
   });
@@ -888,7 +881,6 @@ export async function runAgentWorkflow(options: Options) {
         );
         await sendDataPart(writable, pendingPrPart);
         const autoPrResult = await runAutoCreatePrStep({
-          userId: options.userId,
           sessionId: options.sessionId,
           chatId: options.chatId,
           sessionTitle: runtime.sessionTitle,
@@ -1010,7 +1002,6 @@ export async function runAgentWorkflow(options: Options) {
     } finally {
       const runFinishedAt = new Date();
       await recordWorkflowUsage(
-        options.userId,
         modelId,
         totalUsage,
         pendingAssistantResponse,

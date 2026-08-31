@@ -26,7 +26,6 @@ const DEFAULT_MAX_STEPS = 500;
 export interface SubmitMessageInput {
   chatId: string;
   sessionId: string;
-  userId: string;
   messages: WebAgentUIMessage[];
   requestUrl: string;
   /** The owning session's lifecycle status, as already loaded by the caller. */
@@ -74,7 +73,6 @@ export async function submitChatMessage(
   const {
     chatId,
     sessionId,
-    userId,
     messages,
     requestUrl,
     sessionStatus,
@@ -130,7 +128,6 @@ export async function submitChatMessage(
       messages,
       chatId,
       sessionId,
-      userId,
       requestUrl,
       assistantId: generateId(),
       maxSteps,

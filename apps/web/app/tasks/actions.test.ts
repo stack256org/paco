@@ -14,7 +14,6 @@ mock.module("@/lib/org/organization", () => ({
 
 type FakeSession = {
   id: string;
-  userId: string;
   title: string;
   status: string;
 };
@@ -57,7 +56,6 @@ type FakeTask = {
   reviewerRejections: number;
   chatId: string | null;
   resultSummary: string | null;
-  createdBy: string | null;
 };
 
 let tasksStore: FakeTask[] = [];
@@ -95,7 +93,6 @@ mock.module("@/lib/db/tasks", () => ({
       reviewerRejections: 0,
       chatId: null,
       resultSummary: null,
-      createdBy: (input.createdBy as string | null) ?? null,
     };
     tasksStore.push(row);
     return Promise.resolve(row);
@@ -220,7 +217,6 @@ beforeEach(() => {
       "session-1",
       {
         id: "session-1",
-        userId: "user-1",
         title: "My session",
         status: "active",
       },
@@ -229,7 +225,6 @@ beforeEach(() => {
       "session-2",
       {
         id: "session-2",
-        userId: "user-2",
         title: "Someone else's session",
         status: "active",
       },
@@ -263,7 +258,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
       {
         id: "task-other-org",
@@ -278,7 +272,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-2",
       },
     ];
 
@@ -303,7 +296,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
       {
         id: "child",
@@ -318,7 +310,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
     ];
 
@@ -335,7 +326,6 @@ describe("listMySessionsForTaskAction / listEnabledAgentNamesAction", () => {
   test("every non-archived session comes back, across the whole instance", async () => {
     sessionsById.set("session-3", {
       id: "session-3",
-      userId: "user-2",
       title: "Archived",
       status: "archived",
     });
@@ -456,7 +446,6 @@ describe("retryTaskAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: "boom",
-        createdBy: "user-1",
       },
     ];
 
@@ -481,7 +470,6 @@ describe("retryTaskAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
     ];
 
@@ -509,7 +497,6 @@ describe("unblockTaskAction", () => {
       reviewerRejections: 2,
       chatId: "chat-1",
       resultSummary: "blocked: too many rejections",
-      createdBy: "user-1",
       ...overrides,
     };
   }
@@ -526,7 +513,6 @@ describe("unblockTaskAction", () => {
     expect(kickExecutorFixTurnCalls[0]).toMatchObject({
       sessionId: "session-1",
       chatId: "chat-1",
-      userId: "user-1",
     });
   });
 
@@ -639,7 +625,6 @@ describe("startSubtasksAction", () => {
       reviewerRejections: 0,
       chatId: null,
       resultSummary: null,
-      createdBy: "user-1",
     };
     return [
       {

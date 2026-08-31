@@ -11,16 +11,9 @@ const preferencesState = {
 
 const updateCalls: Array<Record<string, unknown>> = [];
 
-mock.module("@/lib/db/users", () => ({
-  getSoleUserId: async () => "user-1",
-}));
-
 mock.module("@/lib/db/user-preferences", () => ({
-  getUserPreferences: async (_userId: string) => preferencesState,
-  updateUserPreferences: async (
-    _userId: string,
-    updates: Record<string, unknown>,
-  ) => {
+  getUserPreferences: async () => preferencesState,
+  updateUserPreferences: async (updates: Record<string, unknown>) => {
     updateCalls.push(updates);
     return {
       ...preferencesState,

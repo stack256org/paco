@@ -3,11 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const {
-  deleteInstanceMemory,
-  editInstanceMemory,
-  listInstanceMemory,
-} = await import("./actions");
+const { deleteInstanceMemory, editInstanceMemory, listInstanceMemory } =
+  await import("./actions");
 const { instanceMemoryDir } = await import("@/lib/memory/paths");
 const { listMemory, writeMemory } = await import("@/lib/memory/store");
 const { MEMORY_BODY_MAX_LENGTH } = await import("./memory-schemas");

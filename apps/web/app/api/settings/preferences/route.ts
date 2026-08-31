@@ -3,7 +3,6 @@ import {
   type DiffMode,
   updateUserPreferences,
 } from "@/lib/db/user-preferences";
-import { getSoleUserId } from "@/lib/db/users";
 import { BAD_REQUEST } from "@/lib/error-copy";
 
 /**
@@ -110,10 +109,7 @@ export async function PATCH(req: Request) {
   }
 
   try {
-    const preferences = await updateUserPreferences(
-      await getSoleUserId(),
-      updates,
-    );
+    const preferences = await updateUserPreferences(updates);
     return Response.json({ preferences });
   } catch (error) {
     console.error("Failed to update preferences:", error);

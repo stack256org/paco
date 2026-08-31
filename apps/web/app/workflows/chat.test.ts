@@ -1105,8 +1105,7 @@ describe("runAgentWorkflow", () => {
 
     expect(spies.recordWorkflowUsage).toHaveBeenCalledTimes(1);
     const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
-    expect(rwCalls[0][0]).toBe("user-1");
-    expect(rwCalls[0][1]).toBe("gpt-4");
+    expect(rwCalls[0][0]).toBe("gpt-4");
   });
 
   test("persists model metadata even without a finish-step chunk", async () => {
@@ -1291,7 +1290,7 @@ describe("runAgentWorkflow", () => {
     );
 
     const rwCalls = spies.recordWorkflowUsage.mock.calls as unknown[][];
-    const workflowRun = rwCalls[0][5] as {
+    const workflowRun = rwCalls[0][4] as {
       workflowRunId: string;
       status: string;
       totalDurationMs: number;
@@ -1441,7 +1440,6 @@ describe("runAgentWorkflow", () => {
     expect(spies.runAutoCreatePrStep).toHaveBeenCalledTimes(1);
     expect(spies.runAutoCreatePrStep).toHaveBeenCalledWith(
       expect.objectContaining({
-        userId: "user-1",
         repoOwner: "acme",
         repoName: "repo",
       }),

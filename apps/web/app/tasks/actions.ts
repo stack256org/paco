@@ -383,7 +383,6 @@ export async function unblockTaskAction(
     return await resumeBlockedTask(organizationId, task.id, {
       chatId: task.chatId,
       sessionId,
-      userId: session.userId,
     });
   }
 
@@ -399,7 +398,7 @@ export async function unblockTaskAction(
 async function resumeBlockedTask(
   organizationId: string,
   taskId: string,
-  chat: { chatId: string; sessionId: string; userId: string },
+  chat: { chatId: string; sessionId: string },
 ): Promise<StartTaskResult> {
   try {
     await transitionTaskStatus(organizationId, taskId, "running", {
@@ -413,7 +412,6 @@ async function resumeBlockedTask(
     await kickExecutorFixTurn({
       sessionId: chat.sessionId,
       chatId: chat.chatId,
-      userId: chat.userId,
       problems: ["A human unblocked this task. Continue the work."],
     });
   } catch (error) {

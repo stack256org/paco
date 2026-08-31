@@ -1,8 +1,10 @@
 import { eq } from "drizzle-orm";
-import { nanoid } from "nanoid";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
 import { db } from "./client";
 import { userPreferences, type UserPreferences } from "./schema";
+
+/** The one row `userPreferences` ever holds — see `instanceSettings`'s identical pattern. */
+const PREFERENCES_ROW_ID = true;
 
 export type DiffMode = "unified" | "split";
 
@@ -83,13 +85,9 @@ export async function getUserPreferences(): Promise<UserPreferencesData> {
  * Update this instance's preferences, creating the row if it doesn't exist.
  *
  * The lookup and the update are both unfiltered — there is at most one row
- * to find or touch. `userId` is needed only on the create path, to satisfy
- * `userPreferences.userId`'s `NOT NULL` foreign key into `users` (dropped in
- * a later step of this migration); the caller passes in
- * `getSoleUserId()`'s result rather than this function resolving it itself.
+ * to find or touch.
  */
 export async function updateUserPreferences(
-  userId: string,
   updates: Partial<UserPreferencesData>,
 ): Promise<UserPreferencesData> {
   const [existing] = await db.select().from(userPreferences).limit(1);
@@ -111,8 +109,7 @@ export async function updateUserPreferences(
   const [created] = await db
     .insert(userPreferences)
     .values({
-      id: nanoid(),
-      userId,
+      id: PREFERENCES_ROW_ID,
       defaultModelId:
         updates.defaultModelId ?? DEFAULT_PREFERENCES.defaultModelId,
       defaultDiffMode:

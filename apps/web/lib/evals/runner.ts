@@ -441,7 +441,6 @@ export async function runEvalScenario(
     const outcome = await submitChatMessage({
       chatId: chat.id,
       sessionId,
-      userId: session.userId,
       messages: [
         {
           id: userMessageId,

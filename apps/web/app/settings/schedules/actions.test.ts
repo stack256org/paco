@@ -40,7 +40,6 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     assignedAgent: null,
     enabled: true,
     lastFiredAt: null,
-    createdBy: null,
     createdAt: new Date("2026-08-25T00:00:00Z"),
     updatedAt: new Date("2026-08-25T00:00:00Z"),
     ...overrides,
