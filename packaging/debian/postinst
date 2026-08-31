@@ -66,11 +66,16 @@ install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_NGINX_DIR"
 #
 # Generated once and never regenerated, the same rule as APP_SECRET in step 3:
 # an upgrade must not silently change the operator's password. Guarded on the
-# file not existing, nothing else.
+# file being non-empty, not merely existing: `htpasswd -c` creates the file
+# before it writes to it, so a failure partway through (below) would leave a
+# zero-byte file that `[ -f ]` reports as "already generated" forever after —
+# nginx then denies every request, permanently, with no install-time signal
+# and no recovery short of deleting the file by hand. A healthy file is never
+# empty, so `-s` costs nothing on the ordinary idempotent-upgrade path.
 #
 # `apt-get install paco` on its own is a supported entry point, so this cannot
 # be left to install.sh. install.sh only ever refines what is written here.
-if [ ! -f "$NGINX_HTPASSWD" ]; then
+if [ ! -s "$NGINX_HTPASSWD" ]; then
   # Alphanumeric only: this gets read off a terminal and typed into a browser
   # prompt by hand, so base64's +/= are a transcription hazard for no gain.
   generated_password=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | cut -c1-24)
@@ -101,6 +106,16 @@ if [ ! -f "$NGINX_HTPASSWD" ]; then
   printf '%s\n' "$generated_password" > "$PACO_ETC/initial-password"
   chown root:root "$PACO_ETC/initial-password"
   chmod 600 "$PACO_ETC/initial-password"
+
+  # `apt-get install paco` with no install.sh is a supported entry point, and
+  # on that path this is the ONLY place an operator is ever told a password
+  # exists at all — apt's own output says nothing about it. Without this, the
+  # first sign an operator gets is a browser auth prompt they cannot answer:
+  # a lockout, not an inconvenience.
+  echo "paco: this instance is protected by a generated password. Read it with:"
+  echo "        sudo cat /etc/paco/initial-password"
+  echo "paco: change it any time with:"
+  echo "        sudo paco password"
 fi
 
 # -----------------------------------------------------------------------------

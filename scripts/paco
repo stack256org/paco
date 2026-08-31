@@ -592,8 +592,8 @@ password_state() {
     return 0
   fi
 
-  if [ ! -f "$NGINX_HTPASSWD" ]; then
-    echo "NOT SET - this instance is unprotected. Run 'sudo paco password'."
+  if [ ! -s "$NGINX_HTPASSWD" ]; then
+    echo "NOT SET - the password file is missing, so nginx will deny every request until 'sudo paco password' is run."
     return 0
   fi
 
@@ -620,6 +620,12 @@ cmd_status() {
 read_password_twice() {
   [ -t 0 ] || fail "password: no terminal to prompt on. Use 'paco password --stdin'."
 
+  # Ctrl-C while echo is off must not leave the operator's terminal silently
+  # not echoing keystrokes typed afterward. Save the terminal state once and
+  # restore it from a trap on INT, in addition to the normal restore below.
+  saved_stty="$(stty -g 2>/dev/null || true)"
+  trap '[ -n "$saved_stty" ] && stty "$saved_stty" 2>/dev/null; exit 130' INT
+
   printf 'New password for this Paco instance: '
   stty -echo 2>/dev/null || true
   IFS= read -r new_password || true
@@ -632,6 +638,8 @@ read_password_twice() {
   stty echo 2>/dev/null || true
   printf '\n'
 
+  trap - INT
+
   [ "$new_password" = "$confirm_password" ] \
     || fail "password: the two entries did not match. Nothing was changed."
 }
@@ -643,6 +651,7 @@ cmd_password() {
     "") ;;
     *) fail "password: unknown argument: $1" ;;
   esac
+  [ $# -le 1 ] || fail "password: unexpected extra argument: $2"
 
   # Root is required to write the real file under /etc, and only for that.
   # A run pointed somewhere writable by $PACO_HTPASSWD needs no privilege,
@@ -665,6 +674,15 @@ cmd_password() {
   fi
 
   [ -n "$new_password" ] || fail "password: an empty password is not allowed."
+
+  # This is the only gate on this instance: once a later phase removes the
+  # app's own login, this password is the sole thing between the public
+  # internet and a machine that runs arbitrary code in containers. The
+  # generated password is 24 characters; a 1-character operator-chosen one
+  # would otherwise pass right through the check above.
+  password_len=${#new_password}
+  [ "$password_len" -ge 10 ] \
+    || fail "password: too short - use at least 10 characters."
 
   # -i reads the password from stdin. `htpasswd -b` would put it in argv,
   # where `ps` shows it to every user on this machine. -B is bcrypt, which

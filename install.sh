@@ -66,14 +66,19 @@ Usage: install.sh [--domain HOST] [--dry-run]
                  domain at all; set one later from Settings if you skip it
                  here. Also read from PACO_DOMAIN. Passing this (even
                  --domain "") skips the interactive prompt.
-  --password PW  The password that will protect this instance in the browser
-                 (username: paco). Optional. Also read from PACO_PASSWORD.
-                 With a terminal and neither of these given, you are prompted
-                 for one. With no terminal — a piped `curl ... | sudo sh` —
-                 a strong password is generated and printed at the end.
-                 Change it any time with `sudo paco password`.
   --dry-run      Do everything except actually install packages or write
                  files — prints what would happen.
+
+PACO_PASSWORD  The password that will protect this instance in the browser
+               (username: paco). Optional; there is no --password flag for
+               this — a password passed as an argument sits in argv, which
+               `ps` shows to every user on the machine and which lands in
+               root's shell history. An environment variable does not.
+               With a terminal and no PACO_PASSWORD, you are prompted for
+               one (read with echo off, never via an argument either).
+               With no terminal — a piped `curl ... | sudo sh` — a strong
+               password is generated and printed at the end. Change it any
+               time with `sudo paco password`.
 
 Non-interactive use (curl ... | sudo sh, CI, PACO_DOMAIN=... sh install.sh)
 never prompts: the domain prompt only ever appears when stdin is a real
@@ -88,12 +93,6 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || fail "--domain needs a value"
       DOMAIN="$2"
       domain_given=1
-      shift 2
-      ;;
-    --password)
-      [ $# -ge 2 ] || fail "--password needs a value"
-      PASSWORD="$2"
-      password_given=1
       shift 2
       ;;
     --dry-run)
@@ -190,10 +189,16 @@ if [ "$password_given" -eq 0 ] && [ -t 0 ]; then
   printf 'Password to protect this Paco instance in the browser (username: paco).\n'
   printf 'Leave blank to have one generated for you.\n'
 
+  # Ctrl-C while echo is off must not leave the operator's terminal silently
+  # not echoing keystrokes typed afterward. Save the terminal state once and
+  # restore it from a trap on INT, in addition to the normal restore below.
+  saved_stty="$(stty -g 2>/dev/null || true)"
+  trap '[ -n "$saved_stty" ] && stty "$saved_stty" 2>/dev/null; exit 130' INT
+
   printf 'Password: '
   stty -echo 2>/dev/null || true
   password_input=""
-  read -r password_input || true
+  IFS= read -r password_input || true
   stty echo 2>/dev/null || true
   printf '\n'
 
@@ -201,7 +206,7 @@ if [ "$password_given" -eq 0 ] && [ -t 0 ]; then
     printf 'Confirm: '
     stty -echo 2>/dev/null || true
     password_confirm=""
-    read -r password_confirm || true
+    IFS= read -r password_confirm || true
     stty echo 2>/dev/null || true
     printf '\n'
 
@@ -215,6 +220,8 @@ if [ "$password_given" -eq 0 ] && [ -t 0 ]; then
       echo "install.sh: the two entries did not match - generating a password instead."
     fi
   fi
+
+  trap - INT
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then

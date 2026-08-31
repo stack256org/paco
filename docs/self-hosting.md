@@ -442,6 +442,17 @@ release turns out to be wrong. Back up first:
 sudo -u paco pg_dump -h /var/run/postgresql -Fc paco > pre-upgrade-$(date +%F).dump
 ```
 
+`apt-get install paco` — with no `install.sh` — is itself a supported way to
+get a first install, and `postinst` generates the instance password silently
+on that path: nothing in apt's own output says a password exists. Read it
+with:
+
+    sudo cat /etc/paco/initial-password
+
+and change it any time with:
+
+    sudo paco password
+
 ---
 
 ## 5. Removing: `apt remove` vs `apt purge`

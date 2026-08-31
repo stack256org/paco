@@ -18,9 +18,10 @@ describe("packaging protects the instance", () => {
   test("the password file is generated only when absent", async () => {
     const postinst = await readFile(POSTINST, "utf8");
 
-    // Guarded on the file not existing, the same shape as the APP_SECRET
-    // guard above it. An upgrade must never change the operator's password.
-    expect(postinst).toContain('if [ ! -f "$NGINX_HTPASSWD" ]; then');
+    // Guarded on the file being non-empty, not merely existing: `htpasswd -c`
+    // creates the file before writing to it, so a failure partway through
+    // would otherwise leave a zero-byte file that reads as "already set".
+    expect(postinst).toContain('if [ ! -s "$NGINX_HTPASSWD" ]; then');
   });
 
   test("the generated password is hashed, never written in the clear", async () => {
