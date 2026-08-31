@@ -10,7 +10,7 @@ import type { TurnPolicy } from "@paco/agent-backend";
 import type { SkillMetadata } from "@paco/sandbox";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
-import { appUrl } from "@/lib/app-url";
+import { appLoopbackUrl } from "@/lib/app-url";
 import {
   classifySetupFailure,
   setupFailureMessage,
@@ -375,22 +375,18 @@ async function sendDataPart(
 /**
  * The tool-approval hook's callback URL.
  *
- * The hook posts back to this server. It runs on the same machine, so
- * localhost is right even when the app is reached through another origin.
- *
- * The port comes from APP_URL, the one place the port is configured. It used
- * to be `process.env.PORT ?? "3000"`, which happened to work only because
- * Next assigns PORT internally after binding — and the default of 3000 was
- * wrong for this app, which serves 3066. That matters more than it looks: the
- * approval hook fails *open* on a transport error by design, so a callback
- * aimed at a closed port would not error loudly. It would silently approve
+ * The hook posts back to this server. It runs on the same machine, so it
+ * must address this app's own loopback port, never the public origin — see
+ * `appLoopbackUrl`'s doc for why. The approval hook fails *open* on a
+ * transport error by design, so a callback aimed at a closed (or
+ * nginx-guarded) port would not error loudly. It would silently approve
  * every tool call.
  *
  * One function rather than an expression at each call site, so every turn is
  * gated by the same hook at the same address.
  */
 function approvalHookUrl(): string {
-  return `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
+  return `${appLoopbackUrl()}/api/internal/approvals`;
 }
 
 /**

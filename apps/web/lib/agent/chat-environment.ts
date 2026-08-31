@@ -2,7 +2,7 @@ import "server-only";
 
 import type { ClaudeAgentDefinition } from "@paco/claude-code";
 import type { SkillMetadata } from "@paco/sandbox";
-import { appUrl } from "@/lib/app-url";
+import { appLoopbackUrl } from "@/lib/app-url";
 import { getRoster } from "@/lib/db/roster";
 import {
   pluginAgentContributions,
@@ -187,8 +187,9 @@ export async function resolveChatMcpServers(): Promise<
     // Loopback, not the public origin: the bridge script this spawns runs
     // as its own process on this same machine (see `mcp-bridge.ts`'s doc),
     // the same reasoning `app/workflows/chat.ts` already applies to the
-    // approval hook's callback URL.
-    const internalUrl = `http://127.0.0.1:${appUrl().port || "80"}/api/internal/plugin-tools`;
+    // approval hook's callback URL. See `appLoopbackUrl`'s doc for why this
+    // must never be built from `appUrl()`.
+    const internalUrl = `${appLoopbackUrl()}/api/internal/plugin-tools`;
     const config = buildPluginMcpConfig(enabled, { internalUrl });
     return Object.keys(config).length > 0 ? config : undefined;
   } catch (error) {

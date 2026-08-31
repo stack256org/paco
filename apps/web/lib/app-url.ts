@@ -1,3 +1,5 @@
+import { PACO_APP_PORT } from "@/lib/sandbox/config";
+
 /**
  * The public origin this deployment is served on.
  *
@@ -59,4 +61,35 @@ export function appUrl(): URL {
   }
 
   return url;
+}
+
+/**
+ * The app's own loopback base URL — for the app calling itself, never for
+ * anything public-facing.
+ *
+ * Three places need this: the tool-approval hook's callback
+ * (`app/workflows/chat.ts`, `lib/tasks/reviewer-gate.ts`) and the
+ * plugin-tool bridge (`lib/agent/chat-environment.ts`). Each spawns a child
+ * process on this same machine that posts straight back to this server.
+ *
+ * This must NOT be built from `appUrl()`. `appUrl()` is the public origin —
+ * on a packaged install that is `https://<domain>` behind nginx, and nginx's
+ * default server now carries `auth_basic` for the instance password (see
+ * AGENTS.md's Authentication section, and `packaging/debian/postinst`).
+ * Deriving a loopback port from the public origin (`appUrl().port || "80"`)
+ * sends these internal requests through nginx on port 80 instead of past it,
+ * so they get a 401 instead of reaching the app. That is worse than a loud
+ * failure: the approval hook fails *open* on a transport error by design, so
+ * a callback that can't get through would silently approve every tool call
+ * this gate exists to stop, rather than error.
+ *
+ * The port here is the app's actual listening port: `PORT` if the
+ * environment sets it (the packaged install's `paco.env` does, so an
+ * operator who moves the app to another port is still honoured), otherwise
+ * `PACO_APP_PORT` — the same `3000` `postinst` writes into both `paco.env`
+ * and nginx's `proxy_pass`.
+ */
+export function appLoopbackUrl(): string {
+  const port = process.env.PORT?.trim() || String(PACO_APP_PORT);
+  return `http://127.0.0.1:${port}`;
 }

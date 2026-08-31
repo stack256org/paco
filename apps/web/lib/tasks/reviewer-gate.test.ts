@@ -190,10 +190,12 @@ const sandboxExecSpy = mock(() =>
 const connectSandboxSpy = mock(() => Promise.resolve({ exec: sandboxExecSpy }));
 
 // The approval hook's endpoint and shared secret. Mocked so the assertions
-// below name exact values rather than re-deriving `appUrl()`'s port and a
-// freshly-minted random token.
+// below name exact values rather than re-deriving `appLoopbackUrl()`'s port
+// and a freshly-minted random token. This must stay independent of
+// `APP_URL`/`appUrl()` — the loopback callback bypasses the public origin
+// entirely (see `appLoopbackUrl`'s doc in `lib/app-url.ts`).
 mock.module("@/lib/app-url", () => ({
-  appUrl: () => new URL("http://localhost:3066"),
+  appLoopbackUrl: () => "http://127.0.0.1:3066",
 }));
 mock.module("@/lib/agent/approvals/token", () => ({
   approvalToken: () => "reviewer-approval-secret",
