@@ -542,7 +542,6 @@ export async function getChatSummariesBySessionId(
       claudeSessionId: chats.claudeSessionId,
       resumeTokens: chats.resumeTokens,
       lastAssistantMessageAt: chats.lastAssistantMessageAt,
-      previewVisibility: chats.previewVisibility,
       previewSlug: chats.previewSlug,
       createdAt: chats.createdAt,
       updatedAt: chats.updatedAt,

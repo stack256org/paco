@@ -86,8 +86,6 @@ function EmbeddedFrame({
 }
 
 type WorkspacePanelProps = {
-  /** The chat whose preview link and visibility the Preview tab shares. */
-  chatId: string;
   devServerUrl: string | null;
   devServerStarting: boolean;
   devServerStopping: boolean;
@@ -117,7 +115,6 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
 }
 
 function WorkspacePanelBody({
-  chatId,
   devServerUrl,
   devServerStarting,
   devServerStopping,

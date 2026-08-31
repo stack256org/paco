@@ -2306,7 +2306,6 @@ export function SessionChatContent({
         createPortal(
           <WorkspacePanel
             canRunSandboxActions={canOfferDevServerControls}
-            chatId={chatInfo.id}
             devServerError={
               devServer.state.status === "error"
                 ? devServer.state.message

@@ -25,7 +25,6 @@ function createChat(
     claudeSessionId: null,
     resumeTokens: {},
     lastAssistantMessageAt: null,
-    previewVisibility: "private",
     previewSlug: previewSlug(id),
     createdAt: now,
     updatedAt: now,

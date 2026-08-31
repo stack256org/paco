@@ -368,33 +368,21 @@ export const chats = pgTable(
       .default({}),
     lastAssistantMessageAt: timestamp("last_assistant_message_at"),
     /**
-     * Who may open this chat's preview.
-     *
-     * Private by default, and deliberately so: a preview serves code the
-     * agent has just written, from a container with the workspace mounted.
-     * Public means anyone with the hostname can reach it — which is a
-     * decision the owner makes per preview, not a default they inherit.
-     */
-    previewVisibility: text("preview_visibility", {
-      enum: ["private", "public"],
-    })
-      .notNull()
-      .default("private"),
-    /**
      * DNS-safe slug derived from `id`, mirroring `previewSlug()` in
      * `lib/preview/hostname.ts` exactly: lowercase, `[^a-z0-9-]` replaced
      * with `-`, leading/trailing hyphens trimmed.
      *
-     * Stored, not recomputed — the preview forward-auth check
-     * (`app/api/preview-auth/route.ts`) has to map a hostname's leading
-     * label back to a chat on every preview request, and
-     * `previewSlug()` is lossy (case and `_` both collapse into `-`), so
-     * there is no way to invert it back to `id`. Without a stored, indexed
-     * copy the only option would be recomputing the slug for every chat row
-     * on every request — a full table scan on a busy instance. `GENERATED
-     * ALWAYS` lets Postgres keep it correct for every insert automatically,
-     * including ones this column's own migration never has to touch, rather
-     * than relying on every chat-creation call site to remember to set it.
+     * Stored, not recomputed — `lib/preview/hostname.ts` builds each
+     * preview's hostname from this column, and the reconcile sweep in
+     * `lib/preview/nginx-reload.ts` regenerates nginx config from it for
+     * every chat, on every run. `previewSlug()` is lossy (case and `_` both
+     * collapse into `-`), so there is no way to recover `id` from a slug
+     * alone — an indexed, stored copy is the only way to look a chat up by
+     * hostname or list every chat's hostname without recomputing the slug
+     * for every row. `GENERATED ALWAYS` lets Postgres keep it correct for
+     * every insert automatically, including ones this column's own
+     * migration never has to touch, rather than relying on every
+     * chat-creation call site to remember to set it.
      */
     previewSlug: text("preview_slug")
       .notNull()
