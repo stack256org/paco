@@ -86,6 +86,13 @@ jobs:
       - name: Build the sandbox image this branch describes
         run: docker build -t paco-sandbox:ci packages/sandbox/docker
 
+      # scripts/paco-password.test.ts and packaging/postinst-nginx.test.ts
+      # exercise the real `htpasswd`, because the thing worth testing is the
+      # hash nginx will actually read. It is not guaranteed on the runner
+      # image, and `paco password` refuses to run without it.
+      - name: Install htpasswd
+        run: sudo apt-get update && sudo apt-get install -y apache2-utils
+
       - name: Test
         run: pnpm test:isolated
         env:
