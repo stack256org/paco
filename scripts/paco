@@ -582,6 +582,16 @@ poolside_state() {
 # cannot be compared against anything without the original. `paco password`
 # deletes the marker, so its presence means "generated, never changed".
 password_state() {
+  # /etc/paco is 0750 root:paco (see packaging/debian/postinst), so a
+  # non-root, non-paco-group caller gets EACCES on the marker file below;
+  # [ -f ... ] cannot tell "not there" from "cannot look" and would silently
+  # report "not there". That reads as false assurance about a security
+  # control, so this must degrade like every other *_state() helper here.
+  if [ "$(id -u)" != "0" ]; then
+    echo "unknown (run as root to check)"
+    return 0
+  fi
+
   if [ ! -f "$NGINX_HTPASSWD" ]; then
     echo "NOT SET - this instance is unprotected. Run 'sudo paco password'."
     return 0
