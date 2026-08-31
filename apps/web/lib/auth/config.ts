@@ -4,8 +4,6 @@ import { APIError } from "better-auth/api";
 import { magicLink } from "better-auth/plugins";
 import { nanoid } from "nanoid";
 import { appHost, appUrl } from "@/lib/app-url";
-import { buildMagicLinkEmail } from "@/lib/email/mailer";
-import { enqueue, QUEUES } from "@/lib/jobs/queue";
 import { promoteFirstUserToAdmin } from "@/lib/auth/bootstrap-admin";
 import { readTokenCapture } from "@/lib/auth/first-run-token-capture";
 import {
@@ -145,27 +143,16 @@ export const auth = betterAuth({
   plugins: [
     magicLink({
       expiresIn: MAGIC_LINK_EXPIRY_SECONDS,
-      sendMagicLink: async ({ email, url, token, metadata }) => {
+      sendMagicLink: async ({ token, metadata }) => {
         // First-run registration (`POST /api/auth/first-run`) passes a
-        // capture function instead of letting this queue an email — see
+        // capture function instead of letting this send anywhere — see
         // `first-run-token-capture.ts`. It verifies the token itself, in the
         // same request, so nobody has to read a server log to reach their
         // own fresh install.
         const capture = readTokenCapture(metadata);
         if (capture) {
           capture(token);
-          return;
         }
-
-        // Queued rather than sent inline: SMTP latency must not block the
-        // sign-in request, and pg-boss retries transient delivery failures.
-        await enqueue(QUEUES.sendEmail, {
-          to: email,
-          ...buildMagicLinkEmail({
-            url,
-            expiresInMinutes: MAGIC_LINK_EXPIRY_SECONDS / 60,
-          }),
-        });
       },
     }),
   ],

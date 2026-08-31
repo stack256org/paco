@@ -59,37 +59,6 @@ export const domainSchema = z.object({
     .nullable(),
 });
 
-export const smtpSchema = z.object({
-  host: z.string().trim().min(1).nullable(),
-  port: z.number().int().min(1).max(65_535).nullable(),
-  secure: z.boolean().nullable(),
-  user: z.string().trim().nullable(),
-  /**
-   * `""` and whitespace-only both mean "this field was left blank on
-   * submit" — the real password is never sent to the browser (see
-   * `getInstanceSettings`), so a form that isn't touching this field has
-   * nothing else it could submit for it. Normalise blank to `null` so it
-   * lands in `saveSmtpSettings`'s existing "leave the stored password
-   * alone" branch, rather than the "store this as the new password" branch
-   * a bare empty string would otherwise take.
-   *
-   * The stored value itself is never trimmed here — leading or trailing
-   * spaces can be legitimate password characters. Trimming is used only to
-   * decide whether the field counts as blank.
-   *
-   * If an operator wants to genuinely clear SMTP, they clear `host` — that
-   * is the field that decides whether SMTP is configured at all.
-   */
-  password: z
-    .string()
-    .nullable()
-    .transform((value) => (value && value.trim() !== "" ? value : null)),
-  from: z.string().trim().min(1).nullable(),
-});
-
-/** The address `sendTestEmail` is asked to send to. */
-export const emailAddressSchema = z.string().trim().pipe(z.email());
-
 /**
  * The BYO Poolside provider form.
  *
@@ -108,9 +77,10 @@ export const poolsideSchema = z.object({
     }),
   binaryPath: z.string().trim().min(1).nullable(),
   /**
-   * Same "blank means leave it alone" rule as `smtpSchema.password`: the
-   * real key is never sent to the browser (see `getInstanceSettings`), so a
-   * form that isn't touching this field has nothing else it could submit.
+   * `""` and whitespace-only both mean "this field was left blank on
+   * submit" — the real key is never sent to the browser (see
+   * `getInstanceSettings`), so a form that isn't touching this field has
+   * nothing else it could submit for it.
    */
   apiKey: z
     .string()

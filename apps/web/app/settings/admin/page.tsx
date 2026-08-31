@@ -18,7 +18,6 @@ import { useSession } from "@/hooks/use-session";
 import { revokeAllGitHubTokens } from "@/lib/admin/actions";
 import { CertificateSection } from "./certificate-section";
 import { DomainSection } from "./domain-section";
-import { SmtpSection } from "./smtp-section";
 import { StorageSection } from "./storage-section";
 
 function NotFoundState() {
@@ -77,8 +76,6 @@ function AdminPageContent() {
       <DomainSection />
 
       <CertificateSection />
-
-      <SmtpSection />
 
       <StorageSection />
 

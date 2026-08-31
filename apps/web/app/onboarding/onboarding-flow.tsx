@@ -4,19 +4,17 @@ import { useState } from "react";
 import { FirstRunRegistrationForm } from "@/components/auth/first-run-registration-form";
 import type { OnboardingStep } from "@/lib/instance-onboarding";
 import { DoneStep } from "./done-step";
-import { MailStep } from "./mail-step";
 import { PlatformStep } from "./platform-step";
 
-type FlowStep = OnboardingStep | "mail" | "done";
+type FlowStep = OnboardingStep | "done";
 
 const STEP_LABELS: Record<FlowStep, string> = {
   account: "Account",
-  mail: "Mail server",
   platform: "Platform",
   done: "Done",
 };
 
-const STEP_ORDER: FlowStep[] = ["account", "platform", "mail", "done"];
+const STEP_ORDER: FlowStep[] = ["account", "platform", "done"];
 
 /**
  * The guided first-run flow, run once on a fresh instance.
@@ -65,11 +63,7 @@ export function OnboardingFlow({
           ) : null}
 
           {step === "platform" ? (
-            <PlatformStep onContinue={() => setStep("mail")} />
-          ) : null}
-
-          {step === "mail" ? (
-            <MailStep onContinue={() => setStep("done")} />
+            <PlatformStep onContinue={() => setStep("done")} />
           ) : null}
 
           {step === "done" ? <DoneStep /> : null}

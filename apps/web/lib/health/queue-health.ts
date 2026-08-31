@@ -3,13 +3,12 @@ import { db } from "@/lib/db/client";
 import { getErrorCode } from "@/lib/db/error-code";
 
 /**
- * Whether pg-boss — the queue that delivers magic links and invitation
- * emails (see `lib/jobs/queue.ts`) — is actually moving jobs.
+ * Whether pg-boss — the queue that fires cron schedules (see
+ * `lib/jobs/queue.ts`) — is actually moving jobs.
  *
  * This is the highest-value item on the instance-health page: when the queue
- * stalls, sign-in silently stops working. Nothing else says so — the symptom
- * ("I never got the email") looks exactly like a broken SMTP server and is
- * not, so this has to be checked directly rather than inferred.
+ * stalls, a schedule silently stops firing. Nothing else says so, so this
+ * has to be checked directly rather than inferred.
  */
 export type QueueHealthState = "idle" | "working" | "backed-up" | "failing";
 
@@ -24,12 +23,9 @@ export type QueueHealth = QueueCounts & { state: QueueHealthState };
 /**
  * How long a job may sit pending before the queue counts as "backed up".
  *
- * A magic link expires in `MAGIC_LINK_EXPIRY_SECONDS` (600 seconds — see
- * `lib/auth/config.ts`). A sign-in email still sitting in the queue after two
- * minutes has already burned a fifth of its useful life; by the time a human
- * notices "I never got the email" and goes looking, it is nearly, or already,
- * too late to matter. That is the justification for this number — not a
- * round guess.
+ * Two minutes is long enough that a genuinely stalled queue is unmistakable,
+ * short enough that an operator finds out before a schedule has missed
+ * several ticks in a row.
  */
 const BACKED_UP_AGE_SECONDS = 120;
 
@@ -138,8 +134,9 @@ async function readOldestPendingAgeSeconds(): Promise<number | null> {
  * oldestPendingAgeSeconds: null` — which `classifyQueue` reads as `"idle"`.
  * That made "Postgres is unreachable" and "the `pgboss` schema does not
  * exist because pg-boss never started" both render as "Idle — nothing
- * waiting," on the one card whose entire job is to say when mail delivery is
- * actually broken. `Promise.allSettled` in `lib/admin/health-actions.ts`
+ * waiting," on the one card whose entire job is to say when schedule
+ * dispatch is actually broken. `Promise.allSettled` in
+ * `lib/admin/health-actions.ts`
  * already turns a rejection into an honest `"unavailable"`; swallowing here
  * on top of that only threw away the information the caller needed. A
  * missing relation is still checked for — not to swallow it, but to log it

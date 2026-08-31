@@ -616,21 +616,6 @@ export const instanceSettings = pgTable("instance_settings", {
   /** Parent domain for preview hostnames, e.g. "previews.example.com". */
   previewBaseDomain: text("preview_base_domain"),
 
-  smtpHost: text("smtp_host"),
-  smtpPort: integer("smtp_port"),
-  smtpSecure: boolean("smtp_secure"),
-  smtpUser: text("smtp_user"),
-  /**
-   * Sealed with `lib/crypto/secret-box`, never hashed.
-   *
-   * nodemailer authenticates with the original on every send, so there is
-   * nothing to compare a hash against. Sealed with the key derived from
-   * `APP_SECRET`, exactly as GitHub tokens are — changing that secret makes
-   * this unreadable and the operator re-enters it.
-   */
-  smtpPasswordSealed: text("smtp_password_sealed"),
-  smtpFrom: text("smtp_from"),
-
   /**
    * Bring-your-own Poolside provider config: a chat whose `backend` is
    * `"poolside"` runs its turns through the `pool` CLI configured here
@@ -655,14 +640,13 @@ export const instanceSettings = pgTable("instance_settings", {
   /** Path to the `pool` binary on this instance, when it is not on `PATH`. */
   poolsideBinaryPath: text("poolside_binary_path"),
   /**
-   * When the guided first-run flow (account, platform, mail) was finished.
+   * When the guided first-run flow (account, platform) was finished.
    *
    * Null is the normal state until then, and is what makes the flow
    * re-entrant: an admin who closes the browser mid-way is sent back to
-   * `/onboarding` on their next visit instead of either restarting at account
-   * creation (already done, and `POST /api/auth/first-run` would 409 on it
-   * anyway) or landing in the app with no way back to the mail-server step
-   * that still matters.
+   * `/onboarding` on their next visit instead of restarting at account
+   * creation, which is already done and would make
+   * `POST /api/auth/first-run` 409.
    */
   onboardingCompletedAt: timestamp("onboarding_completed_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

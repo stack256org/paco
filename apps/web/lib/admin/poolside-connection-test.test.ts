@@ -40,7 +40,6 @@ mock.module("@/lib/settings/instance-settings", () => ({
   markOnboardingComplete: () => Promise.resolve(),
   saveAppDomain: () => Promise.resolve(),
   savePoolsideSettings: () => Promise.resolve(),
-  saveSmtpSettings: () => Promise.resolve(),
 }));
 
 mock.module("@paco/poolside-backend", () => ({

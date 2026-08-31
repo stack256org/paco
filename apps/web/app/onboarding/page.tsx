@@ -10,9 +10,8 @@ export const metadata: Metadata = {
 };
 
 /**
- * The guided first-run flow: claim the instance, confirm the platform the
- * installer already set up, and set a mail server before anyone can be
- * invited.
+ * The guided first-run flow: claim the instance, and confirm the platform
+ * the installer already set up.
  *
  * Reachable only while the rule in `resolveOnboardingEntry` says so — never
  * by an anonymous visitor once the instance is claimed, and never by anyone

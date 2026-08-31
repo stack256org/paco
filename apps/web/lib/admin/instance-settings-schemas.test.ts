@@ -1,25 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  domainSchema,
-  emailAddressSchema,
-  poolsideSchema,
-  smtpSchema,
-} from "./instance-settings-schemas";
-
-describe("emailAddressSchema", () => {
-  test("trims a whitespace-padded email and accepts it", () => {
-    const result = emailAddressSchema.safeParse("  admin@example.com  ");
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data).toBe("admin@example.com");
-  });
-
-  test("rejects an invalid email", () => {
-    const result = emailAddressSchema.safeParse("not-an-email");
-
-    expect(result.success).toBe(false);
-  });
-});
+import { domainSchema, poolsideSchema } from "./instance-settings-schemas";
 
 describe("domainSchema", () => {
   const base = {
@@ -142,51 +122,6 @@ describe("domainSchema", () => {
     });
 
     expect(result.success).toBe(true);
-  });
-});
-
-describe("smtpSchema password normalisation", () => {
-  const base = {
-    host: "smtp.example.com",
-    port: 587,
-    secure: false,
-    user: null,
-    from: "Paco <no-reply@example.com>",
-  };
-
-  test("normalises an empty string to null", () => {
-    const result = smtpSchema.safeParse({ ...base, password: "" });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.password).toBeNull();
-  });
-
-  test("normalises a whitespace-only string to null", () => {
-    const result = smtpSchema.safeParse({ ...base, password: "   " });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.password).toBeNull();
-  });
-
-  test("leaves null as null", () => {
-    const result = smtpSchema.safeParse({ ...base, password: null });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.password).toBeNull();
-  });
-
-  test("passes a real password through unchanged", () => {
-    const result = smtpSchema.safeParse({ ...base, password: "hunter2" });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.password).toBe("hunter2");
-  });
-
-  test("preserves a password with leading/trailing spaces verbatim", () => {
-    const result = smtpSchema.safeParse({ ...base, password: " hunter2 " });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.password).toBe(" hunter2 ");
   });
 });
 
