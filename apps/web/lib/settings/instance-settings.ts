@@ -45,8 +45,6 @@ export type InstanceSettingsView = {
   tlsEnabled: boolean;
   previewBaseDomain: string | null;
   poolside: StoredPoolsideSettings;
-  /** Null until the guided onboarding flow has been finished once. */
-  onboardingCompletedAt: Date | null;
 };
 
 /**
@@ -92,7 +90,6 @@ export async function readInstanceSettings(): Promise<InstanceSettingsView> {
       ),
       binaryPath: row?.poolsideBinaryPath ?? null,
     },
-    onboardingCompletedAt: row?.onboardingCompletedAt ?? null,
   };
 }
 
@@ -133,22 +130,6 @@ export async function savePoolsideSettings(
       ? {}
       : { poolsideApiKeySealed: seal(input.apiKey) }),
   };
-
-  await db
-    .insert(instanceSettings)
-    .values({ id: SETTINGS_ROW_ID, ...values })
-    .onConflictDoUpdate({ target: instanceSettings.id, set: values });
-}
-
-/**
- * Record that the guided first-run flow has been finished.
- *
- * Idempotent by design — the "Done" step calls this every time it is
- * reached, including a second time if an admin somehow gets back there, and
- * that just overwrites the timestamp rather than erroring.
- */
-export async function markOnboardingComplete(): Promise<void> {
-  const values = { onboardingCompletedAt: new Date(), updatedAt: new Date() };
 
   await db
     .insert(instanceSettings)

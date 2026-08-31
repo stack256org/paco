@@ -510,14 +510,6 @@ export const instanceSettings = pgTable("instance_settings", {
   poolsideApiKeySealed: text("poolside_api_key_sealed"),
   /** Path to the `pool` binary on this instance, when it is not on `PATH`. */
   poolsideBinaryPath: text("poolside_binary_path"),
-  /**
-   * When the guided first-run flow (account, platform) was finished.
-   *
-   * Null is the normal state until then, and is what makes the flow
-   * re-entrant: closing the browser mid-way leaves this null, so the next
-   * visit is sent back to finish it instead of treating it as done.
-   */
-  onboardingCompletedAt: timestamp("onboarding_completed_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

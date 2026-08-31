@@ -5,9 +5,9 @@
  * cannot run on the edge runtime:
  *
  * - the Workflow SDK's world, which drives durable workflow runs
- * - the pg-boss workers, which deliver queued email, fire cron
- *   schedules (`lib/db/schema.ts`'s `schedules` table), and run the daily
- *   reflection job (`lib/memory/reflect.ts`) out of band
+ * - the pg-boss workers, which fire cron schedules (`lib/db/schema.ts`'s
+ *   `schedules` table), and run the daily reflection job
+ *   (`lib/memory/reflect.ts`) out of band
  *
  * A third thing is started here too: every enabled plugin's worker host
  * (`ensurePluginsStarted`, `lib/plugins/registry.ts`) — so a plugin with

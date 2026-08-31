@@ -33,7 +33,6 @@ let probeCalls = 0;
 // present — omitting one fails at import time, not at the assertion.
 mock.module("@/lib/settings/instance-settings", () => ({
   readInstanceSettings: () => Promise.resolve(readSettingsResult),
-  markOnboardingComplete: () => Promise.resolve(),
   saveAppDomain: () => Promise.resolve(),
   savePoolsideSettings: () => Promise.resolve(),
 }));

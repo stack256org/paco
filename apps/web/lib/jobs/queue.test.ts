@@ -52,8 +52,8 @@ describe("getBoss", () => {
    * The start promise was cached before it settled, so one unreachable-Postgres
    * moment at boot — the normal case when the app and the database come up
    * together — left a rejected promise on `globalThis` for the life of the
-   * process. Magic-link sign-in stayed broken long after Postgres recovered,
-   * and only a restart fixed it.
+   * process. Every job that depends on the queue stayed broken long after
+   * Postgres recovered, and only a restart fixed it.
    */
   test("does not remember a failed start", async () => {
     const { getBoss } = await queueModule;

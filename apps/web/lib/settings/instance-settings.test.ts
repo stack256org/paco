@@ -40,20 +40,6 @@ describe("instance settings", () => {
 
     expect(settings.appDomain).toBeNull();
     expect(settings.tlsEnabled).toBe(false);
-    expect(settings.onboardingCompletedAt).toBeNull();
-  });
-
-  test("completing onboarding round-trips", async () => {
-    stored = null;
-    const { readInstanceSettings, markOnboardingComplete } =
-      await modulePromise;
-
-    expect((await readInstanceSettings()).onboardingCompletedAt).toBeNull();
-
-    await markOnboardingComplete();
-
-    const settings = await readInstanceSettings();
-    expect(settings.onboardingCompletedAt).toBeInstanceOf(Date);
   });
 
   test("saving a domain round-trips", async () => {

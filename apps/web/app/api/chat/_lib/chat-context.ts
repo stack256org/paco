@@ -11,7 +11,7 @@ export type ResponseFormat = "json" | "text";
 type SessionRecord = NonNullable<Awaited<ReturnType<typeof getSessionById>>>;
 type ChatRecord = NonNullable<Awaited<ReturnType<typeof getChatById>>>;
 
-type OwnedSessionChatResult =
+type SessionChatByIdsResult =
   | {
       ok: true;
       sessionRecord: SessionRecord;
@@ -33,7 +33,7 @@ type OwnedChatByIdResult =
       response: Response;
     };
 
-interface RequireOwnedSessionChatParams {
+interface RequireSessionChatByIdsParams {
   sessionId: string;
   chatId: string;
   format?: ResponseFormat;
@@ -58,9 +58,10 @@ function toErrorResponse(
   return Response.json({ error: message }, { status });
 }
 
-export async function requireOwnedSessionChat(
-  params: RequireOwnedSessionChatParams,
-): Promise<OwnedSessionChatResult> {
+/** Resolve a session and its chat by id, verifying the chat belongs to that session. */
+export async function requireSessionChatByIds(
+  params: RequireSessionChatByIdsParams,
+): Promise<SessionChatByIdsResult> {
   const {
     sessionId,
     chatId,

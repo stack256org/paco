@@ -25,14 +25,13 @@ cannot start without:
 | Variable | Description |
 | --- | --- |
 | `POSTGRES_URL` | PostgreSQL connection string. The only one — Drizzle, pg-boss and the durable workflow runtime all use it. Also required for builds: migrations run during `next build`. |
-| `APP_SECRET` | Signs auth sessions and derives the key that encrypts stored GitHub tokens. Any long random string; changing it invalidates both. |
+| `APP_SECRET` | Derives the key that seals each stored GitHub token (`lib/crypto/secret-box.ts`) — the only thing it protects now that there are no sessions to sign. Any long random string; changing it permanently orphans every already-stored token, so back it up alongside the database. |
 
 Optional — a first run starts fine without these:
 
 | Variable | Description |
 | --- | --- |
-| `APP_URL` | The public origin, scheme and port included. Magic-link URLs, pull-request links, better-auth's trusted origins and the port `pnpm dev` binds are all derived from it. Falls back to `http://localhost:$PORT` (default `3000`) when unset. |
-| `SMTP_*` | Outbound mail for magic links. Unset means sign-in links are logged instead of emailed — enough for local development. SMTP can also be configured from **Settings** instead of the environment; a saved value there is read first. |
+| `APP_URL` | The public origin, scheme and port included. Pull-request links and the port `pnpm dev` binds are derived from it. Falls back to `http://localhost:$PORT` (default `3000`) when unset. |
 | `PACO_WORKSPACE_ROOT` | Relocates the sandbox workspace directory (default `~/.paco/workspaces`). |
 
 ## GitHub

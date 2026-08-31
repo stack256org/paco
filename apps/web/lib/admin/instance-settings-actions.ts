@@ -3,7 +3,6 @@
 import { tmpdir } from "node:os";
 import type { z } from "zod";
 import {
-  markOnboardingComplete,
   readInstanceSettings,
   saveAppDomain,
   savePoolsideSettings,
@@ -173,15 +172,4 @@ export async function testPoolsideConnection(): Promise<{
   } finally {
     await client.close();
   }
-}
-
-/**
- * Mark the guided first-run flow finished.
- *
- * Called once, from the "Done" step — but idempotent, since nothing stops
- * getting back there (a bookmark, a back button) after it's already done.
- */
-export async function completeOnboarding(): Promise<{ success: boolean }> {
-  await markOnboardingComplete();
-  return { success: true };
 }

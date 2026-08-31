@@ -666,6 +666,18 @@ which removes Paco's own copy of the instance's GitHub token. It does not
 revoke the token at GitHub — a personal access token is revoked at
 github.com/settings/tokens, by whoever created it.
 
+### Upgrading from before Phase C
+
+**Upgrading from before Phase C:** GitHub used to be connected per user, so
+an instance several people had connected their own accounts to had several
+rows in `github_tokens`. Migration `0018` deletes all of them whenever more
+than one exists, rather than picking one to keep — silently inheriting an
+arbitrary departed teammate's identity and scopes for the instance's git
+commit author would be worse than coming up disconnected. If your instance
+had more than one person connected, it comes up after the upgrade with
+GitHub disconnected; one person reconnects once, deliberately, from
+**Settings → Connections**.
+
 ---
 
 ## 8. DNS, TLS, and previews
@@ -1607,10 +1619,11 @@ own.
 | --- | --- |
 | `POSTGRES_URL` | `postgres:///paco` — no host, no password. Both driver libraries Paco uses reject a non-empty username with an empty host outright, so the connection string is deliberately bare; `PGHOST` below and OS-user peer authentication supply the rest. |
 | `PGHOST` | `/var/run/postgresql` — the socket directory. |
-| `APP_SECRET` | Signs sessions and derives the key that encrypts stored GitHub tokens. Generated once; regenerating it invalidates both. See §6 before you consider changing it. |
+| `APP_SECRET` | Derives the key that encrypts stored GitHub tokens — the only thing it protects now that there are no sessions to sign. Generated once; regenerating it permanently orphans every already-stored token. See §6 before you consider changing it. |
 | `PACO_WORKSPACE_ROOT` | `/var/lib/paco/workspaces`. |
 | `NODE_ENV` | `production`. |
 | `PORT` | `3000` — matched by the nginx site's `proxy_pass http://127.0.0.1:3000`. Changing one without the other breaks routing: nginx will keep answering requests but silently proxy to the wrong (or no) port. Edit `/etc/nginx/sites-available/paco` too, `nginx -t`, then reload, if you ever change this. |
+| `HOSTNAME` | `127.0.0.1` — also set independently in `packaging/paco.service`, since dpkg replaces that unit (not `paco.env`) on every upgrade. Keeps the app reachable only through nginx, which holds the instance password; changing this to bind another interface skips that password for anyone who can reach it. |
 
 ### Yours to set
 

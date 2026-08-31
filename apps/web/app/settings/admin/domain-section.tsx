@@ -113,10 +113,9 @@ async function pingServerAlive(): Promise<boolean> {
  */
 /**
  * `onSaved`, when given, is called after every successful save with whether a
- * domain is now set — the same shape `SmtpSection` uses, and for the same
- * reason: the onboarding step that embeds this needs to know, and re-reading
- * the settings from the server just to learn what this component already knows
- * would race the write that caused it.
+ * domain is now set, so a caller that needs to know can react immediately —
+ * re-reading the settings from the server just to learn what this component
+ * already knows would race the write that caused it.
  */
 export function DomainSection({
   onSaved,
@@ -396,8 +395,8 @@ export function DomainSection({
             />
             <p className="text-base-content/60 text-xs">
               The full origin people use to reach Paco, including{" "}
-              <code>https://</code>. This is what invitation and sign-in links
-              are built from.
+              <code>https://</code>. This is what pull-request links are built
+              from.
             </p>
 
             <label className="label" htmlFor="preview-base-domain">

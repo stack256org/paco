@@ -1,6 +1,6 @@
 import { createUIMessageStreamResponse } from "ai";
 import { submitChatMessage } from "@/lib/chat/submit-message";
-import { requireOwnedSessionChat } from "./_lib/chat-context";
+import { requireSessionChatByIds } from "./_lib/chat-context";
 import { parseChatRequestBody, requireChatIdentifiers } from "./_lib/request";
 
 const STILL_WORKING =
@@ -16,14 +16,15 @@ export async function POST(req: Request) {
 
   const { messages } = parsedBody.body;
 
-  // Require sessionId and chatId to ensure sandbox ownership verification
+  // Require sessionId and chatId so the chat resolved below is confirmed to
+  // belong to that session before the sandbox it names is used.
   const chatIdentifiers = requireChatIdentifiers(parsedBody.body);
   if (!chatIdentifiers.ok) {
     return chatIdentifiers.response;
   }
   const { sessionId, chatId } = chatIdentifiers;
 
-  const chatContext = await requireOwnedSessionChat({ sessionId, chatId });
+  const chatContext = await requireSessionChatByIds({ sessionId, chatId });
   if (!chatContext.ok) {
     return chatContext.response;
   }

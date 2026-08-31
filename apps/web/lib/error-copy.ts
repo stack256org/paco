@@ -9,7 +9,7 @@
  */
 
 export const NOT_YOURS =
-  "This isn't yours to open. Check you're signed in to the right account.";
+  "That request didn't match the chat or session it named. Reload the page and try again.";
 
 export const SESSION_NOT_FOUND =
   "We couldn't find that session. It may have been deleted.";

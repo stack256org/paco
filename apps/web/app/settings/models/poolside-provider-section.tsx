@@ -338,9 +338,9 @@ export interface PoolsideProviderSectionProps {
  * POOLSIDE_STANDALONE_BASE_URL and POOLSIDE_API_KEY from its environment and
  * honours both, so the form promises what it delivers again.
  *
- * Mirrors `SmtpSection` (`app/settings/admin/smtp-section.tsx`) exactly —
- * same load/save/error shape, same "the secret never comes back down"
- * contract for `apiKey` as that section's password field.
+ * Same load/save/error shape as the rest of Settings' admin forms, and the
+ * same "the secret never comes back down" contract for `apiKey` as any other
+ * sealed credential field.
  */
 export function PoolsideProviderSection({
   capabilities,
@@ -354,8 +354,8 @@ export function PoolsideProviderSection({
 
   const limitations = describeBackendLimitations(capabilities);
 
-  // Same staleness guard as `SmtpSection.requestIdRef`: only the most recent
-  // `loadSettings` call is allowed to touch state.
+  // Same staleness guard as `DomainSection.requestIdRef`: only the most
+  // recent `loadSettings` call is allowed to touch state.
   const requestIdRef = useRef(0);
 
   const loadSettings = useCallback(async () => {

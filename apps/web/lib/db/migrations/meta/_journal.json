@@ -141,6 +141,13 @@
       "when": 1788189077177,
       "tag": "0019_small_patch",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788195150039,
+      "tag": "0020_cultured_trauma",
+      "breakpoints": true
     }
   ]
 }

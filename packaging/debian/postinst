@@ -2,9 +2,9 @@
 # postinst runs on every install AND every upgrade — every step below has to
 # be a no-op the second time it runs, or an `apt upgrade` would silently
 # redo something that must only ever happen once (regenerating APP_SECRET
-# chief among them: it signs sessions and derives the key that encrypts
-# every stored GitHub token, so regenerating it on upgrade would silently
-# and permanently orphan every one of them).
+# chief among them: it derives the key that encrypts every stored GitHub
+# token, so regenerating it on upgrade would silently and permanently
+# orphan every one of them).
 set -e
 
 PACO_ETC=/etc/paco
@@ -121,10 +121,10 @@ fi
 # -----------------------------------------------------------------------------
 # 3. APP_SECRET and paco.env — generated once, ever. This is the step in
 # this whole script that must never run twice: regenerating APP_SECRET
-# invalidates every session and makes every already-stored GitHub token
-# permanently undecryptable (AES-256-GCM with a key derived from it — not a
-# hash, so there is no "re-derive and compare", only "decrypt with the
-# wrong key and fail"). Guarded on the file not existing, nothing else.
+# makes every already-stored GitHub token permanently undecryptable
+# (AES-256-GCM with a key derived from it — not a hash, so there is no
+# "re-derive and compare", only "decrypt with the wrong key and fail").
+# Guarded on the file not existing, nothing else.
 if [ ! -f "$PACO_ENV" ]; then
   APP_SECRET=$(openssl rand -base64 32)
   umask 077
@@ -146,10 +146,23 @@ if [ ! -f "$PACO_ENV" ]; then
   # Debian-family host.
   cat > "$PACO_ENV" <<EOF
 # Generated once by paco's postinst — see the comment there before editing
-# APP_SECRET by hand. Regenerating it invalidates every session and makes
-# every already-stored GitHub token permanently undecryptable.
+# APP_SECRET by hand. Regenerating it makes every already-stored GitHub
+# token permanently undecryptable.
 NODE_ENV=production
 PORT=3000
+# The app has no authentication of its own — the instance password lives
+# entirely in nginx's auth_basic (see the site block below and
+# docs/agents' Authentication note). Next's standalone server defaults to
+# binding 0.0.0.0 when HOSTNAME is unset, which would let anyone on the
+# network reach the app on :3000 directly, bypassing nginx and the
+# password it holds. Binding loopback forces every request through
+# nginx. This file is written once and never rewritten (see the guard
+# above), so it is the one place a fresh install gets this from; an
+# already-installed instance is repaired by packaging/paco.service
+# instead, which dpkg replaces on every upgrade. An operator who
+# deliberately wants the app reachable off-loopback must change this
+# knowingly.
+HOSTNAME=127.0.0.1
 POSTGRES_URL=postgres:///paco
 PGHOST=/var/run/postgresql
 APP_SECRET=$APP_SECRET

@@ -46,7 +46,6 @@ mock.module("@/lib/settings/instance-settings", () => ({
       from: null,
     },
     poolside: poolsideSettings,
-    onboardingCompletedAt: null,
   }),
 }));
 
