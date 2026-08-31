@@ -756,7 +756,6 @@ const DISTILL_TIMEOUT_MS = 90_000;
 export async function distillTurnMemoryStep(params: {
   chatId: string;
   sessionRepoDir: string;
-  userId: string;
   turnId: string;
 }): Promise<void> {
   "use step";

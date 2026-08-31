@@ -31,7 +31,7 @@ const spies = {
       _prompt: string,
       _schema: Record<string, unknown>,
       _options: { cwd: string; model: string; appendSystemPrompt?: string },
-    ) => Promise.resolve({ project: [], user: [] }) as Promise<unknown>,
+    ) => Promise.resolve({ project: [], instance: [] }) as Promise<unknown>,
   ),
 };
 
@@ -51,7 +51,7 @@ mock.module("@paco/claude-code", () => ({
 }));
 
 const { distillTurn } = await import("./distill");
-const { userMemoryDir } = await import("./paths");
+const { instanceMemoryDir } = await import("./paths");
 const { listMemory } = await import("./store");
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -120,7 +120,6 @@ function assistantMessage(): UIMessage {
 }
 
 let sessionRepoDir: string;
-let userId: string;
 let dataDir: string;
 let originalPacoHome: string | undefined;
 
@@ -129,7 +128,6 @@ beforeEach(async () => {
     path.join(os.tmpdir(), "paco-distill-repo-"),
   );
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "paco-distill-data-"));
-  userId = "user-1";
   originalPacoHome = process.env.PACO_HOME;
   process.env.PACO_HOME = dataDir;
 
@@ -140,7 +138,7 @@ beforeEach(async () => {
   spies.deriveAssistantMessage.mockClear();
   spies.generateObject.mockClear();
   spies.generateObject.mockImplementation(() =>
-    Promise.resolve({ project: [], user: [] }),
+    Promise.resolve({ project: [], instance: [] }),
   );
 });
 
@@ -158,7 +156,6 @@ function call() {
   return distillTurn({
     chatId: "chat-1",
     sessionRepoDir,
-    userId,
     turnId: TURN_ID,
   });
 }
@@ -205,7 +202,7 @@ describe("distillTurn skip rules", () => {
 });
 
 describe("distillTurn happy path", () => {
-  test("writes project and user memory from the structured output", async () => {
+  test("writes project and instance memory from the structured output", async () => {
     turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
@@ -216,7 +213,7 @@ describe("distillTurn happy path", () => {
             body: "The auth module was switched from sessions to JWT tokens.",
           },
         ],
-        user: [
+        instance: [
           { title: "Prefers JWT over sessions", body: "Stated preference." },
         ],
       }),
@@ -236,17 +233,17 @@ describe("distillTurn happy path", () => {
     expect(projectEntries[0]?.title).toBe("Auth uses JWT");
     expect(projectEntries[0]?.source).toBe("distilled");
 
-    const userEntries = await listMemory(userMemoryDir(userId));
-    expect(userEntries).toHaveLength(1);
-    expect(userEntries[0]?.title).toBe("Prefers JWT over sessions");
-    expect(userEntries[0]?.source).toBe("distilled");
+    const instanceEntries = await listMemory(instanceMemoryDir());
+    expect(instanceEntries).toHaveLength(1);
+    expect(instanceEntries[0]?.title).toBe("Prefers JWT over sessions");
+    expect(instanceEntries[0]?.source).toBe("distilled");
   });
 
   test("writes nothing when the model returns empty arrays", async () => {
     turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
-      Promise.resolve({ project: [], user: [] }),
+      Promise.resolve({ project: [], instance: [] }),
     );
 
     await call();
@@ -254,9 +251,9 @@ describe("distillTurn happy path", () => {
     const projectEntries = await listMemory(
       path.join(sessionRepoDir, ".paco", "memory"),
     );
-    const userEntries = await listMemory(userMemoryDir(userId));
+    const instanceEntries = await listMemory(instanceMemoryDir());
     expect(projectEntries).toHaveLength(0);
-    expect(userEntries).toHaveLength(0);
+    expect(instanceEntries).toHaveLength(0);
   });
 });
 
@@ -277,7 +274,7 @@ describe("distillTurn prompt-injection framing", () => {
     // injected text — this test only proves the transcript is delimited
     // and framed as data, not that the (real) model resists it.
     spies.generateObject.mockImplementation(() =>
-      Promise.resolve({ project: [], user: [] }),
+      Promise.resolve({ project: [], instance: [] }),
     );
 
     await call();
@@ -323,7 +320,7 @@ describe("distillTurn error handling", () => {
     turnEventsResult = bigTurnEvents();
     deriveAssistantMessageResult = assistantMessage();
     spies.generateObject.mockImplementation(() =>
-      Promise.resolve({ project: "not-an-array", user: [] }),
+      Promise.resolve({ project: "not-an-array", instance: [] }),
     );
 
     await expect(call()).resolves.toBeUndefined();

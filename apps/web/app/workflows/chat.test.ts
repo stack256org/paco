@@ -178,7 +178,6 @@ const spies = {
     (_params?: {
       chatId?: string;
       sessionRepoDir?: string;
-      userId?: string;
       turnId?: string;
     }) => {
       completionSequenceCallOrder.push("distillTurnMemoryStep");
@@ -456,12 +455,8 @@ const SESSION_REPO_DIR = "/workspace/session-1/repo";
 let organizationRecord: { id: string } | null = { id: "org-1" };
 let memorySectionToReturn: string | undefined;
 const loadMemorySectionForTurnSpy = mock(
-  (_params: {
-    sessionRepoDir?: string;
-    userId: string;
-    organizationId?: string;
-    prompt: string;
-  }) => Promise.resolve(memorySectionToReturn),
+  (_params: { sessionRepoDir?: string; prompt: string }) =>
+    Promise.resolve(memorySectionToReturn),
 );
 
 /** Lets a test simulate the repo directory failing to resolve. */
@@ -729,8 +724,6 @@ describe("runAgentWorkflow", () => {
     expect(loadMemorySectionForTurnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionRepoDir: SESSION_REPO_DIR,
-        userId: "user-1",
-        organizationId: "org-1",
         prompt: "Hello",
       }),
     );
@@ -861,17 +854,15 @@ describe("runAgentWorkflow", () => {
     expect(types[types.length - 1]).toBe("finish");
   });
 
-  test("still loads user/org memory when the session repo dir fails to resolve", async () => {
+  test("still loads instance memory when the session repo dir fails to resolve", async () => {
     // Only project-scope memory needs the repo dir; losing it shouldn't also
-    // drop the user's and organisation's memory for the turn.
+    // drop the instance's memory for the turn.
     resolveWorkCwdShouldThrow = true;
 
     await runAgentWorkflow(makeOptions());
 
     expect(loadMemorySectionForTurnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        userId: "user-1",
-        organizationId: "org-1",
         prompt: "Hello",
       }),
     );
@@ -933,7 +924,6 @@ describe("runAgentWorkflow", () => {
       expect.objectContaining({
         chatId: "chat-1",
         sessionRepoDir: SESSION_REPO_DIR,
-        userId: "user-1",
         turnId: turnStartEvent?.turnId,
       }),
     );

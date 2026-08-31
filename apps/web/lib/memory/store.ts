@@ -8,10 +8,13 @@ export interface MemoryEntry {
   source: "distilled" | "manual" | "promoted";
   body: string;
   /**
-   * Who requested the promotion — set only on `source: "promoted"` entries
-   * written via `promoteToOrgMemory` (`lib/memory/org-writer.ts`). Absent for
-   * every other source, and absent on older files written before this field
-   * existed; both parse the same way, as `undefined`.
+   * Who requested the promotion — historically set on `source: "promoted"`
+   * entries written by the now-removed org-memory promotion flow. Nothing
+   * writes a new one any more (Phase C collapsed user and organisation
+   * scope into one instance scope, which removed the concept of promoting
+   * from one into the other), but an older file can still carry it. Absent
+   * for every other source, and absent on older files written before this
+   * field existed; both parse the same way, as `undefined`.
    */
   promotedBy?: string;
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Loader2, Pencil, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Loader2, Pencil, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import type { MemoryEntry } from "@/lib/memory/store";
 
@@ -10,30 +10,23 @@ export interface MemoryEntryCardProps {
   onSave: (body: string) => Promise<boolean>;
   onDelete: () => void;
   deleting: boolean;
-  /**
-   * Present only on a user-scope card — org entries are already at the top
-   * of the promotion chain, so there is nothing further for them to
-   * propose.
-   */
-  onPromote?: () => void;
-  promoting?: boolean;
 }
 
 /**
  * One memory entry: title, source badge, and its body — either as read-only
  * text or, once "Edit" is clicked, an inline textarea saved in place.
  *
- * Shared between the user and org sections of `/settings/memory` (see
- * `memory-section.tsx`); `onPromote` is the only prop that differs between
- * them, present solely on user-scope cards.
+ * Used by the single instance-memory section of `/settings/memory` (see
+ * `memory-section.tsx`). This used to also render an org section's cards,
+ * with a "promote" action bridging the two — that stopped meaning anything
+ * once user and org scope collapsed into one instance scope (Phase C), so
+ * the card is just a plain list item now.
  */
 export function MemoryEntryCard({
   entry,
   onSave,
   onDelete,
   deleting,
-  onPromote,
-  promoting,
 }: MemoryEntryCardProps) {
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState(entry.body);
@@ -66,21 +59,6 @@ export function MemoryEntryCard({
           </div>
         </div>
         <div className="flex shrink-0 gap-1">
-          {onPromote ? (
-            <button
-              aria-label={`Propose "${entry.title}" for org memory`}
-              className="btn btn-ghost btn-sm"
-              disabled={promoting}
-              onClick={onPromote}
-              type="button"
-            >
-              {promoting ? (
-                <Loader2 aria-hidden="true" className="size-4 animate-spin" />
-              ) : (
-                <Sparkles aria-hidden="true" className="size-4" />
-              )}
-            </button>
-          ) : null}
           {editing ? null : (
             <button
               aria-label={`Edit "${entry.title}"`}

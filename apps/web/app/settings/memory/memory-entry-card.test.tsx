@@ -70,26 +70,6 @@ describe("MemoryEntryCard rendering", () => {
     expect(html).toContain("animate-spin");
   });
 
-  test("omits the promote button when onPromote is not provided", () => {
-    const html = renderCard();
-
-    expect(html).not.toContain("org memory");
-  });
-
-  test("shows a promote button, labelled with the entry's title, when onPromote is provided", () => {
-    const html = renderCard({ onPromote: noop });
-
-    expect(html).toContain(
-      'aria-label="Propose &quot;Editor preference&quot; for org memory"',
-    );
-  });
-
-  test("shows a spinner on the promote button while promoting", () => {
-    const html = renderCard({ onPromote: noop, promoting: true });
-
-    expect(html).toContain("animate-spin");
-  });
-
   test("renders a different entry's own title and body", () => {
     const html = renderCard({
       entry: entry({

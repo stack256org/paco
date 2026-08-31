@@ -649,7 +649,6 @@ export async function runAgentWorkflow(options: Options) {
           workflowRunId,
           options.chatId,
           options.sessionId,
-          options.userId,
           selectedModelId,
           modelId,
           agentOptions,
@@ -981,7 +980,6 @@ export async function runAgentWorkflow(options: Options) {
         await distillTurnMemoryStep({
           chatId: options.chatId,
           sessionRepoDir: finalSessionRepoDir,
-          userId: options.userId,
           turnId,
         });
       }
@@ -1270,7 +1268,6 @@ const runAgentStep = async (
   workflowRunId: string,
   chatId: string,
   _sessionId: string,
-  userId: string,
   selectedModelId: string,
   modelId: string,
   agentOptions: AgentCallOptions,
@@ -1461,8 +1458,6 @@ const runAgentStep = async (
       const organization = await getOrganization();
       memorySection = await loadMemorySectionForTurn({
         ...(sessionRepoDir ? { sessionRepoDir } : {}),
-        userId,
-        organizationId: organization?.id,
         prompt,
       });
       // `resolveChatAgents` treats `organizationId` as optional — plugin

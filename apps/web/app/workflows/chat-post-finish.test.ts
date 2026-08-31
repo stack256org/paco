@@ -583,14 +583,12 @@ describe("distillTurnMemoryStep", () => {
     await distillTurnMemoryStep({
       chatId: "chat-1",
       sessionRepoDir: "/tmp/repo",
-      userId: "user-1",
       turnId: "turn-1",
     });
 
     expect(distillTurnSpy).toHaveBeenCalledWith({
       chatId: "chat-1",
       sessionRepoDir: "/tmp/repo",
-      userId: "user-1",
       turnId: "turn-1",
     });
   });
@@ -605,7 +603,6 @@ describe("distillTurnMemoryStep", () => {
     const stepPromise = distillTurnMemoryStep({
       chatId: "chat-1",
       sessionRepoDir: "/tmp/repo",
-      userId: "user-1",
       turnId: "turn-1",
     }).then(() => {
       stepResolved = true;
@@ -632,7 +629,6 @@ describe("distillTurnMemoryStep", () => {
       distillTurnMemoryStep({
         chatId: "chat-1",
         sessionRepoDir: "/tmp/repo",
-        userId: "user-1",
         turnId: "turn-1",
       }),
     ).resolves.toBeUndefined();
@@ -660,7 +656,6 @@ describe("distillTurnMemoryStep", () => {
         distillTurnMemoryStep({
           chatId: "chat-1",
           sessionRepoDir: "/tmp/repo",
-          userId: "user-1",
           turnId: "turn-1",
         }),
       ).resolves.toBeUndefined();
