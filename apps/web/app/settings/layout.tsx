@@ -8,65 +8,24 @@ import {
   Brain,
   Cable,
   Clock,
-  LogOut,
   Menu,
   Puzzle,
   Settings as SettingsIcon,
   ShieldAlert,
   SlidersHorizontal,
   User,
-  Users,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { useSession } from "@/hooks/use-session";
-import { useSignOutConfirm } from "@/hooks/use-sign-out-confirm";
-import { AuthGuard } from "@/components/auth/auth-guard";
 import {
   Sheet,
   SheetContent,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { GitHubConnectionSectionSkeleton } from "./github-connection-section";
-import { PreferencesSectionSkeleton } from "./preferences-section";
-
-/** Skeleton shown while auth is loading for the combined profile page */
-function ProfilePageSkeleton() {
-  return (
-    <div className="flex flex-col gap-8 lg:flex-row lg:gap-10">
-      <div className="w-full shrink-0 lg:w-56">
-        <div className="space-y-6">
-          <div className="flex flex-col items-center gap-3">
-            <Skeleton className="h-20 w-20 rounded-full" />
-            <Skeleton className="h-5 w-32" />
-            <Skeleton className="h-4 w-24" />
-          </div>
-          <div className="space-y-2">
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-full" />
-          </div>
-        </div>
-      </div>
-      <div className="min-w-0 flex-1 space-y-6">
-        <Skeleton className="h-[96px] w-full rounded-md" />
-        <div className="grid gap-3 sm:grid-cols-3">
-          {[1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-20 rounded-xl" />
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConnectionsPageSkeleton() {
-  return <GitHubConnectionSectionSkeleton />;
-}
 
 const baseSidebarItems = [
   {
@@ -130,18 +89,8 @@ const baseSidebarItems = [
 
 /*
  * Admin-only entries.
- *
- * Users sits next to Admin rather than next to Profile on purpose: Profile is
- * your own account, this is everyone's. Putting them side by side is what led
- * to them being treated as the same page.
  */
 const adminSidebarItems = [
-  {
-    id: "users",
-    label: "Users",
-    href: "/settings/users",
-    icon: Users,
-  },
   {
     id: "agents",
     label: "Agents",
@@ -183,7 +132,6 @@ function SettingsLayout({
   isAdmin: boolean;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const { requestSignOut, dialog: signOutDialog } = useSignOutConfirm();
   const sidebarItems = isAdmin
     ? [...baseSidebarItems, ...adminSidebarItems]
     : baseSidebarItems;
@@ -233,16 +181,6 @@ function SettingsLayout({
             </div>
             {navItems}
           </nav>
-          <div className="border-t border-base-300 px-2 py-3">
-            <button
-              type="button"
-              onClick={() => void requestSignOut()}
-              className="flex w-full items-center gap-3 rounded-md px-4 py-2 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-            >
-              <LogOut className="h-4 w-4" />
-              Sign out
-            </button>
-          </div>
         </div>
       </aside>
 
@@ -267,16 +205,6 @@ function SettingsLayout({
             </div>
             {navItems}
           </nav>
-          <div className="border-t border-base-300 px-2 py-3">
-            <button
-              type="button"
-              onClick={() => void requestSignOut()}
-              className="flex w-full items-center gap-3 rounded-md px-4 py-2 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
-            >
-              <LogOut className="h-4 w-4" />
-              Sign out
-            </button>
-          </div>
         </SheetContent>
       </Sheet>
 
@@ -300,11 +228,6 @@ function SettingsLayout({
           {children}
         </div>
       </main>
-
-      {/* Rendered by the layout rather than beside either button: the mobile
-          sheet closes on the way to the question, and a dialog inside it would
-          go with it. */}
-      {signOutDialog}
     </div>
   );
 }
@@ -312,29 +235,10 @@ function SettingsLayout({
 export default function Layout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { isAdmin } = useSession();
-  const activeItem = baseSidebarItems.find((item) => item.href === pathname);
-  const fallbackTitle = activeItem?.label ?? "Profile";
-  const fallbackContent =
-    activeItem?.id === "connections" ? (
-      <ConnectionsPageSkeleton />
-    ) : activeItem?.id === "preferences" ? (
-      <PreferencesSectionSkeleton />
-    ) : (
-      <ProfilePageSkeleton />
-    );
 
   return (
-    <AuthGuard
-      loadingFallback={
-        <SettingsLayout pathname={pathname} isAdmin={false}>
-          <h1 className="text-2xl font-semibold">{fallbackTitle}</h1>
-          {fallbackContent}
-        </SettingsLayout>
-      }
-    >
-      <SettingsLayout pathname={pathname} isAdmin={isAdmin}>
-        {children}
-      </SettingsLayout>
-    </AuthGuard>
+    <SettingsLayout pathname={pathname} isAdmin={isAdmin}>
+      {children}
+    </SettingsLayout>
   );
 }

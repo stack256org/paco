@@ -2,7 +2,7 @@ import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
-import { AppAccountMenu } from "@/components/app-account-menu";
+import { SettingsLink } from "@/components/settings-link";
 import { getServerSession } from "@/lib/session/get-server-session";
 
 type TasksLayoutProps = {
@@ -12,9 +12,9 @@ type TasksLayoutProps = {
 /**
  * Minimal chrome for `/tasks`, matching `/sessions`'s own bar
  * (`[sessionId]/chats/[chatId]/session-header.tsx`): a way back on the
- * left, the account menu on the right. The task board has no workspace
- * switcher of its own — it is one page, not a set of per-session views —
- * so there is nothing else this bar needs to carry.
+ * left. The task board has no workspace switcher of its own — it is one
+ * page, not a set of per-session views — so there is nothing else this bar
+ * needs to carry.
  */
 export default async function TasksLayout({ children }: TasksLayoutProps) {
   const session = await getServerSession();
@@ -29,7 +29,7 @@ export default async function TasksLayout({ children }: TasksLayoutProps) {
           <ArrowLeft aria-hidden="true" className="size-4" />
           Sessions
         </Link>
-        <AppAccountMenu user={session.user} />
+        <SettingsLink />
       </header>
       <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
     </div>
