@@ -48,11 +48,11 @@ export const domainSchema = z.object({
       // A dot-separated run of labels, each 1-63 chars from [a-z0-9-] and
       // never starting or ending with a hyphen. `[a-z0-9.-]+` alone (the
       // previous rule) accepted `..`, a leading/trailing dot, and a bare
-      // `-` as a "domain" — each of those reaches `previewSlugFromHost`
-      // (`lib/preview/hostname.ts`) as the suffix every incoming preview
-      // host is matched against, so a malformed value here does not just
-      // fail to resolve: it can make that suffix check behave in ways
-      // nobody chose on purpose.
+      // `-` as a "domain" — each of those flows straight into
+      // `previewHostname` (`lib/preview/hostname.ts`) and from there into
+      // generated nginx config text, so a malformed value here does not
+      // just fail to resolve: it can produce a hostname nobody chose on
+      // purpose.
       /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))*$/,
       "Enter a bare domain such as previews.example.com, with no scheme",
     )

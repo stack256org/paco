@@ -82,12 +82,12 @@ describe("domainSchema", () => {
     },
   );
 
-  // `previewSlugFromHost` (`lib/preview/hostname.ts`) matches an incoming
-  // preview host against `.${previewBaseDomain}` as a plain string suffix,
-  // with no further shape check of its own — so a malformed value saved
-  // here is exactly as malformed at every request this suffix check runs
-  // against. `[a-z0-9.-]+` alone (the previous rule) let every one of
-  // these through.
+  // `previewHostname` (`lib/preview/hostname.ts`) joins this value onto a
+  // chat's slug with no further shape check of its own, and the result is
+  // interpolated straight into generated nginx config text — so a
+  // malformed value saved here is exactly as malformed at every preview
+  // hostname built from it. `[a-z0-9.-]+` alone (the previous rule) let
+  // every one of these through.
   test.each([
     "..",
     ".previews.example.com",
