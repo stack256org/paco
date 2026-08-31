@@ -91,6 +91,11 @@ One command, on a fresh Linux host running systemd:
 curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 ```
 
+The instance comes up protected by a password, asked for by the browser with
+the username `paco`. The installer either asks you to choose one or generates
+it and prints it when it finishes. Change it later with `sudo paco password`;
+see [The instance password](docs/self-hosting.md#the-instance-password).
+
 That is the whole install. It brings its own dependencies — you do not install
 Docker, or a database, or a web server, and there is nothing to wire together
 afterwards:

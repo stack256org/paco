@@ -79,6 +79,11 @@ pnpm --dir apps/web db:migrate:apply
 pnpm web
 ```
 
+> **A development checkout has no password.** The instance password is
+> enforced by nginx, which only the `.deb` install sets up — so `pnpm web`
+> serves an unprotected Paco. That is fine on localhost and is the only
+> supported unprotected configuration; do not expose it to a network.
+
 Open <http://localhost:3066> (or <http://localhost:3000> if you left `APP_URL`
 commented out) and sign in with an email address. With `SMTP_HOST` unset the
 link is printed to the terminal running `pnpm web` instead of emailed — copy

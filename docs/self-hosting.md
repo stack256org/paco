@@ -372,9 +372,45 @@ touch, for the same reason.
 | `paco auth claude` | Signs the `paco` user into Claude Code, so the credential lands in `/var/lib/paco/.claude` and survives every upgrade |
 | `paco auth poolside` | Runs `pool login` as the `paco` user, for the Poolside backend (§18). You install `pool` yourself; extra arguments pass through to it |
 | `paco tls <domain>` | A certificate via certbot, DNS-checked first, nginx reloaded after. Optional — and skip it entirely if something in front of this host already terminates TLS (§8) |
+| `paco password` | Rotates the instance password; prompts twice (or reads stdin with `paco password --stdin`) |
 
 There is no `uninstall`; it refuses on purpose and points at `apt remove` /
 `apt purge` (§5).
+
+---
+
+## The instance password
+
+Paco is protected by one password, checked by nginx before a request ever
+reaches the app. The username is always `paco`.
+
+It is set for you at install time. If you install with a terminal, you are
+asked to choose one; if you pipe the installer (`curl ... | sudo sh`), there
+is no terminal to ask on, so a strong password is generated and printed in
+the closing summary. That summary is the only time it is printed — write it
+down.
+
+Change it at any time:
+
+    sudo paco password
+
+Nothing needs restarting. nginx re-reads the password file on every request,
+so the new password works immediately and any browser holding the old one is
+asked again on its next request. That re-prompt is what replaces signing out;
+there is no sign-out button, because there is no session to end.
+
+`paco status` shows whether the instance is still using the password
+generated at install:
+
+    Password:  set (still the one generated at install; change with 'sudo paco password')
+
+Until it is changed, that generated password is also readable at
+`/etc/paco/initial-password`, which is root-only. `paco password` deletes
+that file, so its absence is what "the operator has set their own" means.
+
+**This protection exists only where nginx does** — the `.deb` install. A
+development checkout run with `pnpm web` has no nginx and no password, and
+must not be exposed to a network.
 
 ---
 
