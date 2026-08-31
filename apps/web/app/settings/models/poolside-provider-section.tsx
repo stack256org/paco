@@ -340,9 +340,7 @@ export interface PoolsideProviderSectionProps {
  *
  * Mirrors `SmtpSection` (`app/settings/admin/smtp-section.tsx`) exactly —
  * same load/save/error shape, same "the secret never comes back down"
- * contract for `apiKey` as that section's password field. Rendered only for
- * admins (see `PoolsideAdminSection`), and re-checked server-side by
- * `requireAdmin` in every action regardless of what this component renders.
+ * contract for `apiKey` as that section's password field.
  */
 export function PoolsideProviderSection({
   capabilities,

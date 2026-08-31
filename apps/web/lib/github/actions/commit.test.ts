@@ -48,10 +48,6 @@ mock.module("@/lib/sandbox/utils", () => ({
   isSandboxActive: () => true,
 }));
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => ({ user: { id: "user-1" } }),
-}));
-
 const { commitChanges } = await import("./commit");
 
 describe("commitChanges", () => {

@@ -1,66 +1,29 @@
 "use server";
 
 import { repoDir } from "@paco/sandbox";
-import { isAdmin } from "@/lib/admin/require-admin";
 import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
 import { listEvalRuns } from "@/lib/db/eval-runs";
 import type { EvalRun } from "@/lib/db/schema";
 import { getSessionById, type SessionRecord } from "@/lib/db/sessions";
-import { NOT_YOURS, SIGNED_OUT } from "@/lib/error-copy";
+import { SESSION_NOT_FOUND } from "@/lib/error-copy";
 import {
   discoverEvalScenarios,
   evalScenarioSchema,
   type EvalScenario,
 } from "@/lib/evals/discovery";
 import { runEvalScenario } from "@/lib/evals/runner";
-import { getMemberRole } from "@/lib/org/membership";
 import { getOrganization } from "@/lib/org/organization";
-import { getServerSession } from "@/lib/session/get-server-session";
 
-/**
- * Auth gate every action in this file re-checks: session ownership (the same
- * check every `/sessions/[sessionId]` page makes) plus a place in the
- * organisation, since evals write `evalRuns` rows scoped to the
- * organisation, not just the session's owner.
- *
- * "A place in the organisation" is a membership row OR `users.is_admin`, the
- * same OR `isAdmin` (`lib/admin/require-admin.ts`) applies everywhere else —
- * not a bare `getMemberRole` check. Requiring the row alone locked out the
- * exact population that file's docstring warns about: migration `0005`
- * promotes accounts by flag and makes only the oldest of them an org
- * `owner`, so a flag-only admin could use every settings page in the product
- * except this one.
- *
- * Session ownership is a separate gate and is unaffected — being an admin
- * has never meant being allowed to run evals inside someone else's session,
- * and it still doesn't.
- */
-async function requireEvalAccess(
+/** Looks up the session every action here runs against. */
+async function requireEvalSession(
   sessionId: string,
 ): Promise<{ organizationId: string; session: SessionRecord }> {
-  const authSession = await getServerSession();
-  if (!authSession?.user?.id) {
-    throw new Error(SIGNED_OUT);
-  }
-  const userId = authSession.user.id;
-
   const session = await getSessionById(sessionId);
-  if (!session || session.userId !== userId) {
-    throw new Error(NOT_YOURS);
-  }
-
-  const [role, admin] = await Promise.all([
-    getMemberRole(userId),
-    isAdmin(userId),
-  ]);
-  if (!(role || admin)) {
-    throw new Error(NOT_YOURS);
+  if (!session) {
+    throw new Error(SESSION_NOT_FOUND);
   }
 
   const organization = await getOrganization();
-  if (!organization) {
-    throw new Error("There is no organisation yet.");
-  }
 
   return { organizationId: organization.id, session };
 }
@@ -84,7 +47,7 @@ export type { EvalRun };
 export async function listEvalScenariosAction(
   sessionId: string,
 ): Promise<{ scenarios: EvalScenario[]; errors: string[] }> {
-  const { session } = await requireEvalAccess(sessionId);
+  const { session } = await requireEvalSession(sessionId);
   const sessionRepoDir = sessionRepoDirFor(session);
   if (!sessionRepoDir) {
     return { scenarios: [], errors: [] };
@@ -96,7 +59,7 @@ export async function listEvalScenariosAction(
 export async function listEvalHistoryAction(
   sessionId: string,
 ): Promise<EvalRun[]> {
-  const { organizationId } = await requireEvalAccess(sessionId);
+  const { organizationId } = await requireEvalSession(sessionId);
   return await listEvalRuns(organizationId, sessionId);
 }
 
@@ -113,7 +76,7 @@ export async function runEvalScenarioAction(
   sessionId: string,
   scenario: EvalScenario,
 ): Promise<EvalRun> {
-  const { organizationId } = await requireEvalAccess(sessionId);
+  const { organizationId } = await requireEvalSession(sessionId);
   const parsed = evalScenarioSchema.parse(scenario);
   return await runEvalScenario({
     organizationId,
@@ -127,7 +90,7 @@ export async function runAllEvalScenariosAction(
   sessionId: string,
   scenarios: EvalScenario[],
 ): Promise<EvalRun[]> {
-  const { organizationId } = await requireEvalAccess(sessionId);
+  const { organizationId } = await requireEvalSession(sessionId);
   const results: EvalRun[] = [];
   for (const scenario of scenarios) {
     const parsed = evalScenarioSchema.parse(scenario);

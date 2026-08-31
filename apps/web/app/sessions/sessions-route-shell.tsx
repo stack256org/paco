@@ -14,12 +14,10 @@ import { NewSessionDialog } from "@/components/new-session-dialog";
 import { useBackgroundChatNotifications } from "@/hooks/use-background-chat-notifications";
 import { useSessions, type SessionWithUnread } from "@/hooks/use-sessions";
 import { useUserPreferences } from "@/hooks/use-user-preferences";
-import type { Session as AuthSession } from "@/lib/session/types";
 import { SessionsShellProvider } from "./sessions-shell-context";
 
 type SessionsRouteShellProps = {
   children: ReactNode;
-  currentUser: AuthSession["user"];
   initialSessionsData?: {
     sessions: SessionWithUnread[];
     archivedCount: number;
@@ -29,7 +27,6 @@ type SessionsRouteShellProps = {
 
 export function SessionsRouteShell({
   children,
-  currentUser,
   initialSessionsData,
   lastRepo,
 }: SessionsRouteShellProps) {
@@ -180,7 +177,6 @@ export function SessionsRouteShell({
       archivedCount,
       sessionsLoading,
       activeSessionId,
-      currentUser,
       onSessionSelect: handleSessionClick,
       onSessionPrefetch: handleSessionPrefetch,
       onSessionArchive: (session: SessionWithUnread) =>
@@ -193,7 +189,6 @@ export function SessionsRouteShell({
       archivedCount,
       sessionsLoading,
       activeSessionId,
-      currentUser,
       handleSessionClick,
       handleSessionPrefetch,
       handleArchiveSession,

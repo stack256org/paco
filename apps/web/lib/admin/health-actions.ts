@@ -13,7 +13,6 @@ import {
   SPEND_WINDOW_OPTIONS,
 } from "@/lib/health/spend-window";
 import type { StorageReport } from "@/lib/reaping/types";
-import { requireAdmin } from "./require-admin";
 import { getStorageReport } from "./storage-actions";
 import { withTimeout } from "./with-timeout";
 
@@ -137,13 +136,7 @@ function toSandboxMetric(
 }
 
 /**
- * The one admin-guarded action behind the automatic part of the
- * instance-health page.
- *
- * Uses the combined admin check Phase 2 established
- * (`isUserAdmin(id) || isOrganizationAdmin(id)`, via `requireAdmin`), not a
- * bare `users.is_admin` — that would strand any admin invited through an
- * organisation rather than promoted as the first account.
+ * The action behind the automatic part of the instance-health page.
  *
  * Disk and container measurement (`getInstanceStorageHealth`) used to be
  * gathered here too, in the same `Promise.allSettled`. It does not belong:
@@ -157,8 +150,6 @@ function toSandboxMetric(
  * it (see `use-instance-storage-health.ts`).
  */
 export async function getInstanceHealth(): Promise<InstanceHealth> {
-  await requireAdmin();
-
   const [queue, migrations, spend, docker] = await Promise.allSettled([
     withTimeout(
       readQueueHealth(),
@@ -213,8 +204,6 @@ export async function getInstanceHealth(): Promise<InstanceHealth> {
 const STORAGE_TIMEOUT_MS = 180_000;
 
 export async function getInstanceStorageHealth(): Promise<InstanceStorageHealth> {
-  await requireAdmin();
-
   const [storage] = await Promise.allSettled([
     withTimeout(
       getStorageReport(),
@@ -254,8 +243,6 @@ const spendWindowDaysSchema = z
  * reachable from a browser.
  */
 export async function getSpendReport(windowDays: number): Promise<SpendReport> {
-  await requireAdmin();
-
   const parsed = spendWindowDaysSchema.safeParse(windowDays);
   if (!parsed.success) {
     throw new Error("windowDays must be one of the windows the UI offers.");

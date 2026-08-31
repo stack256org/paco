@@ -1,8 +1,5 @@
 import { connectSandbox, type SandboxState } from "@paco/sandbox";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionWithSandboxGuard,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionWithSandboxGuard } from "@/app/api/sessions/_lib/session-context";
 import { updateSession } from "@/lib/db/sessions";
 import { EXTEND_TIMEOUT_DURATION_MS } from "@/lib/sandbox/config";
 import { kickSandboxLifecycleWorkflow } from "@/lib/sandbox/lifecycle-kick";
@@ -19,13 +16,8 @@ interface ExtendRequest {
 }
 
 export async function POST(req: Request) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["sandbox-extend", authResult.userId]),
+    key: rateLimitKey(["sandbox-extend"]),
     limit: 3,
     windowMs: 60_000,
   });
@@ -47,7 +39,6 @@ export async function POST(req: Request) {
   }
 
   const sessionContext = await requireOwnedSessionWithSandboxGuard({
-    userId: authResult.userId,
     sessionId,
     sandboxGuard: isSandboxActive,
     sandboxErrorMessage: WORKSPACE_NOT_STARTED,

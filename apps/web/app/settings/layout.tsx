@@ -18,7 +18,6 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { useSession } from "@/hooks/use-session";
 import {
   Sheet,
   SheetContent,
@@ -87,10 +86,8 @@ const baseSidebarItems = [
   },
 ];
 
-/*
- * Admin-only entries.
- */
-const adminSidebarItems = [
+const sidebarItems = [
+  ...baseSidebarItems,
   {
     id: "agents",
     label: "Agents",
@@ -104,11 +101,6 @@ const adminSidebarItems = [
     icon: Activity,
   },
   {
-    /*
-     * Admin-only, like Agents and Health above: installing a plugin and
-     * granting it capabilities is an administrative act (`./plugins/actions.ts`
-     * enforces this itself, regardless of what this nav shows).
-     */
     id: "plugins",
     label: "Plugins",
     href: "/settings/plugins",
@@ -125,16 +117,11 @@ const adminSidebarItems = [
 function SettingsLayout({
   children,
   pathname,
-  isAdmin,
 }: {
   children: React.ReactNode;
   pathname: string;
-  isAdmin: boolean;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const sidebarItems = isAdmin
-    ? [...baseSidebarItems, ...adminSidebarItems]
-    : baseSidebarItems;
   const activeItem = sidebarItems.find((item) => item.href === pathname);
 
   const navItems = (
@@ -234,11 +221,6 @@ function SettingsLayout({
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { isAdmin } = useSession();
 
-  return (
-    <SettingsLayout pathname={pathname} isAdmin={isAdmin}>
-      {children}
-    </SettingsLayout>
-  );
+  return <SettingsLayout pathname={pathname}>{children}</SettingsLayout>;
 }

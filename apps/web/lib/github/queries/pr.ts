@@ -13,8 +13,7 @@ import {
   type MergeBlocker,
 } from "@/lib/github/merge-blockers";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
-import { NOT_YOURS, SESSION_NOT_FOUND, SIGNED_OUT } from "@/lib/error-copy";
+import { SESSION_NOT_FOUND } from "@/lib/error-copy";
 
 /**
  * Pull request state for the UI, read through `gh`.
@@ -134,20 +133,12 @@ const GH_UNKNOWN_FAILURE =
   "We couldn't check this pull request with GitHub. Try again in a moment.";
 
 async function resolve(sessionId: string, chatId: string) {
-  const authSession = await getServerSession();
-  if (!authSession?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-
   const sessionRecord = await getSessionById(sessionId);
   if (!sessionRecord) {
     throw new Error(SESSION_NOT_FOUND);
   }
-  if (sessionRecord.userId !== authSession.user.id) {
-    throw new Error(NOT_YOURS);
-  }
 
-  return { authSession, sessionRecord, chatId };
+  return { sessionRecord, chatId };
 }
 
 /** The chat's pull request, falling back to what the session already recorded. */

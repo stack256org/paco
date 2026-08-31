@@ -13,7 +13,6 @@ let probeResult: {
 
 let sessionRecord: {
   id: string;
-  userId: string;
   lifecycleState: "failed" | "active" | "hibernated";
   lifecycleError: string | null;
   sandboxState: {
@@ -27,7 +26,6 @@ let sessionRecord: {
 };
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => ({ ok: true, userId: "user-1" }),
   requireOwnedSession: async () => ({ ok: true, sessionRecord }),
 }));
 
@@ -90,7 +88,6 @@ describe("/api/sandbox/reconnect", () => {
     const now = Date.now();
     sessionRecord = {
       id: "session-1",
-      userId: "user-1",
       lifecycleState: "failed",
       lifecycleError: "snapshot failed",
       sandboxState: {

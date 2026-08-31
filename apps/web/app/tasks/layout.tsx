@@ -1,9 +1,7 @@
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 import { SettingsLink } from "@/components/settings-link";
-import { getServerSession } from "@/lib/session/get-server-session";
 
 type TasksLayoutProps = {
   children: ReactNode;
@@ -16,12 +14,7 @@ type TasksLayoutProps = {
  * page, not a set of per-session views — so there is nothing else this bar
  * needs to carry.
  */
-export default async function TasksLayout({ children }: TasksLayoutProps) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    redirect("/");
-  }
-
+export default function TasksLayout({ children }: TasksLayoutProps) {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-base-100 text-base-content">
       <header className="flex items-center justify-between gap-2 border-b border-base-300 px-3 py-1.5">

@@ -3,32 +3,16 @@ import type { CreatedRepo } from "@/lib/github/gh-repo";
 
 mock.module("server-only", () => ({}));
 
-type AuthSession = { user: { id: string } } | null;
-
-let authSession: AuthSession;
 let storedToken: string | null;
 let sessionRecord: {
-  userId: string;
   sandboxState: { sandboxName: string } | null;
 } | null;
 let createResult: CreatedRepo | Error;
 let createCalls: Array<Record<string, unknown>>;
 let sessionUpdates: Array<Record<string, unknown>>;
 
-// Mocked at the route's own boundary rather than at `get-server-session`,
-// because the auth helper pulls in the whole chat-context module and with it
-// every export of `lib/db/sessions`.
-mock.module("@/app/api/chat/_lib/chat-context", () => ({
-  requireAuthenticatedUser: async () =>
-    authSession
-      ? { ok: true as const, userId: authSession.user.id }
-      : {
-          ok: false as const,
-          response: Response.json(
-            { error: "You've been signed out. Sign in again to continue." },
-            { status: 401 },
-          ),
-        },
+mock.module("@/lib/db/users", () => ({
+  getSoleUserId: async () => "user-1",
 }));
 
 mock.module("@/lib/db/github-tokens", () => ({
@@ -86,22 +70,13 @@ const VALID = {
 
 describe("/api/github/create-repo", () => {
   beforeEach(() => {
-    authSession = { user: { id: "user-1" } };
     storedToken = "ghp_test";
     sessionRecord = {
-      userId: "user-1",
       sandboxState: { sandboxName: "session_1" },
     };
     createResult = REPO;
     createCalls = [];
     sessionUpdates = [];
-  });
-
-  test("returns 401 when unauthenticated", async () => {
-    authSession = null;
-    const { POST } = await routeModulePromise;
-
-    expect((await POST(createRequest(VALID))).status).toBe(401);
   });
 
   test("rejects a body that is not valid JSON", async () => {
@@ -135,11 +110,8 @@ describe("/api/github/create-repo", () => {
     );
   });
 
-  test("refuses to touch a session belonging to someone else", async () => {
-    sessionRecord = {
-      userId: "someone-else",
-      sandboxState: { sandboxName: "session_1" },
-    };
+  test("returns 404 when the session does not exist", async () => {
+    sessionRecord = null;
     const { POST } = await routeModulePromise;
 
     expect((await POST(createRequest(VALID))).status).toBe(404);

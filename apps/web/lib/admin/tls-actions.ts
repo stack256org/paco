@@ -4,7 +4,6 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { runHostCommand } from "@/lib/reaping/run-host-command";
 import { readInstanceSettings } from "@/lib/settings/instance-settings";
-import { requireAdmin } from "./require-admin";
 import { hostnameFromSavedDomain } from "./saved-domain-hostname";
 
 /**
@@ -50,8 +49,6 @@ export type CertificateStatus =
   | { state: "unknown"; hostname: string };
 
 export async function getCertificateStatus(): Promise<CertificateStatus> {
-  await requireAdmin();
-
   const settings = await readInstanceSettings();
   const hostname = hostnameFromSavedDomain(settings.appDomain);
   if (hostname === null) {
@@ -83,8 +80,6 @@ export type RequestCertificateResult =
  * arrives. A generic "couldn't get a certificate" would hide all of them.
  */
 export async function requestCertificate(): Promise<RequestCertificateResult> {
-  await requireAdmin();
-
   const result = await runHostCommand(
     "sudo",
     ["-n", TLS_HOOK],

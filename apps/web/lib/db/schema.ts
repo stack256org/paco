@@ -49,9 +49,9 @@ export const organizations = pgTable("organizations", {
    * `id` has to stay a free-form primary key so membership rows keep
    * pointing at it; this column exists purely so a second `INSERT` has
    * something to collide on. Postgres enforces the "only one organisation"
-   * rule structurally, so `ensureOrganizationWithOwner` no longer has to
-   * win a race against a concurrent caller — it only has to handle losing
-   * one.
+   * rule structurally, so `ensureOrganization` (`lib/org/organization.ts`)
+   * no longer has to win a race against a concurrent caller — it only has
+   * to handle losing one.
    */
   singleton: boolean("singleton").notNull().default(true).unique(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -643,10 +643,8 @@ export const instanceSettings = pgTable("instance_settings", {
    * When the guided first-run flow (account, platform) was finished.
    *
    * Null is the normal state until then, and is what makes the flow
-   * re-entrant: an admin who closes the browser mid-way is sent back to
-   * `/onboarding` on their next visit instead of restarting at account
-   * creation, which is already done and would make
-   * `POST /api/auth/first-run` 409.
+   * re-entrant: closing the browser mid-way leaves this null, so the next
+   * visit is sent back to finish it instead of treating it as done.
    */
   onboardingCompletedAt: timestamp("onboarding_completed_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -1,15 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type OwnedSessionChatResult =
   | {
       ok: true;
@@ -21,23 +11,21 @@ type OwnedSessionChatResult =
       response: Response;
     };
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
 let ownedSessionChatResult: OwnedSessionChatResult = {
   ok: true,
   sessionRecord: { id: "session-1" },
   chat: { id: "chat-1", sessionId: "session-1" },
 };
 
-const markChatReadCalls: Array<{ userId: string; chatId: string }> = [];
+const markChatReadCalls: string[] = [];
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSessionChat: async () => ownedSessionChatResult,
 }));
 
 mock.module("@/lib/db/sessions", () => ({
-  markChatRead: async (input: { userId: string; chatId: string }) => {
-    markChatReadCalls.push(input);
+  markChatRead: async (chatId: string) => {
+    markChatReadCalls.push(chatId);
   },
 }));
 
@@ -51,7 +39,6 @@ function createContext(sessionId = "session-1", chatId = "chat-1") {
 
 describe("/api/sessions/[sessionId]/chats/[chatId]/read", () => {
   beforeEach(() => {
-    authResult = { ok: true, userId: "user-1" };
     ownedSessionChatResult = {
       ok: true,
       sessionRecord: { id: "session-1" },
@@ -60,28 +47,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/read", () => {
     markChatReadCalls.length = 0;
   });
 
-  test("returns auth error from guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(
-      new Request("http://localhost/api/sessions/session-1/chats/chat-1/read", {
-        method: "POST",
-      }),
-      createContext(),
-    );
-
-    expect(response.status).toBe(401);
-    expect(markChatReadCalls).toHaveLength(0);
-  });
-
-  test("returns ownership error from guard", async () => {
+  test("returns not-found error from guard", async () => {
     ownedSessionChatResult = {
       ok: false,
       response: Response.json(
@@ -102,7 +68,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/read", () => {
     expect(markChatReadCalls).toHaveLength(0);
   });
 
-  test("marks chat as read when auth and ownership checks pass", async () => {
+  test("marks chat as read when the ownership check passes", async () => {
     const { POST } = await routeModulePromise;
 
     const response = await POST(
@@ -115,6 +81,6 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/read", () => {
 
     expect(response.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(markChatReadCalls).toEqual([{ userId: "user-1", chatId: "chat-1" }]);
+    expect(markChatReadCalls).toEqual(["chat-1"]);
   });
 });

@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import { createContext, useContext } from "react";
 
 import type { SessionWithUnread } from "@/hooks/use-sessions";
-import type { Session as AuthSession } from "@/lib/session/types";
 
 /**
  * What the session shell knows and the top bar needs.
@@ -20,7 +19,6 @@ type SessionsShellContextValue = {
   archivedCount: number;
   sessionsLoading: boolean;
   activeSessionId: string;
-  currentUser?: AuthSession["user"];
   onSessionSelect: (session: SessionWithUnread) => void;
   onSessionPrefetch: (session: SessionWithUnread) => void;
   onSessionArchive: (session: SessionWithUnread) => void;

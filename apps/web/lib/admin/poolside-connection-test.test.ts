@@ -29,10 +29,6 @@ let readSettingsResult: {
 };
 let probeCalls = 0;
 
-mock.module("@/lib/admin/require-admin", () => ({
-  requireAdmin: () => Promise.resolve(),
-}));
-
 // The whole module is replaced, so every export the action imports must be
 // present — omitting one fails at import time, not at the assertion.
 mock.module("@/lib/settings/instance-settings", () => ({

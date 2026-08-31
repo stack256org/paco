@@ -52,17 +52,6 @@ const execCalls: Array<{ command: string; cwd: string; timeoutMs: number }> =
 
 let sessionRecord: TestSessionRecord;
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => ({
-    user: {
-      id: "user-1",
-      username: "nico",
-      name: "Nico",
-      email: "nico@example.com",
-    },
-  }),
-}));
-
 mock.module("@/lib/db/github-tokens", () => ({
   getGithubToken: async () => "ghp_test",
 }));

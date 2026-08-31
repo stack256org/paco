@@ -64,7 +64,6 @@ import {
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
-import type { Session as AuthSession } from "@/lib/session/types";
 import type {
   WorkflowRunStatus,
   WorkflowRunStepTiming,
@@ -73,15 +72,12 @@ import { resolveChatModelSelection } from "../api/chat/_lib/model-selection";
 import { resolveChatSandboxRuntime } from "./chat-sandbox-runtime";
 import { takeChatCheckpoint } from "./chat-checkpoint";
 
-type AuthSessionContext = Pick<AuthSession, "user"> | null;
-
 type Options = {
   messages: WebAgentUIMessage[];
   chatId: string;
   sessionId: string;
   userId: string;
   requestUrl: string;
-  authSession: AuthSessionContext;
   selectedModelId?: string;
   modelId?: string;
   agentOptions?: Omit<AgentCallOptions, "sandbox" | "skills">;
@@ -145,7 +141,6 @@ async function resolveChatModelRuntime(params: {
   sessionId: string;
   chatId: string;
   requestUrl: string;
-  authSession: AuthSessionContext;
 }): Promise<ChatModelRuntime> {
   "use step";
 
@@ -460,7 +455,6 @@ export async function runAgentWorkflow(options: Options) {
     sessionId: options.sessionId,
     chatId: options.chatId,
     requestUrl: options.requestUrl,
-    authSession: options.authSession,
   });
   const runtimePromise = resolveChatSandboxRuntime({
     userId: options.userId,

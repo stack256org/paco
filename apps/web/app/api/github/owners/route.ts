@@ -1,5 +1,5 @@
-import { requireAuthenticatedUser } from "@/app/api/chat/_lib/chat-context";
 import { getGithubToken } from "@/lib/db/github-tokens";
+import { getSoleUserId } from "@/lib/db/users";
 import { GhError, isGhMissing } from "@/lib/github/gh";
 import { listOwners } from "@/lib/github/gh-repo";
 import { GITHUB_NOT_CONNECTED } from "@/lib/error-copy";
@@ -13,12 +13,7 @@ import { GITHUB_NOT_CONNECTED } from "@/lib/error-copy";
  * before anything could be done, which is the friction this migration removes.
  */
 export async function GET() {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
-  const token = await getGithubToken(auth.userId);
+  const token = await getGithubToken(await getSoleUserId());
   if (!token) {
     return Response.json(
       { error: GITHUB_NOT_CONNECTED, owners: [] },

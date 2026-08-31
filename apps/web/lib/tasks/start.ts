@@ -197,7 +197,6 @@ export async function startTask(
         },
       ],
       requestUrl: "internal://tasks/start",
-      authSession: null,
       sessionStatus: session.status,
       activeStreamId: chat.activeStreamId ?? null,
       maxSteps: opts?.maxTurns ?? TASK_DEFAULT_MAX_TURNS,

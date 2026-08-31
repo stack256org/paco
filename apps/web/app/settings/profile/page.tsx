@@ -7,7 +7,6 @@ import type { DateRange } from "@/lib/usage/types";
 import { ContributionChart } from "@/components/contribution-chart";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useSession } from "@/hooks/use-session";
 import { estimateModelUsageCost, type AvailableModel } from "@/lib/models";
 import { fetcher } from "@/lib/swr";
 import { formatDateOnly } from "@/lib/usage/date-range";
@@ -333,54 +332,10 @@ function ProfileSidebar({
   topRepos: UsageRepositoryInsight[] | null;
   estimatedCostValue: string;
 }) {
-  const { session, loading } = useSession();
-
-  if (loading) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center gap-3">
-          <Skeleton className="h-14 w-14 shrink-0 rounded-full" />
-          <div className="space-y-1.5">
-            <Skeleton className="h-5 w-28" />
-            <Skeleton className="h-4 w-20" />
-          </div>
-        </div>
-        <div className="space-y-2">
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className="h-4 w-full" />
-        </div>
-      </div>
-    );
-  }
-
-  if (!session?.user) return null;
-
   const totalTokens = totals ? totals.inputTokens + totals.outputTokens : 0;
 
   return (
     <div className="space-y-5">
-      {/* Name — left-aligned */}
-      <div className="flex items-center gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-base font-semibold leading-tight">
-            {session.user.name ?? session.user.username}
-          </p>
-          <p className="truncate text-sm text-base-content/60">
-            @{session.user.username}
-          </p>
-        </div>
-      </div>
-
-      {/* Email */}
-      <div className="space-y-1">
-        {session.user.email && (
-          <p className="truncate text-sm text-base-content/60">
-            {session.user.email}
-          </p>
-        )}
-      </div>
-
       {/* Stats */}
       {totals && (
         <div className="space-y-3">

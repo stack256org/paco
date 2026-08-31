@@ -14,12 +14,9 @@ import {
 } from "@/lib/github/gh-pr";
 import { generatePullRequestContentFromSandbox } from "@/lib/github/pr-content";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import {
-  NOT_YOURS,
   SESSION_NOT_FOUND,
   GITHUB_NOT_CONNECTED,
-  SIGNED_OUT,
   WORKSPACE_NOT_STARTED,
 } from "@/lib/error-copy";
 
@@ -63,7 +60,6 @@ export type OpenPullRequestResult = {
 };
 
 type ChatContext = {
-  userId: string;
   token: string;
   sessionId: string;
   cwd: string;
@@ -82,17 +78,9 @@ async function resolveChat(params: {
   sessionId: string;
   chatId: string;
 }): Promise<ChatContext> {
-  const authSession = await getServerSession();
-  if (!authSession?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-
   const sessionRecord = await getSessionById(params.sessionId);
   if (!sessionRecord) {
     throw new Error(SESSION_NOT_FOUND);
-  }
-  if (sessionRecord.userId !== authSession.user.id) {
-    throw new Error(NOT_YOURS);
   }
   if (!isSandboxActive(sessionRecord.sandboxState)) {
     throw new Error(WORKSPACE_NOT_STARTED);
@@ -103,13 +91,12 @@ async function resolveChat(params: {
     );
   }
 
-  const token = await getGithubToken(authSession.user.id);
+  const token = await getGithubToken(sessionRecord.userId);
   if (!token) {
     throw new Error(GITHUB_NOT_CONNECTED);
   }
 
   return {
-    userId: authSession.user.id,
     token,
     sessionId: params.sessionId,
     // `gh` reads the repository from its working directory, and only the
@@ -138,13 +125,8 @@ export async function generatePrContent(params: {
   sessionTitle: string;
   baseBranch: string;
 }): Promise<GeneratePrContentResult> {
-  const authSession = await getServerSession();
-  if (!authSession?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-
   const sessionRecord = await getSessionById(params.sessionId);
-  if (!sessionRecord || sessionRecord.userId !== authSession.user.id) {
+  if (!sessionRecord) {
     throw new Error(SESSION_NOT_FOUND);
   }
   if (!isSandboxActive(sessionRecord.sandboxState)) {

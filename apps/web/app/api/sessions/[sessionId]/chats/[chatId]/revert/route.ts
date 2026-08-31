@@ -1,9 +1,6 @@
 import { connectSandbox } from "@paco/sandbox";
 import { z } from "zod";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionChat,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionChat } from "@/app/api/sessions/_lib/session-context";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById } from "@/lib/db/sessions";
 import { restoreCheckpoint } from "@/lib/git/checkpoint";
@@ -50,15 +47,9 @@ const bodySchema = z.object({
  * so none of this ever put a commit on the operator's branch.
  */
 export async function POST(request: Request, context: RouteContext) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: auth.userId,
     sessionId,
     chatId,
   });

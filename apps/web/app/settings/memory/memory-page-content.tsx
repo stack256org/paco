@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useSession } from "@/hooks/use-session";
+import { useCallback, useEffect, useState } from "react";
 import type { MemoryEntry } from "@/lib/memory/store";
 import { promoteMemoryAction } from "@/lib/memory/promote";
 import { toast } from "@/lib/toast";
@@ -21,13 +20,9 @@ import { MemorySection } from "./memory-section";
  * A client component fetching its own data — same shape as
  * `AgentsPageContent` — so the user section, the org section, and every
  * mutation can update this component's own state without a full page
- * reload. `isAdmin` only decides whether the org section is *fetched and
- * rendered* here; the real gate is server-side, in `listOrgMemory` /
- * `editOrgMemory` / `deleteOrgMemory` (`requireAdmin`, see `actions.ts`).
+ * reload.
  */
 export function MemoryPageContent() {
-  const { isAdmin } = useSession();
-
   const [userEntries, setUserEntries] = useState<MemoryEntry[] | null>(null);
   const [userLoadError, setUserLoadError] = useState(false);
   const [orgEntries, setOrgEntries] = useState<MemoryEntry[] | null>(null);
@@ -35,8 +30,6 @@ export function MemoryPageContent() {
 
   const [deletingSlug, setDeletingSlug] = useState<string | null>(null);
   const [promotingSlug, setPromotingSlug] = useState<string | null>(null);
-
-  const requestIdRef = useRef(0);
 
   const loadUserMemory = useCallback(async () => {
     setUserLoadError(false);
@@ -59,14 +52,9 @@ export function MemoryPageContent() {
   }, []);
 
   useEffect(() => {
-    const requestId = ++requestIdRef.current;
     void loadUserMemory();
-    if (isAdmin) {
-      void loadOrgMemory();
-    } else if (requestIdRef.current === requestId) {
-      setOrgEntries(null);
-    }
-  }, [isAdmin, loadUserMemory, loadOrgMemory]);
+    void loadOrgMemory();
+  }, [loadUserMemory, loadOrgMemory]);
 
   async function handleSaveUser(slug: string, body: string): Promise<boolean> {
     const result = await editUserMemory(slug, body);
@@ -149,13 +137,9 @@ export function MemoryPageContent() {
       });
       if (!result.ok) {
         toast.error(result.error);
-      } else if (result.promoted) {
-        toast.success("Promoted to org memory.");
-        if (isAdmin) {
-          void loadOrgMemory();
-        }
       } else {
-        toast.success("Proposal sent for an admin to review.");
+        toast.success("Promoted to org memory.");
+        void loadOrgMemory();
       }
     } catch {
       toast.error("That proposal couldn't be sent.");
@@ -198,19 +182,17 @@ export function MemoryPageContent() {
         title="Your memory"
       />
 
-      {isAdmin ? (
-        <MemorySection
-          deletingSlug={deletingSlug}
-          description="Shared across the whole organisation. Only reaches here by explicit promotion — never written automatically."
-          emptyMessage="No organisation memory yet."
-          entries={orgEntries}
-          loadError={orgLoadError}
-          onDelete={(slug) => void handleDeleteOrg(slug)}
-          onRetry={() => void loadOrgMemory()}
-          onSave={handleSaveOrg}
-          title="Organisation memory"
-        />
-      ) : null}
+      <MemorySection
+        deletingSlug={deletingSlug}
+        description="Shared across the whole organisation. Only reaches here by explicit promotion — never written automatically."
+        emptyMessage="No organisation memory yet."
+        entries={orgEntries}
+        loadError={orgLoadError}
+        onDelete={(slug) => void handleDeleteOrg(slug)}
+        onRetry={() => void loadOrgMemory()}
+        onSave={handleSaveOrg}
+        title="Organisation memory"
+      />
     </div>
   );
 }

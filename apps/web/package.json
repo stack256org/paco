@@ -34,7 +34,6 @@
     "@workflow/ai": "4.2.0",
     "@workflow/world-postgres": "4.3.3",
     "ai": "catalog:",
-    "better-auth": "^1.6.25",
     "clsx": "^2.1.1",
     "cron-parser": "^5.7.0",
     "dotenv": "^17.4.2",

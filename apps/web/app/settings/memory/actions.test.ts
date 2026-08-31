@@ -3,37 +3,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// `requireAdmin` (via `lib/admin/require-admin.ts`) and `getOrganization`
-// (via `lib/org/organization.ts`) both import "server-only" — mocked away
-// the same way `settings/agents/actions.test.ts` does it.
+// `getOrganization` (via `lib/org/organization.ts`) imports "server-only" —
+// mocked away the same way `settings/agents/actions.test.ts` does it.
 mock.module("server-only", () => ({}));
 
-let currentUserId: string | null = "user-a";
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: () =>
-    Promise.resolve(
-      currentUserId ? { user: { id: currentUserId }, created: 0 } : undefined,
-    ),
+mock.module("@/lib/db/users", () => ({
+  getSoleUserId: () => Promise.resolve("user-a"),
 }));
 
-let adminOk = true;
-mock.module("@/lib/admin/require-admin", () => ({
-  requireAdmin: () => {
-    if (!adminOk) {
-      return Promise.reject(new Error("Not an administrator"));
-    }
-    return Promise.resolve("admin-1");
-  },
-  // `actions.ts` never calls `isAdmin` directly, but `mock.module` replaces
-  // this specifier for the whole test run, not just this file —
-  // `lib/memory/promote.test.ts` also mocks it (for its own `isAdmin`
-  // check) with a factory that has no `requireAdmin`. Exporting both here
-  // keeps whichever mock happens to load first from breaking the other
-  // file's static import of the export it actually needs.
-  isAdmin: () => Promise.resolve(adminOk),
-}));
-
-let organization: { id: string } | null = { id: "org-1" };
+let organization: { id: string } = { id: "org-1" };
 mock.module("@/lib/org/organization", () => ({
   getOrganization: () => Promise.resolve(organization),
 }));
@@ -60,8 +38,6 @@ beforeEach(async () => {
   originalPacoHome = process.env.PACO_HOME;
   process.env.PACO_HOME = dataDir;
 
-  currentUserId = "user-a";
-  adminOk = true;
   organization = { id: "org-1" };
 });
 
@@ -74,33 +50,21 @@ afterEach(async () => {
   await fs.rm(dataDir, { recursive: true, force: true });
 });
 
-describe("listUserMemory: scope isolation", () => {
-  test("lists only the caller's own entries, never another user's", async () => {
+describe("listUserMemory", () => {
+  test("lists this instance's user-scope entries", async () => {
     await writeMemory(userMemoryDir("user-a"), {
       title: "A's note",
       body: "a",
       source: "manual",
     });
-    await writeMemory(userMemoryDir("user-b"), {
-      title: "B's note",
-      body: "b",
-      source: "manual",
-    });
 
-    currentUserId = "user-a";
     const entries = await listUserMemory();
 
     expect(entries.map((entry) => entry.title)).toEqual(["A's note"]);
   });
-
-  test("throws for a signed-out caller rather than returning an empty list", async () => {
-    currentUserId = null;
-
-    await expect(listUserMemory()).rejects.toThrow();
-  });
 });
 
-describe("editUserMemory: isolation and the manual-on-edit rule", () => {
+describe("editUserMemory: the manual-on-edit rule", () => {
   test("sets source to 'manual' and updates the body, keeping the title", async () => {
     const { slug } = await writeMemory(userMemoryDir("user-a"), {
       title: "Editor preference",
@@ -117,39 +81,15 @@ describe("editUserMemory: isolation and the manual-on-edit rule", () => {
     expect(entry?.title).toBe("Editor preference");
   });
 
-  test("user A editing a slug that only exists for user B fails, and B's entry is untouched", async () => {
-    const { slug } = await writeMemory(userMemoryDir("user-b"), {
-      title: "B's note",
-      body: "original",
-      source: "manual",
-    });
-
-    currentUserId = "user-a";
-    const result = await editUserMemory(slug, "tampered");
+  test("editing a slug that does not exist fails", async () => {
+    const result = await editUserMemory("does-not-exist", "tampered");
 
     expect(result.success).toBe(false);
-    const [entry] = await listMemory(userMemoryDir("user-b"));
-    expect(entry?.body).toBe("original");
   });
 });
 
-describe("deleteUserMemory: scope isolation", () => {
-  test("user A cannot delete user B's entry: the path always derives from the session", async () => {
-    const { slug } = await writeMemory(userMemoryDir("user-b"), {
-      title: "B's note",
-      body: "b",
-      source: "manual",
-    });
-
-    currentUserId = "user-a";
-    const result = await deleteUserMemory(slug);
-
-    expect(result.success).toBe(false);
-    const stillThere = await listMemory(userMemoryDir("user-b"));
-    expect(stillThere).toHaveLength(1);
-  });
-
-  test("deletes the caller's own entry", async () => {
+describe("deleteUserMemory", () => {
+  test("deletes the entry", async () => {
     const { slug } = await writeMemory(userMemoryDir("user-a"), {
       title: "A's note",
       body: "a",
@@ -163,16 +103,8 @@ describe("deleteUserMemory: scope isolation", () => {
   });
 });
 
-describe("org memory: admin gate", () => {
-  test("a non-admin is rejected, not handed a field error", async () => {
-    adminOk = false;
-
-    await expect(listOrgMemory()).rejects.toThrow();
-    await expect(editOrgMemory("some-slug", "body")).rejects.toThrow();
-    await expect(deleteOrgMemory("some-slug")).rejects.toThrow();
-  });
-
-  test("an admin can list the organisation's shared memory", async () => {
+describe("org memory", () => {
+  test("lists the organisation's shared memory", async () => {
     await writeMemory(orgMemoryDir("org-1"), {
       title: "Org convention",
       body: "Deploy from main.",
@@ -184,7 +116,7 @@ describe("org memory: admin gate", () => {
     expect(entries.map((entry) => entry.title)).toEqual(["Org convention"]);
   });
 
-  test("an admin's edit sets source to 'manual'", async () => {
+  test("an edit sets source to 'manual'", async () => {
     const { slug } = await writeMemory(orgMemoryDir("org-1"), {
       title: "Org convention",
       body: "Deploy from main.",
@@ -199,7 +131,7 @@ describe("org memory: admin gate", () => {
     expect(entry?.body).toBe("Deploy from release/*.");
   });
 
-  test("an admin can delete an org entry", async () => {
+  test("deletes an org entry", async () => {
     const { slug } = await writeMemory(orgMemoryDir("org-1"), {
       title: "Org convention",
       body: "Deploy from main.",
@@ -278,7 +210,7 @@ describe("write-path input validation", () => {
     expect(result.success).toBe(false);
   });
 
-  test("editOrgMemory and deleteOrgMemory validate the same way, after the admin gate", async () => {
+  test("editOrgMemory and deleteOrgMemory validate the same way", async () => {
     await expect(
       editOrgMemory("../../../etc/passwd", "anything"),
     ).resolves.toMatchObject({ success: false });
@@ -298,12 +230,5 @@ describe("write-path input validation", () => {
     expect(tooLong.success).toBe(false);
     const [entry] = await listMemory(orgMemoryDir("org-1"));
     expect(entry?.body).toBe("Deploy from main.");
-  });
-
-  test("the admin gate still runs before validation: a non-admin gets rejected, not a field error", async () => {
-    adminOk = false;
-
-    await expect(editOrgMemory("../nope", "body")).rejects.toThrow();
-    await expect(deleteOrgMemory("../nope")).rejects.toThrow();
   });
 });

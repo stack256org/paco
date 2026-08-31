@@ -30,13 +30,6 @@ interface TestChatRecord {
 
 let sessionRecord: TestSessionRecord | null;
 let chatRecord: TestChatRecord | null;
-let currentAuthSession: {
-  user: {
-    id: string;
-    email?: string;
-  };
-} | null;
-let existingUserMessageCount = 0;
 let existingChatMessage: { id: string } | null = null;
 let existingScopedChatMessage: { id: string } | null = null;
 let isSandboxActive = true;
@@ -183,7 +176,6 @@ mock.module("@paco/sandbox", () => ({
 mock.module("@/lib/db/sessions", () => ({
   claimChatActiveStreamId: claimChatActiveStreamIdSpy,
   compareAndSetChatActiveStreamId: compareAndSetChatActiveStreamIdSpy,
-  countUserMessagesByUserId: async () => existingUserMessageCount,
   createChatMessageIfNotExists: createChatMessageIfNotExistsSpy,
   getChatById: async () => chatRecord,
   getChatMessageById: async () => existingChatMessage,
@@ -226,10 +218,6 @@ mock.module("@/lib/sandbox/lifecycle", () => ({
 
 mock.module("@/lib/sandbox/utils", () => ({
   isSandboxActive: () => isSandboxActive,
-}));
-
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentAuthSession,
 }));
 
 const routeModulePromise = import("./route");
@@ -314,7 +302,6 @@ describe("/api/chat route", () => {
     routeEvents = [];
     cachedSkillsState = null;
     discoverSkillDirsCalls = [];
-    existingUserMessageCount = 0;
     existingChatMessage = null;
     existingScopedChatMessage = null;
     appendSessionEventsStrictShouldThrow = false;
@@ -330,11 +317,6 @@ describe("/api/chat route", () => {
     isFirstChatMessageSpy.mockClear();
     updateChatSpy.mockClear();
     appendSessionEventsStrictSpy.mockClear();
-    currentAuthSession = {
-      user: {
-        id: "user-1",
-      },
-    };
 
     sessionRecord = {
       id: "session-1",
@@ -414,7 +396,6 @@ describe("/api/chat route", () => {
         assistantId: "gen-id-1",
         maxSteps: 500,
         requestUrl: "http://localhost/api/chat",
-        authSession: currentAuthSession,
       }),
     ]);
   });
@@ -513,18 +494,6 @@ describe("/api/chat route", () => {
     ]);
   });
 
-  test("returns 401 when not authenticated", async () => {
-    currentAuthSession = null;
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(createValidRequest());
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({
-      error: "You've been signed out. Sign in again to continue.",
-    });
-  });
-
   test("returns 400 for invalid JSON body", async () => {
     const { POST } = await routeModulePromise;
 
@@ -570,23 +539,6 @@ describe("/api/chat route", () => {
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({
       error: "We couldn't find that session. It may have been deleted.",
-    });
-  });
-
-  test("returns 403 when session is not owned by user", async () => {
-    if (!sessionRecord) {
-      throw new Error("sessionRecord must be set");
-    }
-    sessionRecord.userId = "user-2";
-
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(createValidRequest());
-
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({
-      error:
-        "This isn't yours to open. Check you're signed in to the right account.",
     });
   });
 

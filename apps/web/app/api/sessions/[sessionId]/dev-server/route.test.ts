@@ -120,10 +120,6 @@ function seedDefaultWorkspace() {
   setMockFile("/workspace/bun.lock", "");
 }
 
-const requireAuthenticatedUserMock = mock(async () => ({
-  ok: true as const,
-  userId: "user-1",
-}));
 const requireOwnedSessionWithSandboxGuardMock = mock(async () => ({
   ok: true as const,
   sessionRecord: currentSessionRecord,
@@ -342,7 +338,6 @@ mock.module("@/lib/agent/workspace-paths", () => ({
 }));
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: requireAuthenticatedUserMock,
   requireOwnedSessionWithSandboxGuard: requireOwnedSessionWithSandboxGuardMock,
 }));
 
@@ -369,7 +364,6 @@ describe("/api/sessions/[sessionId]/dev-server", () => {
     lastLaunchCommand = null;
     lastLaunchCwd = null;
     currentSessionRecord.sandboxState.expiresAt = Date.now() + 60_000;
-    requireAuthenticatedUserMock.mockClear();
     requireOwnedSessionWithSandboxGuardMock.mockClear();
     connectSandboxMock.mockClear();
     execMock.mockClear();

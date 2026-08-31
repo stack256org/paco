@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appHost, appUrl } from "./app-url";
+import { appUrl } from "./app-url";
 
 const originalUrl = process.env.APP_URL;
 const originalPort = process.env.PORT;
@@ -18,7 +18,6 @@ describe("appUrl", () => {
   test("uses APP_URL when set", () => {
     process.env.APP_URL = "https://paco.example.com";
     expect(appUrl().origin).toBe("https://paco.example.com");
-    expect(appHost()).toBe("paco.example.com");
   });
 
   test("falls back to localhost on the default port", () => {

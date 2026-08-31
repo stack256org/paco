@@ -6,14 +6,8 @@ import { getGithubToken } from "@/lib/db/github-tokens";
 import { getSessionById } from "@/lib/db/sessions";
 import { GhError, git } from "@/lib/github/gh";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { shellQuote } from "@/lib/shell/quote";
-import {
-  NOT_YOURS,
-  SESSION_NOT_FOUND,
-  SIGNED_OUT,
-  WORKSPACE_NOT_STARTED,
-} from "@/lib/error-copy";
+import { SESSION_NOT_FOUND, WORKSPACE_NOT_STARTED } from "@/lib/error-copy";
 
 /**
  * Commit and push a chat's changes.
@@ -54,17 +48,9 @@ export async function commitChanges(params: {
   commitTitle?: string;
   commitBody?: string;
 }): Promise<CommitResult> {
-  const authSession = await getServerSession();
-  if (!authSession?.user) {
-    return failure(SIGNED_OUT);
-  }
-
   const sessionRecord = await getSessionById(params.sessionId);
   if (!sessionRecord) {
     return failure(SESSION_NOT_FOUND);
-  }
-  if (sessionRecord.userId !== authSession.user.id) {
-    return failure(NOT_YOURS);
   }
   if (!isSandboxActive(sessionRecord.sandboxState)) {
     return failure(WORKSPACE_NOT_STARTED);
@@ -119,7 +105,7 @@ export async function commitChanges(params: {
     };
   }
 
-  const token = await getGithubToken(authSession.user.id);
+  const token = await getGithubToken(sessionRecord.userId);
   if (!token) {
     return {
       committed: true,

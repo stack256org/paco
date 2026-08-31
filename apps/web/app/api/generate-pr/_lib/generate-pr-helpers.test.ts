@@ -22,14 +22,12 @@ describe("generate-pr helpers", () => {
     messagesByChatId = {};
   });
 
-  test("generateBranchName uses initials and 8-char random suffix", async () => {
+  test("generateBranchName uses the nb/ prefix and an 8-char random suffix", async () => {
     const { generateBranchName } = await helpersModulePromise;
 
-    const fromName = generateBranchName("octocat", "Alice Bob");
-    const fromUsername = generateBranchName("xyUser", null);
+    const name = generateBranchName();
 
-    expect(fromName).toMatch(/^ab\/[a-f0-9]{8}$/);
-    expect(fromUsername).toMatch(/^xy\/[a-f0-9]{8}$/);
+    expect(name).toMatch(/^nb\/[a-f0-9]{8}$/);
   });
 
   test("looksLikeCommitHash detects commit-looking strings", async () => {

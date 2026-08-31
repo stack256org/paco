@@ -2,8 +2,7 @@ import { generateText } from "@/lib/claude/generate";
 
 import { z } from "zod";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
-import { getServerSession } from "@/lib/session/get-server-session";
-import { BAD_REQUEST, SIGNED_OUT } from "@/lib/error-copy";
+import { BAD_REQUEST } from "@/lib/error-copy";
 
 /**
  * Generates a short, descriptive session title from a user message using AI.
@@ -41,13 +40,8 @@ const generateTitleRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["generate-title", session.user.id]),
+    key: rateLimitKey(["generate-title"]),
     limit: 10,
     windowMs: 60_000,
   });

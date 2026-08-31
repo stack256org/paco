@@ -9,7 +9,6 @@ import {
   savePoolsideSettings,
 } from "@/lib/settings/instance-settings";
 import { domainSchema, poolsideSchema } from "./instance-settings-schemas";
-import { requireAdmin } from "./require-admin";
 
 /**
  * The settings an administrator can change about this installation.
@@ -19,7 +18,6 @@ import { requireAdmin } from "./require-admin";
  * screen an over-broad response would leak a credential from.
  */
 export async function getInstanceSettings() {
-  await requireAdmin();
   const settings = await readInstanceSettings();
 
   return {
@@ -38,8 +36,6 @@ export async function getInstanceSettings() {
 export async function updateAppDomain(
   input: z.infer<typeof domainSchema>,
 ): Promise<{ success: boolean; error?: string }> {
-  await requireAdmin();
-
   const parsed = domainSchema.safeParse(input);
   if (!parsed.success) {
     return {
@@ -55,8 +51,6 @@ export async function updateAppDomain(
 export async function updatePoolsideSettings(
   input: z.infer<typeof poolsideSchema>,
 ): Promise<{ success: boolean; error?: string }> {
-  await requireAdmin();
-
   const parsed = poolsideSchema.safeParse(input);
   if (!parsed.success) {
     return {
@@ -107,8 +101,6 @@ export async function testPoolsideConnection(): Promise<{
   /** The endpoint the binary resolved, when it reported one. */
   serviceMode?: string;
 }> {
-  await requireAdmin();
-
   const settings = await readInstanceSettings();
   /*
    * No "configure something first" guard.
@@ -184,15 +176,12 @@ export async function testPoolsideConnection(): Promise<{
 }
 
 /**
- * Mark the guided first-run flow finished, so `/onboarding` stops offering
- * itself to this admin.
+ * Mark the guided first-run flow finished.
  *
- * Called once, from the "Done" step — but idempotent, since nothing stops an
- * admin from getting back there (a bookmark, a back button) after they
- * already have.
+ * Called once, from the "Done" step — but idempotent, since nothing stops
+ * getting back there (a bookmark, a back button) after it's already done.
  */
 export async function completeOnboarding(): Promise<{ success: boolean }> {
-  await requireAdmin();
   await markOnboardingComplete();
   return { success: true };
 }

@@ -60,15 +60,3 @@ export function appUrl(): URL {
 
   return url;
 }
-
-/**
- * The origin's `host:port`, as better-auth matches trusted origins.
- *
- * `URL.host` keeps an explicit port and omits the default one for the scheme,
- * which is what a browser sends in the `Host` header — so `https://paco.example`
- * matches a request to that host, and a URL naming an explicit port only
- * matches that port.
- */
-export function appHost(): string {
-  return appUrl().host;
-}

@@ -1,9 +1,6 @@
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { connectSandbox } from "@paco/sandbox";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionWithSandboxGuard,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionWithSandboxGuard } from "@/app/api/sessions/_lib/session-context";
 import {
   createDownloadDiff,
   DownloadDiffError,
@@ -30,15 +27,9 @@ function contentDispositionFilename(filename: string): string {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
 
   const sessionContext = await requireOwnedSessionWithSandboxGuard({
-    userId: authResult.userId,
     sessionId,
     sandboxGuard: hasRuntimeSandboxState,
     sandboxErrorMessage: WORKSPACE_NOT_STARTED,

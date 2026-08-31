@@ -5,14 +5,10 @@ import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import {
   CHAT_NOT_FOUND,
-  NOT_YOURS,
   SESSION_NOT_FOUND,
-  SIGNED_OUT,
   WORKSPACE_NOT_STARTED,
 } from "@/lib/error-copy";
-import { getMemberRole } from "@/lib/org/membership";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { shellQuote } from "@/lib/shell/quote";
 import { parsePorcelainZ, pathsToTouch } from "./porcelain-status";
 import {
@@ -69,25 +65,16 @@ type Access = {
 };
 
 /**
- * Signed in, owns the session, the chat belongs to it, and they are in the
- * organisation.
+ * The chat exists, its session exists, and the sandbox is up.
  *
- * The same four questions `requireDesignAccess` asks, for the same reason: a
- * chat has no owner column of its own, so ownership is the session it belongs
- * to, and these actions run git against a shared workspace on an
- * organisation's behalf rather than on the session owner's private say-so.
- *
- * Throws rather than returning a result. Every caller below converts it into
- * the `{ success: false, error }` the panel renders, so the copy the operator
- * reads is the copy in `error-copy.ts` and nothing leaks past it.
+ * A chat has no owner column of its own, so its session is looked up via it
+ * rather than trusted from an argument. Throws rather than returning a
+ * result. Every caller below converts it into the `{ success: false, error
+ * }` the panel renders, so the copy the operator reads is the copy in
+ * `error-copy.ts` and nothing leaks past it.
  */
 async function requireSourceControlAccess(rawChatId: string): Promise<Access> {
   const chatId = chatIdSchema.parse(rawChatId);
-
-  const authSession = await getServerSession();
-  if (!authSession?.user?.id) {
-    throw new Error(SIGNED_OUT);
-  }
 
   const chat = await getChatById(chatId);
   if (!chat) {
@@ -97,14 +84,6 @@ async function requireSourceControlAccess(rawChatId: string): Promise<Access> {
   const session = await getSessionById(chat.sessionId);
   if (!session) {
     throw new Error(SESSION_NOT_FOUND);
-  }
-  if (session.userId !== authSession.user.id) {
-    throw new Error(NOT_YOURS);
-  }
-
-  const role = await getMemberRole(authSession.user.id);
-  if (!role) {
-    throw new Error(NOT_YOURS);
   }
 
   if (!(session.sandboxState && isSandboxActive(session.sandboxState))) {

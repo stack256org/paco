@@ -1,6 +1,5 @@
 import { connectSandbox, type SandboxState } from "@paco/sandbox";
 import {
-  requireAuthenticatedUser,
   requireOwnedSession,
   type SessionRecord,
 } from "@/app/api/sessions/_lib/session-context";
@@ -56,11 +55,6 @@ function getStateExpiresAt(state: unknown): number | undefined {
 }
 
 export async function GET(req: Request): Promise<Response> {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const url = new URL(req.url);
   const sessionId = url.searchParams.get("sessionId");
 
@@ -69,7 +63,6 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {

@@ -1,7 +1,4 @@
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionChat,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionChat } from "@/app/api/sessions/_lib/session-context";
 import { forkChatThroughMessage, getChatById } from "@/lib/db/sessions";
 import { BAD_REQUEST } from "@/lib/error-copy";
 
@@ -19,15 +16,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export async function POST(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: authResult.userId,
     sessionId,
     chatId,
   });
@@ -69,7 +60,6 @@ export async function POST(req: Request, context: RouteContext) {
   }
 
   const result = await forkChatThroughMessage({
-    userId: authResult.userId,
     sourceChatId: chatId,
     throughMessageId: messageId,
     forkedChat: {

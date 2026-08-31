@@ -1,8 +1,7 @@
 "use server";
 
 import { z } from "zod";
-import { requireAdmin } from "@/lib/admin/require-admin";
-import { SIGNED_OUT } from "@/lib/error-copy";
+import { getSoleUserId } from "@/lib/db/users";
 import { orgMemoryDir, userMemoryDir } from "@/lib/memory/paths";
 import {
   deleteMemory,
@@ -11,7 +10,6 @@ import {
   writeMemory,
 } from "@/lib/memory/store";
 import { getOrganization } from "@/lib/org/organization";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { memoryDeleteSchema, memoryEditSchema } from "./memory-schemas";
 
 export type MemoryActionResult =
@@ -40,33 +38,9 @@ function newestFirst(entries: MemoryEntry[]): MemoryEntry[] {
   return [...entries].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-/**
- * The signed-in caller's id, or a thrown error.
- *
- * Every other function below reaches its memory directory through this —
- * never through an id an argument could carry — so a user can only ever
- * see or touch their own user-scope memory. That is what "scope isolation"
- * means for this page: the path comes from the session, not from input.
- */
-async function requireUserId(): Promise<string> {
-  const session = await getServerSession();
-  if (!session?.user?.id) {
-    throw new Error(SIGNED_OUT);
-  }
-  return session.user.id;
-}
-
-async function requireOrganization() {
-  const organization = await getOrganization();
-  if (!organization) {
-    throw new Error("There is no organisation yet.");
-  }
-  return organization;
-}
-
-/** The caller's own user-scope memory. */
+/** This instance's user-scope memory. */
 export async function listUserMemory(): Promise<MemoryEntry[]> {
-  const userId = await requireUserId();
+  const userId = await getSoleUserId();
   return newestFirst(await listMemory(userMemoryDir(userId)));
 }
 
@@ -80,7 +54,7 @@ export async function editUserMemory(
   slug: string,
   body: string,
 ): Promise<MemoryActionResult> {
-  const userId = await requireUserId();
+  const userId = await getSoleUserId();
   const parsed = memoryEditSchema.safeParse({ slug, body });
   if (!parsed.success) {
     return toValidationFailure(parsed.error);
@@ -104,7 +78,7 @@ export async function editUserMemory(
 export async function deleteUserMemory(
   slug: string,
 ): Promise<MemoryActionResult> {
-  const userId = await requireUserId();
+  const userId = await getSoleUserId();
   const parsed = memoryDeleteSchema.safeParse({ slug });
   if (!parsed.success) {
     return toValidationFailure(parsed.error);
@@ -115,14 +89,9 @@ export async function deleteUserMemory(
     : { success: false, error: NOT_FOUND_ERROR };
 }
 
-/**
- * The organisation's shared memory — admin only, per `requireAdmin`
- * (`lib/admin/require-admin.ts`), the same gate every other admin-only
- * settings page uses.
- */
+/** The organisation's shared memory. */
 export async function listOrgMemory(): Promise<MemoryEntry[]> {
-  await requireAdmin();
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
   return newestFirst(await listMemory(orgMemoryDir(organization.id)));
 }
 
@@ -131,12 +100,11 @@ export async function editOrgMemory(
   slug: string,
   body: string,
 ): Promise<MemoryActionResult> {
-  await requireAdmin();
   const parsed = memoryEditSchema.safeParse({ slug, body });
   if (!parsed.success) {
     return toValidationFailure(parsed.error);
   }
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
   const dir = orgMemoryDir(organization.id);
   const existing = (await listMemory(dir)).find(
     (entry) => entry.slug === parsed.data.slug,
@@ -156,12 +124,11 @@ export async function editOrgMemory(
 export async function deleteOrgMemory(
   slug: string,
 ): Promise<MemoryActionResult> {
-  await requireAdmin();
   const parsed = memoryDeleteSchema.safeParse({ slug });
   if (!parsed.success) {
     return toValidationFailure(parsed.error);
   }
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
   const deleted = await deleteMemory(
     orgMemoryDir(organization.id),
     parsed.data.slug,

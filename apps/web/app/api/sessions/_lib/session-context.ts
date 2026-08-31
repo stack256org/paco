@@ -1,12 +1,9 @@
 import * as sessionsDb from "@/lib/db/sessions";
 import {
-  NOT_YOURS,
   SESSION_NOT_FOUND,
   CHAT_NOT_FOUND,
-  SIGNED_OUT,
   WORKSPACE_NOT_STARTED,
 } from "@/lib/error-copy";
-import { getServerSession } from "@/lib/session/get-server-session";
 
 export type SessionRecord = NonNullable<
   Awaited<ReturnType<typeof sessionsDb.getSessionById>>
@@ -14,16 +11,6 @@ export type SessionRecord = NonNullable<
 export type ChatRecord = NonNullable<
   Awaited<ReturnType<typeof sessionsDb.getChatById>>
 >;
-
-type AuthenticatedUserResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
 
 type OwnedSessionResult =
   | {
@@ -47,16 +34,12 @@ type OwnedSessionChatResult =
     };
 
 interface RequireOwnedSessionParams {
-  userId: string;
   sessionId: string;
-  forbiddenMessage?: string;
 }
 
 interface RequireOwnedSessionChatParams {
-  userId: string;
   sessionId: string;
   chatId: string;
-  forbiddenMessage?: string;
 }
 
 interface RequireOwnedSessionWithSandboxGuardParams extends RequireOwnedSessionParams {
@@ -69,38 +52,23 @@ function toErrorResponse(message: string, status: number): Response {
   return Response.json({ error: message }, { status });
 }
 
-export async function requireAuthenticatedUser(): Promise<AuthenticatedUserResult> {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return {
-      ok: false,
-      response: toErrorResponse(SIGNED_OUT, 401),
-    };
-  }
-
-  return {
-    ok: true,
-    userId: session.user.id,
-  };
-}
-
+/**
+ * Look up a session by id.
+ *
+ * Named "owned" for historical reasons — the instance has exactly one
+ * tenant, so there is no separate owner to check against; existing the
+ * session is the only thing left to verify.
+ */
 export async function requireOwnedSession(
   params: RequireOwnedSessionParams,
 ): Promise<OwnedSessionResult> {
-  const { userId, sessionId, forbiddenMessage = NOT_YOURS } = params;
+  const { sessionId } = params;
 
   const sessionRecord = await sessionsDb.getSessionById(sessionId);
   if (!sessionRecord) {
     return {
       ok: false,
       response: toErrorResponse(SESSION_NOT_FOUND, 404),
-    };
-  }
-
-  if (sessionRecord.userId !== userId) {
-    return {
-      ok: false,
-      response: toErrorResponse(forbiddenMessage, 403),
     };
   }
 
@@ -114,19 +82,13 @@ export async function requireOwnedSessionWithSandboxGuard(
   params: RequireOwnedSessionWithSandboxGuardParams,
 ): Promise<OwnedSessionResult> {
   const {
-    userId,
     sessionId,
-    forbiddenMessage,
     sandboxGuard,
     sandboxErrorMessage = WORKSPACE_NOT_STARTED,
     sandboxErrorStatus = 400,
   } = params;
 
-  const ownedSessionResult = await requireOwnedSession({
-    userId,
-    sessionId,
-    forbiddenMessage,
-  });
+  const ownedSessionResult = await requireOwnedSession({ sessionId });
   if (!ownedSessionResult.ok) {
     return ownedSessionResult;
   }
@@ -144,7 +106,7 @@ export async function requireOwnedSessionWithSandboxGuard(
 export async function requireOwnedSessionChat(
   params: RequireOwnedSessionChatParams,
 ): Promise<OwnedSessionChatResult> {
-  const { userId, sessionId, chatId, forbiddenMessage = NOT_YOURS } = params;
+  const { sessionId, chatId } = params;
 
   const [sessionRecord, chat] = await Promise.all([
     sessionsDb.getSessionById(sessionId),
@@ -155,13 +117,6 @@ export async function requireOwnedSessionChat(
     return {
       ok: false,
       response: toErrorResponse(SESSION_NOT_FOUND, 404),
-    };
-  }
-
-  if (sessionRecord.userId !== userId) {
-    return {
-      ok: false,
-      response: toErrorResponse(forbiddenMessage, 403),
     };
   }
 

@@ -1,15 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type OwnedSessionChatResult =
   | {
       ok: true;
@@ -26,7 +16,6 @@ type UpsertResult =
   | { status: "updated"; message: { id: string } }
   | { status: "conflict" };
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
 let ownedSessionChatResult: OwnedSessionChatResult = {
   ok: true,
   sessionRecord: { id: "session-1" },
@@ -50,7 +39,6 @@ const upsertCalls: Array<{
 const assistantActivityCalls: Array<{ chatId: string }> = [];
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSessionChat: async () => ownedSessionChatResult,
 }));
 
@@ -90,7 +78,6 @@ function createPostRequest(body: unknown): Request {
 
 describe("/api/sessions/[sessionId]/chats/[chatId]/messages", () => {
   beforeEach(() => {
-    authResult = { ok: true, userId: "user-1" };
     ownedSessionChatResult = {
       ok: true,
       sessionRecord: { id: "session-1" },
@@ -108,28 +95,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/messages", () => {
     assistantActivityCalls.length = 0;
   });
 
-  test("returns auth error from guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(
-      createPostRequest({
-        message: { id: "assistant-1", role: "assistant", parts: [] },
-      }),
-      createContext(),
-    );
-
-    expect(response.status).toBe(401);
-    expect(upsertCalls).toHaveLength(0);
-  });
-
-  test("returns ownership error from guard", async () => {
+  test("returns not-found error from guard", async () => {
     ownedSessionChatResult = {
       ok: false,
       response: Response.json(

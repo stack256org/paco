@@ -1,9 +1,6 @@
 import type { NextRequest } from "next/server";
 import { connectSandbox } from "@paco/sandbox";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionWithSandboxGuard,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionWithSandboxGuard } from "@/app/api/sessions/_lib/session-context";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
 import {
   computeAndCacheDiff,
@@ -29,15 +26,9 @@ type RouteContext = {
 };
 
 export async function GET(_req: NextRequest, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
 
   const sessionContext = await requireOwnedSessionWithSandboxGuard({
-    userId: authResult.userId,
     sessionId,
     sandboxGuard: hasRuntimeSandboxState,
     sandboxErrorMessage: WORKSPACE_NOT_STARTED,

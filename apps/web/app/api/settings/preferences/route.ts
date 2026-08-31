@@ -1,10 +1,10 @@
-import { getServerSession } from "@/lib/session/get-server-session";
 import {
   getUserPreferences,
   type DiffMode,
   updateUserPreferences,
 } from "@/lib/db/user-preferences";
-import { BAD_REQUEST, SIGNED_OUT } from "@/lib/error-copy";
+import { getSoleUserId } from "@/lib/db/users";
+import { BAD_REQUEST } from "@/lib/error-copy";
 
 /**
  * One message for every rejected field.
@@ -27,21 +27,11 @@ interface UpdatePreferencesRequest {
 }
 
 export async function GET() {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
-  const preferences = await getUserPreferences(session.user.id);
+  const preferences = await getUserPreferences(await getSoleUserId());
   return Response.json({ preferences });
 }
 
 export async function PATCH(req: Request) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   let body: UpdatePreferencesRequest;
   try {
     body = (await req.json()) as UpdatePreferencesRequest;
@@ -120,7 +110,10 @@ export async function PATCH(req: Request) {
   }
 
   try {
-    const preferences = await updateUserPreferences(session.user.id, updates);
+    const preferences = await updateUserPreferences(
+      await getSoleUserId(),
+      updates,
+    );
     return Response.json({ preferences });
   } catch (error) {
     console.error("Failed to update preferences:", error);

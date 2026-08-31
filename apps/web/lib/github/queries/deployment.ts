@@ -3,8 +3,7 @@
 import { getSessionById } from "@/lib/db/sessions";
 import { findDeploymentUrl } from "@/lib/github/deployments";
 import { getGithubToken } from "@/lib/db/github-tokens";
-import { getServerSession } from "@/lib/session/get-server-session";
-import { NOT_YOURS, SESSION_NOT_FOUND, SIGNED_OUT } from "@/lib/error-copy";
+import { SESSION_NOT_FOUND } from "@/lib/error-copy";
 
 // ---- types ----
 
@@ -13,27 +12,6 @@ export type PrDeploymentResponse = {
   buildingDeploymentUrl?: string | null;
   failedDeploymentUrl?: string | null;
 };
-
-// ---- helpers ----
-
-async function requireAuth() {
-  const session = await getServerSession();
-  if (!session?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-  return session;
-}
-
-async function requireOwnedSession(userId: string, sessionId: string) {
-  const sessionRecord = await getSessionById(sessionId);
-  if (!sessionRecord) {
-    throw new Error(SESSION_NOT_FOUND);
-  }
-  if (sessionRecord.userId !== userId) {
-    throw new Error(NOT_YOURS);
-  }
-  return sessionRecord;
-}
 
 // ---- server action ----
 
@@ -44,8 +22,10 @@ export async function getDeploymentUrl(params: {
 }): Promise<PrDeploymentResponse> {
   const { sessionId, prNumber } = params;
 
-  const session = await requireAuth();
-  const sessionRecord = await requireOwnedSession(session.user.id, sessionId);
+  const sessionRecord = await getSessionById(sessionId);
+  if (!sessionRecord) {
+    throw new Error(SESSION_NOT_FOUND);
+  }
 
   // validate prNumber if provided
   if (prNumber !== undefined && (Number.isNaN(prNumber) || prNumber <= 0)) {
@@ -69,7 +49,7 @@ export async function getDeploymentUrl(params: {
     return { deploymentUrl: null };
   }
 
-  const token = await getGithubToken(session.user.id);
+  const token = await getGithubToken(sessionRecord.userId);
   if (!token) {
     return { deploymentUrl: null };
   }

@@ -8,8 +8,6 @@
  * nothing here names an HTTP status, an internal field, or a command.
  */
 
-export const SIGNED_OUT = "You've been signed out. Sign in again to continue.";
-
 export const NOT_YOURS =
   "This isn't yours to open. Check you're signed in to the right account.";
 
@@ -81,9 +79,6 @@ export const GH_CLI_MISSING =
  * middle of the page.
  */
 export function httpErrorMessage(status: number): string {
-  if (status === 401) {
-    return SIGNED_OUT;
-  }
   if (status === 403) {
     return NOT_YOURS;
   }

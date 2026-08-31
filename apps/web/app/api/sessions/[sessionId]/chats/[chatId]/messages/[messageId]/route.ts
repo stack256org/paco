@@ -1,8 +1,5 @@
 import { getRun } from "workflow/api";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionChat,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionChat } from "@/app/api/sessions/_lib/session-context";
 import {
   deleteChatMessageAndFollowing,
   updateChatActiveStreamId,
@@ -13,14 +10,9 @@ type RouteContext = {
 };
 
 export async function DELETE(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
   const { sessionId, chatId, messageId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: authResult.userId,
     sessionId,
     chatId,
   });

@@ -5,12 +5,7 @@ import { connectSandbox } from "@paco/sandbox";
 import { getSessionById } from "@/lib/db/sessions";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
-import {
-  SESSION_NOT_FOUND,
-  SIGNED_OUT,
-  WORKSPACE_NOT_STARTED,
-} from "@/lib/error-copy";
+import { SESSION_NOT_FOUND, WORKSPACE_NOT_STARTED } from "@/lib/error-copy";
 
 export const maxDuration = 30;
 
@@ -18,13 +13,8 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ sessionId: string }> },
 ) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["generate-commit-message", session.user.id]),
+    key: rateLimitKey(["generate-commit-message"]),
     limit: 10,
     windowMs: 60_000,
   });
@@ -34,7 +24,7 @@ export async function POST(
 
   const { sessionId } = await params;
   const dbSession = await getSessionById(sessionId);
-  if (!dbSession || dbSession.userId !== session.user.id) {
+  if (!dbSession) {
     return Response.json({ error: SESSION_NOT_FOUND }, { status: 404 });
   }
 

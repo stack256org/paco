@@ -3,13 +3,7 @@ import { getSessionById, updateSession } from "@/lib/db/sessions";
 import { deleteSessionAndResources } from "@/lib/reaping/delete-session";
 import { archiveSession } from "@/lib/sandbox/archive-session";
 import { hasRuntimeSandboxState } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
-import {
-  BAD_REQUEST,
-  NOT_YOURS,
-  SESSION_NOT_FOUND,
-  SIGNED_OUT,
-} from "@/lib/error-copy";
+import { BAD_REQUEST, SESSION_NOT_FOUND } from "@/lib/error-copy";
 
 import {
   type UpdateSessionRequest,
@@ -20,20 +14,11 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ sessionId: string }> },
 ) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const { sessionId } = await params;
   const existingSession = await getSessionById(sessionId);
 
   if (!existingSession) {
     return Response.json({ error: SESSION_NOT_FOUND }, { status: 404 });
-  }
-
-  if (existingSession.userId !== session.user.id) {
-    return Response.json({ error: NOT_YOURS }, { status: 403 });
   }
 
   return Response.json({ session: existingSession });
@@ -43,20 +28,11 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ sessionId: string }> },
 ) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const { sessionId } = await params;
   const existingSession = await getSessionById(sessionId);
 
   if (!existingSession) {
     return Response.json({ error: SESSION_NOT_FOUND }, { status: 404 });
-  }
-
-  if (existingSession.userId !== session.user.id) {
-    return Response.json({ error: NOT_YOURS }, { status: 403 });
   }
 
   // Parsed against an allow-list, never cast. A cast is erased at runtime, so
@@ -139,20 +115,11 @@ export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ sessionId: string }> },
 ) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const { sessionId } = await params;
   const existingSession = await getSessionById(sessionId);
 
   if (!existingSession) {
     return Response.json({ error: SESSION_NOT_FOUND }, { status: 404 });
-  }
-
-  if (existingSession.userId !== session.user.id) {
-    return Response.json({ error: NOT_YOURS }, { status: 403 });
   }
 
   const force = new URL(req.url).searchParams.get("force") === "1";

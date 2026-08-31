@@ -1,9 +1,9 @@
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 import { getChatSummariesBySessionId } from "@/lib/db/sessions";
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { getUserPreferences } from "@/lib/db/user-preferences";
-import { getServerSession } from "@/lib/session/get-server-session";
+import { getSoleUserId } from "@/lib/db/users";
 import { SessionLayoutShell } from "./session-layout-shell";
 
 interface SessionLayoutProps {
@@ -17,21 +17,9 @@ export default async function SessionLayout({
 }: SessionLayoutProps) {
   const { sessionId } = await params;
 
-  const sessionPromise = getServerSession();
-  const sessionRecordPromise = getSessionByIdCached(sessionId);
-
-  const session = await sessionPromise;
-  if (!session?.user) {
-    redirect("/");
-  }
-
-  const sessionRecord = await sessionRecordPromise;
+  const sessionRecord = await getSessionByIdCached(sessionId);
   if (!sessionRecord) {
     notFound();
-  }
-
-  if (sessionRecord.userId !== session.user.id) {
-    redirect("/");
   }
 
   let initialChatsData:
@@ -43,8 +31,8 @@ export default async function SessionLayout({
 
   try {
     const [chats, rawPreferences] = await Promise.all([
-      getChatSummariesBySessionId(sessionId, session.user.id),
-      getUserPreferences(session.user.id),
+      getChatSummariesBySessionId(sessionId),
+      getUserPreferences(await getSoleUserId()),
     ]);
     const preferences = rawPreferences;
     initialChatsData = {

@@ -1,7 +1,4 @@
-import {
-  requireAuthenticatedUser,
-  requireOwnedSession,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSession } from "@/app/api/sessions/_lib/session-context";
 import { updateSession } from "@/lib/db/sessions";
 import { SANDBOX_EXPIRES_BUFFER_MS } from "@/lib/sandbox/config";
 import {
@@ -29,11 +26,6 @@ export type SandboxStatusResponse = {
 };
 
 export async function GET(req: Request): Promise<Response> {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const url = new URL(req.url);
   const sessionId = url.searchParams.get("sessionId");
 
@@ -42,7 +34,6 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {

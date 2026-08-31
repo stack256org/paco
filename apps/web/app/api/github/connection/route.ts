@@ -6,11 +6,10 @@ import {
   getGithubToken,
   saveGithubToken,
 } from "@/lib/db/github-tokens";
+import { getSoleUserId } from "@/lib/db/users";
 import { GhError, isGhMissing } from "@/lib/github/gh";
 import { inspectToken, missingScopes } from "@/lib/github/gh-account";
 import { isGhInstalled } from "@/lib/github/gh-installed";
-import { getServerSession } from "@/lib/session/get-server-session";
-import { SIGNED_OUT } from "@/lib/error-copy";
 
 /**
  * The user's GitHub credential.
@@ -67,19 +66,15 @@ function disconnected(): GithubConnectionResponse {
 }
 
 export async function GET() {
-  const session = await getServerSession();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
-  const connection = await getGithubConnection(session.user.id);
+  const userId = await getSoleUserId();
+  const connection = await getGithubConnection(userId);
   if (!connection) {
     return NextResponse.json(disconnected() satisfies GithubConnectionResponse);
   }
 
   // Unsealing is the only way to know the stored token is still usable, and it
   // is a local decrypt — no network, no GitHub call.
-  const tokenUnreadable = (await getGithubToken(session.user.id)) === null;
+  const tokenUnreadable = (await getGithubToken(userId)) === null;
 
   return NextResponse.json({
     connected: true,
@@ -93,11 +88,6 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
-  const session = await getServerSession();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const parsed = connectSchema.safeParse(
     await request.json().catch(() => null),
   );
@@ -132,7 +122,7 @@ export async function PUT(request: Request) {
   }
 
   await saveGithubToken({
-    userId: session.user.id,
+    userId: await getSoleUserId(),
     token,
     login: account.login,
     githubUserId: account.id,
@@ -149,12 +139,7 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE() {
-  const session = await getServerSession();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
-  await deleteGithubToken(session.user.id);
+  await deleteGithubToken(await getSoleUserId());
 
   return NextResponse.json(disconnected() satisfies GithubConnectionResponse);
 }

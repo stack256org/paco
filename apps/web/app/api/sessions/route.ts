@@ -2,21 +2,22 @@ import { nanoid } from "nanoid";
 import { schedulePullRequestRefresh } from "./_lib/schedule-pr-refresh";
 import {
   createSessionWithInitialChat,
-  getArchivedSessionCountByUserId,
-  getSessionsWithUnreadByUserId,
+  getArchivedSessionCount,
+  getSessionsWithUnread,
   getUsedSessionTitles,
 } from "@/lib/db/sessions";
+import { getSoleUserId } from "@/lib/db/users";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import {
   isValidGitHubRepoName,
   isValidGitHubRepoOwner,
   parseGitHubHttpsUrl,
 } from "@/lib/github/urls";
+import { generateBranchName } from "@/lib/git/helpers";
 import { getRandomCityName } from "@/lib/random-city";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { kickSandboxProvisioningWorkflow } from "@/lib/sandbox/provisioning-kick";
-import { getServerSession } from "@/lib/session/get-server-session";
-import { BAD_REQUEST, SIGNED_OUT } from "@/lib/error-copy";
+import { BAD_REQUEST } from "@/lib/error-copy";
 
 const BAD_REPOSITORY =
   "That repository doesn't look right. Pick it from the list again.";
@@ -32,30 +33,13 @@ interface CreateSessionRequest {
   autoCreatePr?: boolean;
 }
 
-function generateBranchName(username: string, name?: string | null): string {
-  let initials = "nb";
-  if (name) {
-    initials =
-      name
-        .split(" ")
-        .map((n) => n[0]?.toLowerCase() ?? "")
-        .join("")
-        .slice(0, 2) || "nb";
-  } else if (username) {
-    initials = username.slice(0, 2).toLowerCase();
-  }
-  const randomSuffix = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-  return `${initials}/${randomSuffix}`;
-}
-
 async function resolveSessionTitle(
   input: CreateSessionRequest,
-  userId: string,
 ): Promise<string> {
   if (input.title && input.title.trim()) {
     return input.title.trim();
   }
-  const usedNames = await getUsedSessionTitles(userId);
+  const usedNames = await getUsedSessionTitles();
   return getRandomCityName(usedNames);
 }
 
@@ -77,11 +61,6 @@ function parseNonNegativeInteger(value: string | null): number | null {
 }
 
 export async function GET(req: Request) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const { searchParams } = new URL(req.url);
   const rawStatus = searchParams.get("status");
   if (
@@ -114,12 +93,12 @@ export async function GET(req: Request) {
     const offset = rawOffset ?? 0;
 
     const [sessions, archivedCount] = await Promise.all([
-      getSessionsWithUnreadByUserId(session.user.id, {
+      getSessionsWithUnread({
         status: "archived",
         limit,
         offset,
       }),
-      getArchivedSessionCountByUserId(session.user.id),
+      getArchivedSessionCount(),
     ]);
 
     return Response.json({
@@ -136,32 +115,27 @@ export async function GET(req: Request) {
 
   if (statusParam === "active") {
     const [sessions, archivedCount] = await Promise.all([
-      getSessionsWithUnreadByUserId(session.user.id, {
+      getSessionsWithUnread({
         status: "active",
       }),
-      getArchivedSessionCountByUserId(session.user.id),
+      getArchivedSessionCount(),
     ]);
 
     // The sidebar already polls this endpoint, so it is the natural place to
     // keep pull-request state fresh. Runs after the response.
-    schedulePullRequestRefresh(session.user.id);
+    schedulePullRequestRefresh();
 
     return Response.json({ sessions, archivedCount });
   }
 
-  const sessions = await getSessionsWithUnreadByUserId(session.user.id);
-  schedulePullRequestRefresh(session.user.id);
+  const sessions = await getSessionsWithUnread();
+  schedulePullRequestRefresh();
   return Response.json({ sessions });
 }
 
 export async function POST(req: Request) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["sessions-create", session.user.id]),
+    key: rateLimitKey(["sessions-create"]),
     limit: 10,
     windowMs: 60_000,
   });
@@ -232,12 +206,17 @@ export async function POST(req: Request) {
 
   let finalBranch = branch;
   if (isNewBranch) {
-    finalBranch = generateBranchName(session.user.username, session.user.name);
+    finalBranch = generateBranchName();
   }
 
   try {
-    const titlePromise = resolveSessionTitle(body, session.user.id);
-    const preferencesPromise = getUserPreferences(session.user.id);
+    // `sessions.userId` is still a `NOT NULL` foreign key into `users` (a
+    // later step of this migration drops it) — `getSoleUserId` reads this
+    // instance's one real account rather than a requester, which no longer
+    // exists.
+    const userId = await getSoleUserId();
+    const titlePromise = resolveSessionTitle(body);
+    const preferencesPromise = getUserPreferences(userId);
 
     const [title, rawPreferences] = await Promise.all([
       titlePromise,
@@ -250,7 +229,7 @@ export async function POST(req: Request) {
     const result = await createSessionWithInitialChat({
       session: {
         id: nanoid(),
-        userId: session.user.id,
+        userId,
         title,
         status: "running",
         repoOwner,

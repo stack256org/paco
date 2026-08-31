@@ -5,12 +5,9 @@ import { getSessionById, updateSession } from "@/lib/db/sessions";
 import { generatePullRequestContentFromSandbox } from "@/lib/github/pr-content";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import {
   BAD_REQUEST,
-  NOT_YOURS,
   SESSION_NOT_FOUND,
-  SIGNED_OUT,
   WORKSPACE_NOT_STARTED,
 } from "@/lib/error-copy";
 
@@ -28,14 +25,8 @@ interface GeneratePRRequest {
 }
 
 export async function POST(req: Request) {
-  // 1. validate session
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["generate-pr", session.user.id]),
+    key: rateLimitKey(["generate-pr"]),
     limit: 5,
     windowMs: 60_000,
   });
@@ -43,7 +34,7 @@ export async function POST(req: Request) {
     return limited;
   }
 
-  // 2. parse request
+  // parse request
   let body: GeneratePRRequest;
   try {
     body = (await req.json()) as GeneratePRRequest;
@@ -61,9 +52,6 @@ export async function POST(req: Request) {
   const sessionRecord = await getSessionById(sessionId);
   if (!sessionRecord) {
     return Response.json({ error: SESSION_NOT_FOUND }, { status: 404 });
-  }
-  if (sessionRecord.userId !== session.user.id) {
-    return Response.json({ error: NOT_YOURS }, { status: 403 });
   }
   if (!isSandboxActive(sessionRecord.sandboxState)) {
     return Response.json({ error: WORKSPACE_NOT_STARTED }, { status: 400 });
@@ -165,10 +153,7 @@ export async function POST(req: Request) {
     (createBranchOnly || hasUncommitted || hasCommitsAhead);
 
   if (shouldCreateBranch) {
-    const generatedBranch = generateBranchName(
-      session.user.username,
-      session.user.name,
-    );
+    const generatedBranch = generateBranchName();
     const checkoutResult = await sandbox.exec(
       `git checkout -b ${generatedBranch}`,
       cwd,

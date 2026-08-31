@@ -450,7 +450,6 @@ export async function runEvalScenario(
         },
       ],
       requestUrl: "internal://evals/run",
-      authSession: null,
       sessionStatus: session.status,
       activeStreamId: chat.activeStreamId ?? null,
       maxSteps: scenario.maxTurns,

@@ -5,13 +5,10 @@ import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById } from "@/lib/db/sessions";
 import {
   BAD_FILE_SELECTION,
-  NOT_YOURS,
   SESSION_NOT_FOUND,
-  SIGNED_OUT,
   WORKSPACE_NOT_STARTED,
 } from "@/lib/error-copy";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { shellQuote } from "@/lib/shell/quote";
 
 /**
@@ -168,17 +165,9 @@ export async function discardChanges(params: {
 }): Promise<{ discarded: boolean; hasUncommittedChanges: boolean }> {
   const { sessionId, filePath, oldPath } = params;
 
-  const session = await getServerSession();
-  if (!session?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-
   const sessionRecord = await getSessionById(sessionId);
   if (!sessionRecord) {
     throw new Error(SESSION_NOT_FOUND);
-  }
-  if (sessionRecord.userId !== session.user.id) {
-    throw new Error(NOT_YOURS);
   }
   if (!isSandboxActive(sessionRecord.sandboxState)) {
     throw new Error(WORKSPACE_NOT_STARTED);

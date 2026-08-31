@@ -28,7 +28,7 @@ import {
   isSandboxActive,
 } from "@/lib/sandbox/utils";
 import { eq } from "drizzle-orm";
-import { NOT_YOURS, SESSION_NOT_FOUND, SIGNED_OUT } from "@/lib/error-copy";
+import { SESSION_NOT_FOUND } from "@/lib/error-copy";
 
 type UserRecord = {
   id: string;
@@ -180,14 +180,10 @@ async function stopSandboxAfterArchiveRace(params: {
 
 export async function provisionSessionSandbox(params: {
   sessionId: string;
-  userId?: string;
 }): Promise<ProvisionSessionSandboxResult> {
   const session = await getSessionById(params.sessionId);
   if (!session) {
     throw new Error(SESSION_NOT_FOUND);
-  }
-  if (params.userId && session.userId !== params.userId) {
-    throw new Error(NOT_YOURS);
   }
   if (session.status === "archived") {
     throw new ProvisioningError(
@@ -199,7 +195,9 @@ export async function provisionSessionSandbox(params: {
   const didSetupWorkspace = !isSandboxActive(session.sandboxState);
   const user = await getUserById(session.userId);
   if (!user) {
-    throw new Error(SIGNED_OUT);
+    throw new Error(
+      "This installation has no account to provision the workspace under.",
+    );
   }
 
   const gitUser = await getGitUser(user);

@@ -19,46 +19,17 @@ let sessionExists = true;
 let sessionSandboxState: { hostWorkspace: string } | null = {
   hostWorkspace: "/tmp/paco-workspaces/session-1",
 };
-let sessionUserId = "user-1";
 
 const getSessionByIdMock = mock(async (_sessionId: string) =>
   sessionExists
     ? {
         id: "session-1",
-        userId: sessionUserId,
         sandboxState: sessionSandboxState,
       }
     : undefined,
 );
 mock.module("@/lib/db/sessions", () => ({
   getSessionById: (sessionId: string) => getSessionByIdMock(sessionId),
-}));
-
-// ── `@/lib/org/organization`, `@/lib/org/membership`, `@/lib/admin/require-admin` ──
-//
-// `planGoal` verifies the session's owning user belongs to the caller's
-// organisation before doing anything else — sessions carry a `userId`, not
-// an `organizationId`, so this is the only way to check. Mirrors
-// `app/tasks/actions.ts`'s `requireOrgMembership`: membership OR the
-// admin flag counts, and the org id itself must match.
-
-let orgRecord: { id: string } | null = { id: "org-1" };
-let memberRole: "owner" | "admin" | "member" | null = "member";
-let adminFlag = false;
-
-const getOrganizationMock = mock(async () => orgRecord);
-mock.module("@/lib/org/organization", () => ({
-  getOrganization: () => getOrganizationMock(),
-}));
-
-const getMemberRoleMock = mock(async (_userId: string) => memberRole);
-mock.module("@/lib/org/membership", () => ({
-  getMemberRole: (userId: string) => getMemberRoleMock(userId),
-}));
-
-const isAdminMock = mock(async (_userId: string) => adminFlag);
-mock.module("@/lib/admin/require-admin", () => ({
-  isAdmin: (userId: string) => isAdminMock(userId),
 }));
 
 // ── `@/lib/db/roster` ────────────────────────────────────────────
@@ -190,10 +161,6 @@ function findChildren(): FakeRow[] {
 beforeEach(() => {
   sessionExists = true;
   sessionSandboxState = { hostWorkspace: "/tmp/paco-workspaces/session-1" };
-  sessionUserId = "user-1";
-  orgRecord = { id: "org-1" };
-  memberRole = "member";
-  adminFlag = false;
   roster = {
     explorer: { description: "explores", prompt: "explore" },
     executor: { description: "executes", prompt: "execute" },
@@ -208,9 +175,6 @@ beforeEach(() => {
   });
 
   getSessionByIdMock.mockClear();
-  getOrganizationMock.mockClear();
-  getMemberRoleMock.mockClear();
-  isAdminMock.mockClear();
   getRosterMock.mockClear();
   dbTransactionMock.mockClear();
   runAgentTurnMock.mockClear();
@@ -325,19 +289,6 @@ describe("planGoal", () => {
     const root = findRoot();
     expect(root?.title).toBe(`${"x".repeat(80)}...`);
     expect(root?.goal).toBe(goal);
-  });
-
-  test("passes createdBy through to every created task", async () => {
-    await planGoal({
-      organizationId: "org-1",
-      sessionId: "session-1",
-      goal: "Ship it",
-      createdBy: "user-9",
-    });
-
-    for (const row of insertedRows) {
-      expect(row.createdBy).toBe("user-9");
-    }
   });
 
   /**
@@ -541,54 +492,6 @@ describe("planGoal", () => {
       error: 'Session "session-1" not found',
     });
     expect(runAgentTurnMock).not.toHaveBeenCalled();
-  });
-
-  test("session's owning user belongs to a different organisation: {ok:false, session not found}, nothing run", async () => {
-    orgRecord = { id: "some-other-org" };
-
-    const result = await planGoal({
-      organizationId: "org-1",
-      sessionId: "session-1",
-      goal: "Ship it",
-    });
-
-    expect(result).toEqual({
-      ok: false,
-      error: 'Session "session-1" not found',
-    });
-    expect(getSessionByIdMock).toHaveBeenCalled();
-    expect(runAgentTurnMock).not.toHaveBeenCalled();
-    expect(insertedRows).toHaveLength(0);
-  });
-
-  test("session's owning user has no membership and is not an admin: {ok:false, session not found}", async () => {
-    memberRole = null;
-    adminFlag = false;
-
-    const result = await planGoal({
-      organizationId: "org-1",
-      sessionId: "session-1",
-      goal: "Ship it",
-    });
-
-    expect(result).toEqual({
-      ok: false,
-      error: 'Session "session-1" not found',
-    });
-    expect(runAgentTurnMock).not.toHaveBeenCalled();
-  });
-
-  test("an admin-flag-only session owner (no membership row) still passes the org check", async () => {
-    memberRole = null;
-    adminFlag = true;
-
-    const result = await planGoal({
-      organizationId: "org-1",
-      sessionId: "session-1",
-      goal: "Ship it",
-    });
-
-    expect(result.ok).toBe(true);
   });
 
   test("a child insert failing mid-transaction leaves no root row persisted", async () => {

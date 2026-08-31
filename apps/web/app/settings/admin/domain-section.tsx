@@ -105,11 +105,11 @@ async function pingServerAlive(): Promise<boolean> {
  * Certificates are not requested here — see `CertificateSection`. This section
  * used to claim it fetched them, which nothing in the product ever did.
  *
- * Saving here only ever writes to storage. better-auth reads its trusted-host
- * list once at process start, and `paco-entrypoint.sh` re-reads the saved
- * domain on boot — so a saved address is not a live one until the process
- * restarts. The section says "saved", never "applied" or "live", until that
- * restart happens, and it is the one place that offers to do it.
+ * Saving here only ever writes to storage. The process reads its allowed-host
+ * list once at start, and `paco-entrypoint.sh` re-reads the saved domain on
+ * boot — so a saved address is not a live one until the process restarts.
+ * The section says "saved", never "applied" or "live", until that restart
+ * happens, and it is the one place that offers to do it.
  */
 /**
  * `onSaved`, when given, is called after every successful save with whether a

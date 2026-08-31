@@ -3,6 +3,7 @@ import "server-only";
 import { chatBranchName } from "@paco/sandbox";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
 import { getGithubToken } from "@/lib/db/github-tokens";
+import { getSoleUserId } from "@/lib/db/users";
 import { findPullRequest } from "./gh-pr";
 
 /**
@@ -110,7 +111,6 @@ async function refreshOne(
  * on a machine that is also running a coding agent.
  */
 export async function refreshPullRequests(params: {
-  userId: string;
   sessions: RefreshableSession[];
   now?: number;
 }): Promise<PullRequestRefresh[]> {
@@ -121,7 +121,7 @@ export async function refreshPullRequests(params: {
     return [];
   }
 
-  const token = await getGithubToken(params.userId);
+  const token = await getGithubToken(await getSoleUserId());
   if (!token) {
     return [];
   }

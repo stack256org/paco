@@ -1,8 +1,5 @@
 import { compactSession } from "@paco/claude-code";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionChat,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionChat } from "@/app/api/sessions/_lib/session-context";
 import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById, resolveChatResumeToken } from "@/lib/db/sessions";
@@ -23,15 +20,9 @@ export const maxDuration = 300;
  * context short of starting a new chat.
  */
 export async function POST(_request: Request, context: RouteContext) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: auth.userId,
     sessionId,
     chatId,
   });

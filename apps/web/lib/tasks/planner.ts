@@ -4,15 +4,12 @@ import type { ClaudeAgentDefinition } from "@paco/claude-code";
 import type { UIMessage } from "ai";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { isAdmin } from "@/lib/admin/require-admin";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { db } from "@/lib/db/client";
 import { getRoster } from "@/lib/db/roster";
 import { getSessionById } from "@/lib/db/sessions";
 import { tasks } from "@/lib/db/schema";
-import { getMemberRole } from "@/lib/org/membership";
-import { getOrganization } from "@/lib/org/organization";
 
 /**
  * The tools a planning turn gets: read-only exploration of the session
@@ -208,47 +205,11 @@ export type PlanGoalParams = {
   organizationId: string;
   sessionId: string;
   goal: string;
-  createdBy?: string;
 };
 
 export type PlanGoalResult =
   | { ok: true; rootTaskId: string; taskIds: string[] }
   | { ok: false; error: string };
-
-/**
- * Whether `sessionUserId` may act as `organizationId` — the same "in the
- * organisation at all" test `app/tasks/actions.ts`'s `requireOrgMembership`
- * applies to the caller, applied here to the SESSION's owner instead, since
- * `planGoal` takes an id rather than a live request session.
- *
- * Reuses the org/membership helpers used elsewhere rather than querying
- * `organizationMembers` directly: `getMemberRole` returns `null` for a
- * non-member, and `isAdmin`'s flag-promoted accounts (see its own doc
- * comment) legitimately have no membership row at all, so either counting
- * alone would wrongly reject a real admin's session. Comparing
- * `getOrganization()`'s id against `organizationId` matters because
- * `getMemberRole`/`isAdmin` only ever check membership in the one
- * organisation this installation has — without it, a caller could pass any
- * `organizationId` string and a session owned by any member would pass.
- *
- * Exported so the `tasks:create` plugin capability
- * (`lib/plugins/capability-handlers.ts`) can run the identical check before
- * letting a channel plugin create a task against a session — that handler
- * has the same "session is user-scoped, caller has only an id" problem
- * `planGoal` does, and must not grow a second, independently-drifting
- * membership check for it.
- */
-export async function sessionBelongsToOrganization(
-  sessionUserId: string,
-  organizationId: string,
-): Promise<boolean> {
-  const [organization, role, admin] = await Promise.all([
-    getOrganization(),
-    getMemberRole(sessionUserId),
-    isAdmin(sessionUserId),
-  ]);
-  return organization?.id === organizationId && (role !== null || admin);
-}
 
 /**
  * Decomposes a goal into a task tree: one grouping root task plus its
@@ -291,18 +252,6 @@ export async function planGoal(
 
   const session = await getSessionById(params.sessionId);
   if (!session) {
-    return notFound;
-  }
-
-  // Sessions are user-scoped, not org-scoped (no `organizationId` column on
-  // `sessions`), so this is the only way to check a session belongs to the
-  // caller's organisation. Reported identically to "session does not
-  // exist" — a caller must not be able to distinguish "wrong org" from
-  // "no such session" (same reasoning `startTask`'s
-  // `organizationIdForTask` uses for tasks).
-  if (
-    !(await sessionBelongsToOrganization(session.userId, params.organizationId))
-  ) {
     return notFound;
   }
 
@@ -399,7 +348,6 @@ export async function planGoal(
         title: truncateTitle(params.goal),
         goal: params.goal,
         origin: "planner",
-        createdBy: params.createdBy ?? null,
       })
       .returning();
     if (!root) {
@@ -419,7 +367,6 @@ export async function planGoal(
           goal: task.goal,
           assignedAgent: task.assignedAgent,
           origin: "planner",
-          createdBy: params.createdBy ?? null,
         })
         .returning();
       if (!child) {

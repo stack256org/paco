@@ -1,5 +1,5 @@
-import { requireAuthenticatedUser } from "@/app/api/chat/_lib/chat-context";
 import { getGithubToken } from "@/lib/db/github-tokens";
+import { getSoleUserId } from "@/lib/db/users";
 import { GhError, ghJson, isGhMissing } from "@/lib/github/gh";
 import { BAD_REQUEST, GITHUB_NOT_CONNECTED } from "@/lib/error-copy";
 
@@ -49,11 +49,6 @@ function sortBranches(branches: string[], defaultBranch: string): string[] {
 }
 
 export async function GET(request: Request) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const { searchParams } = new URL(request.url);
   const owner = searchParams.get("owner");
   const repo = searchParams.get("repo");
@@ -67,7 +62,7 @@ export async function GET(request: Request) {
     return Response.json({ error: BAD_REPOSITORY }, { status: 400 });
   }
 
-  const token = await getGithubToken(auth.userId);
+  const token = await getGithubToken(await getSoleUserId());
   if (!token) {
     return Response.json({ error: GITHUB_NOT_CONNECTED }, { status: 400 });
   }

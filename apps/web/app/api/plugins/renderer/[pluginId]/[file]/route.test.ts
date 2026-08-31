@@ -26,13 +26,6 @@ mock.module("@/lib/db/plugins", () => ({
   },
 }));
 
-/** A signed-in session by default; a test can set this to `undefined`. */
-let currentSession: { user: { id: string } } | undefined;
-
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentSession,
-}));
-
 const { GET } = await import("./route");
 
 let pluginsRoot: string;
@@ -41,7 +34,6 @@ beforeEach(async () => {
   pluginsRoot = await mkdtemp(path.join(os.tmpdir(), "paco-plugin-renderer-"));
   process.env.PACO_PLUGINS_DIR = pluginsRoot;
   pluginRows = new Map();
-  currentSession = { user: { id: "user-1" } };
 });
 
 afterEach(async () => {
@@ -128,20 +120,6 @@ describe("GET /api/plugins/renderer/[pluginId]/[file]", () => {
       .find((directive) => directive.startsWith("sandbox"));
 
     expect(sandbox).toBe("sandbox allow-scripts");
-  });
-
-  test("401s an unauthenticated request before any plugin/fs lookup", async () => {
-    currentSession = undefined;
-    pluginRows.set("demo-plugin", {
-      id: "demo-plugin",
-      enabled: true,
-      grantedCapabilities: UI_PANEL,
-    });
-    await writeRenderer("demo-plugin", "search.html", "<body>hi</body>");
-
-    const response = await callRoute("demo-plugin", "search.html");
-    expect(response.status).toBe(401);
-    expect((await response.json()).error).toBeTruthy();
   });
 
   test("404s for a plugin id with no matching row", async () => {

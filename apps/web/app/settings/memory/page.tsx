@@ -8,11 +8,9 @@ export const metadata: Metadata = {
 };
 
 /**
- * Unlike `/settings/agents`, this page is not admin-gated as a whole —
- * every signed-in user has their own memory to read, edit, and delete. Only
- * the second, organisation-wide section is admin only, decided inside
- * `MemoryPageContent` (and enforced again, server-side, by `requireAdmin`
- * in `./actions.ts` regardless of what the client renders).
+ * Shows both a personal memory section and the organisation-wide one — the
+ * instance has exactly one tenant, so there is no separate admin-only gate
+ * for the shared section any more.
  */
 export default function MemoryPage() {
   return <MemoryPageContent />;

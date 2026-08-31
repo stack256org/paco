@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "./client";
 import { users } from "./schema";
 
@@ -16,36 +16,28 @@ export async function userExists(userId: string): Promise<boolean> {
 }
 
 /**
- * Whether an account already exists for this address.
+ * The id of this instance's one remaining user row.
  *
- * Case-insensitive, but not via `ilike`: `email` is user input (an admin
- * typing an address to invite), and `z.email()` accepts `_` — a valid,
- * single-character LIKE wildcard — even though it rejects `%`. `ilike` would
- * let inviting `bob_smith@corp.com` match an unrelated existing
- * `bobXsmith@corp.com` and refuse the invite as "already has an account",
- * with no way for the admin to tell why. Comparing `lower(email)` against
- * the lowercased input is an exact match with no wildcard semantics at all,
- * while still catching an existing `Alice@example.com` when someone later
- * types `alice@example.com` — the case-insensitivity this needs, without the
- * part that doesn't.
+ * There is no more sign-in, so there is no requester to read a `userId`
+ * from — but `sessions`, `github_tokens`, `user_preferences` and a few other
+ * tables still carry a `NOT NULL` foreign key into `users` (dropped in a
+ * later step of this migration, once every reader is gone). Until then, a
+ * brand-new row in one of those tables — one with no existing row of its own
+ * to carry a `userId` forward from — needs a real, valid value to satisfy
+ * that constraint.
+ *
+ * This is deliberately NOT a stub or a constant: it reads whichever account
+ * actually exists on this installation, the same singleton pattern
+ * `getOrganization()` uses for the one organisation. It throws rather than
+ * inventing an id when the table is empty, which cannot happen on any
+ * instance that has ever completed its (now-removed) first-run flow.
  */
-export async function userExistsByEmail(email: string): Promise<boolean> {
-  const result = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(sql`lower(${users.email})`, email.trim().toLowerCase()))
-    .limit(1);
-  return result.length > 0;
-}
-
-/**
- * Check if a user has admin privileges.
- */
-export async function isUserAdmin(userId: string): Promise<boolean> {
-  const result = await db
-    .select({ isAdmin: users.isAdmin })
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  return result[0]?.isAdmin === true;
+export async function getSoleUserId(): Promise<string> {
+  const [row] = await db.select({ id: users.id }).from(users).limit(1);
+  if (!row) {
+    throw new Error(
+      "No account exists on this instance yet — nothing to attribute this to.",
+    );
+  }
+  return row.id;
 }

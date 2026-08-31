@@ -21,16 +21,15 @@ import { refreshPullRequests } from "@/lib/github/pr-refresh";
  * work, the previous values remain and the next poll tries again. Nothing the
  * user asked for has failed.
  */
-export function schedulePullRequestRefresh(userId: string): void {
+export function schedulePullRequestRefresh(): void {
   after(async () => {
     try {
-      const candidates = await getSessionsWithOpenPullRequests(userId);
+      const candidates = await getSessionsWithOpenPullRequests();
       if (candidates.length === 0) {
         return;
       }
 
       const refreshed = await refreshPullRequests({
-        userId,
         sessions: candidates,
       });
 

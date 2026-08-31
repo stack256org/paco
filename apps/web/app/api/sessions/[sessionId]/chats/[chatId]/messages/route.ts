@@ -1,7 +1,4 @@
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionChat,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionChat } from "@/app/api/sessions/_lib/session-context";
 import type { WebAgentUIMessage } from "@/app/types";
 import {
   updateChatAssistantActivity,
@@ -31,15 +28,9 @@ function isAssistantMessage(value: unknown): value is WebAgentUIMessage {
 }
 
 export async function POST(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: authResult.userId,
     sessionId,
     chatId,
   });

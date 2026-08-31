@@ -12,7 +12,6 @@ import { and, asc, eq, gt } from "drizzle-orm";
 import { Agent, type Dispatcher } from "undici";
 import { z } from "zod";
 import type { WebAgentUIMessage } from "@/app/types";
-import { isAdmin } from "@/lib/admin/require-admin";
 import { appUrl } from "@/lib/app-url";
 import { submitChatMessage } from "@/lib/chat/submit-message";
 import { open as openSealed, seal } from "@/lib/crypto/secret-box";
@@ -20,10 +19,8 @@ import { db } from "@/lib/db/client";
 import { pluginKv, type PluginRow } from "@/lib/db/schema";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { createTask } from "@/lib/db/tasks";
-import { userExists } from "@/lib/db/users";
 import { getOrganization } from "@/lib/org/organization";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
-import { sessionBelongsToOrganization } from "@/lib/tasks/planner";
 import { startTask } from "@/lib/tasks/start";
 
 const NET_FETCH_TIMEOUT_MS = 10_000;
@@ -107,13 +104,10 @@ const PRIVATE_RANGES = buildPrivateRangesBlockList();
  * Wires the capability implementations a `PluginHost` calls into once the
  * host has already confirmed the plugin was granted the capability.
  *
- * `pluginRow` is captured once, at host-construction time, and only two
- * operator-decided columns are ever read back out of it:
- * `consentedNetDomains` (what `net:fetch` may reach) and `installedBy` (the
- * plugin's security principal — see `authorizeSessionForPlugin`). Both are
- * facts an ADMINISTRATOR wrote, never anything the plugin itself supplies,
- * and neither is trusted on its own: `installedBy` is only an id, and the
- * privilege it implies is re-derived live on every call.
+ * `pluginRow` is captured once, at host-construction time; the only column
+ * still read back out of it is `consentedNetDomains` (what `net:fetch` may
+ * reach) — an operator-decided fact, never anything the plugin itself
+ * supplies.
  *
  * The plugin id used to scope every `storage:kv` operation still comes from
  * the `pluginId` argument the host supplies on every call, never from
@@ -127,9 +121,8 @@ export function buildCapabilityHandlers(
     "storage:kv": (pluginId, payload) => handleStorageKv(pluginId, payload),
     "net:fetch": (_pluginId, payload) => handleNetFetch(pluginRow, payload),
     "messages:post": (pluginId, payload) =>
-      handleMessagesPost(pluginRow, pluginId, payload),
-    "tasks:create": (pluginId, payload) =>
-      handleTasksCreate(pluginRow, pluginId, payload),
+      handleMessagesPost(pluginId, payload),
+    "tasks:create": (pluginId, payload) => handleTasksCreate(pluginId, payload),
   };
 }
 
@@ -686,92 +679,18 @@ async function readBodyTextCapped(
 // --- plugin authorization ----------------------------------------------
 
 /**
- * The one gate every capability that acts INSIDE a user's session has to
- * pass — `messages:post` and `tasks:create` both call it before any write.
+ * Every capability that acts inside a session used to gate on the
+ * installer: a plugin could reach whatever administrator installed it could
+ * reach, checked live against `plugins.installedBy`, `userExists` and
+ * `isAdmin` on every call.
  *
- * The rule is **a plugin may reach what its installer could reach**, and
- * `plugins.installedBy` (`lib/db/schema.ts`) is what makes that sayable: a
- * plugin process is not a person, so until a column recorded whom it acts
- * for, there was no principal to authorize as. The previous rule —
- * "the target session's owner must be an administrator" — was a property of
- * the *victim* rather than the actor, and it got the product backwards:
- * a plugin could act on an admin's session but not on an ordinary member's,
- * which is exactly the mapping `docs/plugins.md`'s Slack `channelMap`
- * tells operators to build. Nothing here looks at the target owner's role
- * any more.
- *
- * Four checks, all of which must hold, and all of which are about the
- * INSTALLER except the last:
- *
- * 1. The plugin has an installer at all. A row written before
- *    `installedBy` existed (or one whose installer was deleted, since the
- *    FK is `set null`) has no principal, so it is REFUSED. Falling back to
- *    the old "any admin-owned session" rule for those rows would keep the
- *    wrong rule alive forever under a new name; re-installing the plugin as
- *    an administrator is the fix, and it is a one-click one.
- *
- * 2. The installer's account still exists (`userExists`). Belt-and-braces
- *    alongside the `set null` FK: `pluginRow` is captured once at
- *    host-construction time, so a host started before the deletion would
- *    otherwise keep acting on a stale id.
- *
- * 3. The installer is STILL an administrator (`isAdmin`), re-checked live
- *    on every call rather than trusted from the row. Installation requires
- *    `requireAdmin`, so this holds at install time by construction — but a
- *    demotion has to actually take the plugin's reach away with it, or the
- *    principal is a fossil rather than an authorization.
- *
- * 4. The target session belongs to this instance's organization. Sessions
- *    are user-scoped, not org-scoped (`lib/db/schema.ts`), so the only way
- *    to ask that is the membership check `planGoal` uses for the identical
- *    problem — `sessionBelongsToOrganization`, imported from
- *    `lib/tasks/planner.ts` rather than re-derived, so the call sites
- *    cannot drift into checking different things. This is the ceiling
- *    check: an administrator's own reach is org-wide, so the plugin's is
- *    too, and no further.
- *
- * The result is deliberately WIDER than the rule it replaces for a member's
- * session and deliberately NARROWER everywhere else: a plugin installed by
- * someone who has since been demoted or deleted can no longer touch even an
- * administrator's session, where before any plugin could.
- *
- * Every failure — unknown session, wrong organization, no installer,
- * deleted installer, demoted installer — throws the SAME error the caller
- * passes in. A plugin must not be able to tell "no such session" from "not
- * one you may touch", or the denial itself becomes an enumeration oracle
- * for who is in the instance.
- *
- * Returns the organization id (`tasks:create` needs it anyway) and the
- * installer id, which is the principal `tasks:create` attributes new tasks
- * to.
+ * That whole scheme was about telling one requester's reach apart from
+ * another's, and there is no more requester to tell apart — this instance
+ * has exactly one tenant, gated once at the network edge (the instance
+ * password), not per session or per plugin installer. A plugin may act on
+ * any session that exists, same as every other caller in this codebase
+ * after this phase.
  */
-async function authorizeSessionForPlugin(
-  installedBy: string | null,
-  sessionUserId: string,
-  denial: Error,
-): Promise<{ organizationId: string; installerId: string }> {
-  if (!installedBy) {
-    throw denial;
-  }
-
-  const organization = await getOrganization();
-  if (!organization) {
-    throw denial;
-  }
-
-  const [installerExists, installerIsAdmin, targetInOrganization] =
-    await Promise.all([
-      userExists(installedBy),
-      isAdmin(installedBy),
-      sessionBelongsToOrganization(sessionUserId, organization.id),
-    ]);
-
-  if (!(installerExists && installerIsAdmin && targetInOrganization)) {
-    throw denial;
-  }
-
-  return { organizationId: organization.id, installerId: installedBy };
-}
 
 // --- messages:post -----------------------------------------------------
 
@@ -826,19 +745,15 @@ function framePluginMessage(
  * second, drifting implementation of "what happens when a message arrives".
  *
  * `submitChatMessage` itself performs NO authorization — it checks only for
- * an archived session and a conflicting stream — so everything standing
- * between a plugin and any chat in the instance is here:
- * `authorizeSessionForPlugin`, the same gate `tasks:create` uses, run before
- * anything is written. (An earlier version of this comment claimed parity
- * with `tasks:create` while performing no check at all. It does not claim
- * that any more; it calls the same function.)
+ * an archived session and a conflicting stream — but there is nothing left
+ * to check beyond "does the chat exist": see this file's "plugin
+ * authorization" note.
  *
- * Authorization is necessary but not sufficient, which is why
- * `framePluginMessage` exists too: an authorized plugin's text is still
- * untrusted, and the model has to be able to see that it is.
+ * Framing the text (`framePluginMessage`) still matters regardless: a
+ * plugin's text is untrusted third-party input, and the model has to be
+ * able to see that it is.
  */
 async function handleMessagesPost(
-  pluginRow: PluginRow,
   pluginId: string,
   payload: unknown,
 ): Promise<unknown> {
@@ -859,12 +774,6 @@ async function handleMessagesPost(
   if (!sessionRecord) {
     throw notFoundError;
   }
-
-  await authorizeSessionForPlugin(
-    pluginRow.installedBy,
-    sessionRecord.userId,
-    notFoundError,
-  );
 
   const nonce = randomUUID();
   const message: WebAgentUIMessage = {
@@ -887,7 +796,6 @@ async function handleMessagesPost(
     userId: sessionRecord.userId,
     messages: [message],
     requestUrl: appUrl().toString(),
-    authSession: null,
     sessionStatus: sessionRecord.status,
     activeStreamId: chat.activeStreamId,
   });
@@ -978,26 +886,11 @@ function assertTasksCreateWithinBudget(pluginId: string): void {
  * mechanism behind "mention the bot -> task appears" — and, if `autoStart`
  * is set, starts it the same way the board's own "start" action does.
  *
- * Authorization is `authorizeSessionForPlugin`, shared with `messages:post`:
- * the plugin acts as its INSTALLER, so the installer must still exist and
- * still be an administrator, and the target session must belong to this
- * instance's organization. Nothing about the target session's OWNER matters
- * beyond that membership — which is the point: `docs/plugins.md`'s Slack
- * `channelMap` maps channels onto whichever sessions the team works in, and
- * those are mostly ordinary members'. An unknown session id, a session
- * outside the organization, and a plugin with no (or no longer privileged)
- * installer are all reported with the identical error, so the denial is not
- * an oracle for who is in the instance.
- *
- * `createdBy` is the INSTALLER. It cannot be the plugin —
- * `tasks.created_by` is a foreign key to `users.id` — and leaving it null
- * made plugin tasks the only creatorless rows on the board. Attributing
- * them to the installer makes the audit trail match the authorization: the
- * administrator whose reach this task was created under is the one named on
- * it, whether or not they happen to own the session. `origin: "channel"`
- * alongside it is what records that a channel integration, not that
- * person's own hands, filed it — so the board can still show a plugin
- * created it rather than presenting it as something the installer typed.
+ * There is no more authorization check here beyond "does the session
+ * exist": see this file's "plugin authorization" note. `createdBy` is left
+ * null — there is no installer to attribute it to any more — and
+ * `origin: "channel"` is what records that a channel integration, not a
+ * person's own hands, filed it.
  *
  * `origin: "channel"` is hardcoded here, never read from the payload — a
  * plugin chooses `title`/`goal`/`sessionId`/`autoStart`, nothing else, so it
@@ -1012,7 +905,6 @@ function assertTasksCreateWithinBudget(pluginId: string): void {
  * the board, just without a chat behind it yet.
  */
 async function handleTasksCreate(
-  pluginRow: PluginRow,
   pluginId: string,
   payload: unknown,
 ): Promise<TasksCreateResult> {
@@ -1032,26 +924,21 @@ async function handleTasksCreate(
   if (!session) {
     throw notFoundError;
   }
-  const { organizationId, installerId } = await authorizeSessionForPlugin(
-    pluginRow.installedBy,
-    session.userId,
-    notFoundError,
-  );
+  const organization = await getOrganization();
 
   const task = await createTask({
-    organizationId,
+    organizationId: organization.id,
     sessionId,
     title,
     goal,
     origin: "channel",
-    createdBy: installerId,
   });
 
   if (!autoStart) {
     return { taskId: task.id };
   }
 
-  const started = await startTask(organizationId, task.id);
+  const started = await startTask(organization.id, task.id);
   if (!started.ok) {
     return { taskId: task.id, error: started.error };
   }

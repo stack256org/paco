@@ -28,11 +28,19 @@ const fakeSessionRow = {
 };
 
 const fakeDb = {
-  // Fluent select chain: db.select({…}).from(table).where(condition)
+  // Fluent select chain: db.select({…}).from(table)[.where(condition)]
+  // `getUsedSessionTitles` reads every session unfiltered, so `from(...)`
+  // must be awaitable on its own as well as chainable with `.where(...)`.
   select: (_columns: unknown) => ({
-    from: (_table: unknown) => ({
-      where: async (_condition: unknown) => fakeSelectRows,
-    }),
+    from: (_table: unknown) => {
+      const result = Promise.resolve(fakeSelectRows) as Promise<
+        typeof fakeSelectRows
+      > & {
+        where: (condition: unknown) => Promise<typeof fakeSelectRows>;
+      };
+      result.where = async (_condition: unknown) => fakeSelectRows;
+      return result;
+    },
   }),
 
   // Fluent update chain: db.update(table).set(data).where(condition).returning()
@@ -99,11 +107,11 @@ describe("getUsedSessionTitles", () => {
     fakeSelectRows = [];
   });
 
-  test("returns an empty Set when the user has no sessions", async () => {
+  test("returns an empty Set when there are no sessions", async () => {
     const { getUsedSessionTitles } = await sessionsModulePromise;
     fakeSelectRows = [];
 
-    const result = await getUsedSessionTitles("user-1");
+    const result = await getUsedSessionTitles();
     expect(result).toBeInstanceOf(Set);
     expect(result.size).toBe(0);
   });
@@ -116,7 +124,7 @@ describe("getUsedSessionTitles", () => {
       { title: "Lagos" },
     ];
 
-    const result = await getUsedSessionTitles("user-1");
+    const result = await getUsedSessionTitles();
     expect(result.size).toBe(3);
     expect(result.has("Tokyo")).toBe(true);
     expect(result.has("Paris")).toBe(true);
@@ -127,7 +135,7 @@ describe("getUsedSessionTitles", () => {
     const { getUsedSessionTitles } = await sessionsModulePromise;
     fakeSelectRows = [{ title: "Rome" }, { title: "Rome" }];
 
-    const result = await getUsedSessionTitles("user-1");
+    const result = await getUsedSessionTitles();
     expect(result.size).toBe(1);
     expect(result.has("Rome")).toBe(true);
   });

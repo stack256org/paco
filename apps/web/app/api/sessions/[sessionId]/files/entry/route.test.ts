@@ -1,16 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { BAD_REQUEST, WORKSPACE_ASLEEP } from "@/lib/error-copy";
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type TestSandboxState = {
   type: string;
   sandboxId?: string;
@@ -55,7 +45,6 @@ const updateCalls: Array<{
   patch: Record<string, unknown>;
 }> = [];
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
 let ownedSessionResult: OwnedSessionResult = {
   ok: true,
   sessionRecord: {
@@ -79,7 +68,6 @@ mock.module("@/lib/agent/workspace-paths", () => ({
 }));
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSessionWithSandboxGuard: async () => ownedSessionResult,
 }));
 
@@ -202,7 +190,6 @@ describe("/api/sessions/[sessionId]/files/entry", () => {
     execCalls.length = 0;
     updateCalls.length = 0;
     connectSandboxError = null;
-    authResult = { ok: true, userId: "user-1" };
     ownedSessionResult = {
       ok: true,
       sessionRecord: {
@@ -367,25 +354,6 @@ describe("/api/sessions/[sessionId]/files/entry", () => {
       expect(response.status).toBe(400);
       expect(parsed.error).toBe(BAD_REQUEST);
       expect(writeFileCalls).toHaveLength(0);
-    });
-
-    test("returns auth failures before reading the body", async () => {
-      authResult = {
-        ok: false,
-        response: Response.json(
-          { error: "You've been signed out. Sign in again to continue." },
-          { status: 401 },
-        ),
-      };
-      const { POST } = await loadRouteModule();
-
-      const response = await POST(
-        jsonRequest("POST", { path: "README.md", kind: "file" }),
-        createContext(),
-      );
-
-      expect(response.status).toBe(401);
-      expect(connectCalls).toHaveLength(0);
     });
   });
 

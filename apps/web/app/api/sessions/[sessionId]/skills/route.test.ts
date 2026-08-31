@@ -11,7 +11,6 @@ interface TestSandboxState {
 
 interface TestSessionRecord {
   id: string;
-  userId: string;
   sandboxState: TestSandboxState | null;
 }
 
@@ -31,30 +30,10 @@ const updateCalls: Array<Record<string, unknown>> = [];
 let sessionRecord: TestSessionRecord;
 let cachedSkills: SkillMetadata[] | null;
 let discoveredSkills: SkillMetadata[];
-let isAuthenticated = true;
 
 function registerRouteMocks() {
   mock.module("@/app/api/sessions/_lib/session-context", () => ({
-    requireAuthenticatedUser: async () =>
-      isAuthenticated
-        ? {
-            ok: true as const,
-            userId: "user-1",
-          }
-        : {
-            ok: false as const,
-            response: Response.json(
-              { error: "You've been signed out. Sign in again to continue." },
-              { status: 401 },
-            ),
-          },
-    requireOwnedSession: async ({
-      userId,
-      sessionId,
-    }: {
-      userId: string;
-      sessionId: string;
-    }) => {
+    requireOwnedSession: async ({ sessionId }: { sessionId: string }) => {
       if (!sessionRecord || sessionRecord.id !== sessionId) {
         return {
           ok: false as const,
@@ -63,19 +42,6 @@ function registerRouteMocks() {
               error: "We couldn't find that session. It may have been deleted.",
             },
             { status: 404 },
-          ),
-        };
-      }
-
-      if (sessionRecord.userId !== userId) {
-        return {
-          ok: false as const,
-          response: Response.json(
-            {
-              error:
-                "This isn't yours to open. Check you're signed in to the right account.",
-            },
-            { status: 403 },
           ),
         };
       }
@@ -172,10 +138,8 @@ describe("/api/sessions/[sessionId]/skills", () => {
     connectCalls.length = 0;
     discoverCalls.length = 0;
     updateCalls.length = 0;
-    isAuthenticated = true;
     sessionRecord = {
       id: "session-1",
-      userId: "user-1",
       sandboxState: {
         type: "docker",
         sandboxId: "sbx-123",

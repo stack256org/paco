@@ -1,6 +1,5 @@
 "use server";
 
-import { requireAdmin } from "@/lib/admin/require-admin";
 import { getPlugin } from "@/lib/db/plugins";
 
 /**
@@ -20,8 +19,6 @@ export async function getPluginConsentDetailsAction(
   | { ok: true; netDomains: string[]; selfVerifiedChannels: string[] }
   | { ok: false; error: string }
 > {
-  await requireAdmin();
-
   const row = await getPlugin(pluginId);
   if (!row) {
     return { ok: false, error: `No plugin installed with id "${pluginId}"` };

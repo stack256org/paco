@@ -214,16 +214,6 @@ const fakeDb: FakeDb = {
 
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
-let adminOk = true;
-mock.module("@/lib/admin/require-admin", () => ({
-  requireAdmin: async () => {
-    if (!adminOk) {
-      throw new Error("Not an administrator");
-    }
-    return "admin-1";
-  },
-}));
-
 let organization: { id: string } | null = { id: "org-1" };
 mock.module("@/lib/org/organization", () => ({
   getOrganization: async () => organization,
@@ -236,26 +226,6 @@ const VALID_DEFINITION = {
   description: "A test agent.",
   prompt: "You are a test agent.",
 };
-
-describe("admin gate", () => {
-  test("a non-admin is rejected, not handed a field error", async () => {
-    adminOk = false;
-    store = [];
-
-    await expect(listRosterAgents()).rejects.toThrow();
-    await expect(
-      saveRosterAgent({
-        originalName: null,
-        name: "custom-agent",
-        definition: VALID_DEFINITION,
-      }),
-    ).rejects.toThrow();
-    await expect(deleteRoster("custom-agent")).rejects.toThrow();
-    await expect(setRosterEnabled("custom-agent", false)).rejects.toThrow();
-
-    adminOk = true;
-  });
-});
 
 describe("saveRosterAgent", () => {
   test("an invalid name comes back as a field error, not a throw", async () => {

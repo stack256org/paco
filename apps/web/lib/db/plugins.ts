@@ -163,11 +163,9 @@ export async function getPlugin(id: string): Promise<PluginRow | undefined> {
  * only ever registers it, never runs it (consent invariant) —
  * `setPluginEnabled` is the deliberate second step.
  *
- * `installedBy` is the plugin's security principal (`lib/db/schema.ts`).
- * Supplying it re-attributes the plugin to the administrator performing
- * this install; omitting it carries the previous installer forward, and a
- * row that has never had one stays without one, which every capability
- * authorizing through it treats as a refusal.
+ * `installedBy` (`lib/db/schema.ts`) is a vestige of the per-request
+ * identity this instance no longer has; omitting it carries whatever value
+ * the row already had (or the lack of one) forward.
  */
 export async function upsertPlugin(row: NewPluginRow): Promise<void> {
   const parsedManifest = pluginManifestSchema.safeParse(row.manifest);
@@ -205,14 +203,10 @@ export async function upsertPlugin(row: NewPluginRow): Promise<void> {
     manifestNetDomains.includes(domain),
   );
 
-  // The plugin's security principal (`plugins.installedBy`,
-  // `lib/db/schema.ts`). A re-install RE-ATTRIBUTES: whoever just ran the
-  // install is the administrator who reviewed and consented to this code,
-  // so they become the principal it acts as. Only when the caller supplies
-  // none is the previous installer carried forward — an explicit `null`
-  // never silently resurrects a row's old principal, and a row that has
-  // never had one stays null (and is therefore refused by
-  // `authorizeSessionForPlugin`) rather than inventing one.
+  // `plugins.installedBy` (`lib/db/schema.ts`) — a vestige of the
+  // per-request identity this instance no longer has. Nothing sets it
+  // anymore; a re-install just carries forward whatever value (or lack of
+  // one) the row already had.
   const installedBy =
     row.installedBy !== undefined
       ? row.installedBy

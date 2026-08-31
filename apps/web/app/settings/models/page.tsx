@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import { ModelPreferencesSection } from "../preferences-section";
-import { PoolsideAdminSection } from "./poolside-admin-section";
+import { PoolsideProviderSection } from "./poolside-provider-section";
 
 export const metadata: Metadata = {
   title: "Models",
@@ -31,13 +31,7 @@ export default function ModelsPage() {
 
       <ModelPreferencesSection />
 
-      {/*
-        Admin-only, like the second section of /settings/memory: every chat
-        can be switched to run on Poolside (see the composer's backend
-        selector), but only an admin configures the shared provider
-        credentials it runs against.
-      */}
-      <PoolsideAdminSection capabilities={poolsideCapabilities} />
+      <PoolsideProviderSection capabilities={poolsideCapabilities} />
     </div>
   );
 }

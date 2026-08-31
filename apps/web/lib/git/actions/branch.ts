@@ -4,18 +4,12 @@ import { connectSandbox } from "@paco/sandbox";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById, updateSession } from "@/lib/db/sessions";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import {
   generateBranchName,
   isSafeBranchName,
   looksLikeCommitHash,
 } from "@/lib/git/helpers";
-import {
-  NOT_YOURS,
-  SESSION_NOT_FOUND,
-  SIGNED_OUT,
-  WORKSPACE_NOT_STARTED,
-} from "@/lib/error-copy";
+import { SESSION_NOT_FOUND, WORKSPACE_NOT_STARTED } from "@/lib/error-copy";
 
 /**
  * Create a feature branch in the session sandbox.
@@ -30,17 +24,9 @@ export async function createBranch(params: {
 }): Promise<{ branchName: string }> {
   const { sessionId, baseBranch, branchName } = params;
 
-  const session = await getServerSession();
-  if (!session?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-
   const sessionRecord = await getSessionById(sessionId);
   if (!sessionRecord) {
     throw new Error(SESSION_NOT_FOUND);
-  }
-  if (sessionRecord.userId !== session.user.id) {
-    throw new Error(NOT_YOURS);
   }
   if (!isSandboxActive(sessionRecord.sandboxState)) {
     throw new Error(WORKSPACE_NOT_STARTED);
@@ -79,13 +65,10 @@ export async function createBranch(params: {
     resolvedBranch === baseBranch || looksLikeCommitHash(resolvedBranch);
 
   if (isDetachedOrOnBase) {
-    const generatedBranch = generateBranchName(
-      session.user.username,
-      session.user.name,
-    );
+    const generatedBranch = generateBranchName();
     if (!isSafeBranchName(generatedBranch)) {
       throw new Error(
-        "We couldn't build a branch name from your account name. Name the branch yourself.",
+        "We couldn't build a branch name. Name the branch yourself.",
       );
     }
     const checkoutResult = await sandbox.exec(

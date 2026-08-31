@@ -289,7 +289,6 @@ export async function kickExecutorFixTurn(params: {
       },
     ],
     requestUrl: "internal://tasks/reviewer-gate",
-    authSession: null,
     sessionStatus: session.status,
     activeStreamId: chat.activeStreamId ?? null,
     maxSteps: TASK_DEFAULT_MAX_TURNS,

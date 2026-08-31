@@ -13,7 +13,6 @@ const updateCalls: Array<{
 
 let sessionRecord: {
   id: string;
-  userId: string;
   sandboxState: {
     type: "docker";
     sandboxName: string;
@@ -29,7 +28,6 @@ let sessionRecord: {
 };
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => ({ ok: true, userId: "user-1" }),
   requireOwnedSession: async () => ({ ok: true, sessionRecord }),
 }));
 
@@ -79,7 +77,6 @@ describe("/api/sandbox/status lifecycle safety net", () => {
 
     sessionRecord = {
       id: "session-1",
-      userId: "user-1",
       sandboxState: {
         type: "docker",
         sandboxName: "session_session-1",
