@@ -14,6 +14,10 @@ PACO_USER=paco
 PACO_GROUP=paco
 NGINX_SITE=/etc/nginx/sites-available/paco
 NGINX_ENABLED=/etc/nginx/sites-enabled/paco
+# The instance password, as an nginx htpasswd file. Under /etc/nginx and not
+# /etc/paco because $PACO_ETC is 0750 root:paco and nginx's workers are
+# www-data, which cannot traverse into it.
+NGINX_HTPASSWD=/etc/nginx/paco.htpasswd
 # Where Paco itself writes generated preview-routing server blocks
 # (apps/web/lib/preview/nginx-reload.ts) — a directory it owns outright,
 # rather than loosening permissions on /etc/nginx/conf.d, which stays
@@ -53,6 +57,39 @@ install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_HOME"
 # sudo needed for the file-write half of syncPreviewRoutes, only for the
 # nginx-test-and-reload half the sudoers rule in step 6 covers.
 install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_NGINX_DIR"
+
+# -----------------------------------------------------------------------------
+# 2b. The instance password. This file has to exist before the site in step 5
+# is enabled: an `auth_basic_user_file` pointing at a missing path does NOT
+# fail `nginx -t` — the file is only opened per request — so the failure would
+# surface as a 500 on every visit rather than a password prompt.
+#
+# Generated once and never regenerated, the same rule as APP_SECRET in step 3:
+# an upgrade must not silently change the operator's password. Guarded on the
+# file not existing, nothing else.
+#
+# `apt-get install paco` on its own is a supported entry point, so this cannot
+# be left to install.sh. install.sh only ever refines what is written here.
+if [ ! -f "$NGINX_HTPASSWD" ]; then
+  # Alphanumeric only: this gets read off a terminal and typed into a browser
+  # prompt by hand, so base64's +/= are a transcription hazard for no gain.
+  generated_password=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | cut -c1-24)
+
+  umask 027
+  # -i keeps the password out of argv, where `ps` would show it to every user
+  # on this machine; -B is bcrypt, which is what nginx reads.
+  printf '%s' "$generated_password" \
+    | htpasswd -i -B -c "$NGINX_HTPASSWD" paco >/dev/null 2>&1
+  chown root:www-data "$NGINX_HTPASSWD" 2>/dev/null || true
+  chmod 640 "$NGINX_HTPASSWD"
+
+  # Root-only, and deliberately plaintext: install.sh prints it in the closing
+  # summary and `paco status` reports that the instance is still on a
+  # generated password. `paco password` deletes it once a real one is set.
+  printf '%s\n' "$generated_password" > "$PACO_ETC/initial-password"
+  chown root:root "$PACO_ETC/initial-password"
+  chmod 600 "$PACO_ETC/initial-password"
+fi
 
 # -----------------------------------------------------------------------------
 # 3. APP_SECRET and paco.env — generated once, ever. This is the step in
@@ -122,12 +159,22 @@ fi
 # localhost — no domain baked in, matching APP_URL being unset by default
 # (Settings, or localhost, decide that at runtime).
 cat > "$NGINX_SITE" <<'EOF'
-# Installed by paco's postinst. Edit freely — this file is never
-# regenerated once it exists, only re-tested and reloaded on upgrade.
+# Installed by paco's postinst, and REWRITTEN by it on every upgrade.
+# Do not edit: your changes will be overwritten. This is deliberate — the
+# auth_basic directives below are the only thing protecting this instance,
+# so an upgrade has to be able to repair them. Put local customisation in
+# a separate server block or an include, not here.
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+
+    # The instance password. Written by postinst on first install and rotated
+    # with `paco password`; nginx re-reads it per request, so a change needs
+    # no reload. This is the only thing standing between the public internet
+    # and this instance — Paco itself has no sign-in.
+    auth_basic "Paco";
+    auth_basic_user_file /etc/nginx/paco.htpasswd;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
