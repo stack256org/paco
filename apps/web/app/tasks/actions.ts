@@ -312,7 +312,7 @@ export async function retryTaskAction(
 export type UnblockTaskOptions = {
   /**
    * The session to attach to a task that has none — a proposal task
-   * (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is created `blocked`
+   * (`lib/memory/reflect.ts`) is created `blocked`
    * with `sessionId: null`, so the human unblocking it is the first person
    * to say which repository the work belongs in. Ignored for a task that
    * already has a session.

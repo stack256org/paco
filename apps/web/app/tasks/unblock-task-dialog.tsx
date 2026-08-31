@@ -32,10 +32,10 @@ export interface UnblockTaskDialogProps {
  * Picks the session a never-started blocked task should run in.
  *
  * Every proposal task — a reflection's skill proposal
- * (`lib/memory/reflect.ts`), an org-memory promotion
- * (`lib/memory/promote.ts`) — is filed `blocked` with no session at all,
- * because the thing that filed it was org-wide and had no repository in
- * hand. Those are the majority of what the Blocked column holds, so
+ * (`lib/memory/reflect.ts`), an org-memory promotion — is filed `blocked`
+ * with no session at all, because the thing that filed it was org-wide and
+ * had no repository in hand. Those are the majority of what the Blocked
+ * column holds, so
  * "Unblock" has to be able to answer the one question they leave open
  * rather than refusing them: which repository does this work belong in.
  *

@@ -10,12 +10,12 @@ type Row = { id: number; chatId: string; type: string; payload: unknown };
 type Predicate = (row: Row) => boolean;
 
 /**
- * `sessions.test.ts` and `users.test.ts` fake the whole `./client` module
- * rather than standing up a real Postgres — there is no real-database test
- * anywhere under `lib/db`, and no `POSTGRES_URL` guard to mirror. This does
- * the same: a tiny in-memory store plus real column objects from the schema,
- * so `eq`/`gt`/`and` (mocked below into JS predicates, same trick as
- * `users.test.ts`) can filter it the same way Drizzle would filter real rows.
+ * `sessions.test.ts` fakes the whole `./client` module rather than standing
+ * up a real Postgres — there is no real-database test anywhere under
+ * `lib/db`, and no `POSTGRES_URL` guard to mirror. This does the same: a
+ * tiny in-memory store plus real column objects from the schema, so
+ * `eq`/`gt`/`and` (mocked below into JS predicates, same trick as
+ * `sessions.test.ts`) can filter it the same way Drizzle would filter real rows.
  */
 const COLUMN_KEYS = new Map<unknown, keyof Row>([
   [sessionEvents.chatId, "chatId"],

@@ -206,15 +206,22 @@ async function hasRecordedMigrations(): Promise<boolean> {
 }
 
 async function hasLegacySchemaWithoutHistory(): Promise<boolean> {
+  // Probes for "chats", not "accounts": "accounts" was dropped in migration
+  // 0018 (auth removal), so a post-0018 database that somehow lost its
+  // `drizzle.__drizzle_migrations` rows would probe negative forever and
+  // fall through to a fresh `migrate()` run that hard-fails on tables that
+  // already exist. "chats" has existed since migration 0000 and nothing
+  // drops it, so it stays a valid signal for "schema already applied" on
+  // both old and current databases.
   const rows = (await client.unsafe(`
     SELECT EXISTS (
       SELECT 1
       FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name = 'accounts'
-    ) AS has_accounts
-  `)) as Array<{ has_accounts?: boolean }>;
+      WHERE table_schema = 'public' AND table_name = 'chats'
+    ) AS has_chats
+  `)) as Array<{ has_chats?: boolean }>;
 
-  return rows[0]?.has_accounts === true;
+  return rows[0]?.has_chats === true;
 }
 
 async function reconcileLegacySchema(): Promise<void> {

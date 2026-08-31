@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 // Every dependency `actions.ts` imports is mocked here, at the module level —
-// none of them do their own database work in this test, mirroring
-// `lib/memory/promote.test.ts`'s reasoning for why `@/lib/db/tasks` (a real
-// module exercised for real by `lib/db/tasks.test.ts`) is never itself
+// none of them do their own database work in this test. `@/lib/db/tasks` (a
+// real module exercised for real by `lib/db/tasks.test.ts`) is never itself
 // mocked in-place, only its call sites' *dependencies* are.
 mock.module("server-only", () => ({}));
 

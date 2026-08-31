@@ -24,7 +24,7 @@ const MAX_REVIEWER_REJECTIONS = 2;
  * only matches `running`) and no button to press.
  *
  * `blocked → todo` is the human unblock for a task that never ran: a
- * proposal task (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is
+ * proposal task (`lib/memory/reflect.ts`) is
  * created `blocked`, with no chat and no session, so there is no turn for
  * `blocked → running` to resume. Releasing it into the backlog is what
  * unblocking it means there — see `unblockTaskAction`

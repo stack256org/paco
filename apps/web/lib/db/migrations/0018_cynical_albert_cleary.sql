@@ -20,7 +20,15 @@ ALTER TABLE "chat_reads" ADD PRIMARY KEY ("chat_id");--> statement-breakpoint
 DELETE FROM "user_preferences" WHERE "id" NOT IN (SELECT "id" FROM "user_preferences" ORDER BY "updated_at" DESC LIMIT 1);--> statement-breakpoint
 ALTER TABLE "user_preferences" ALTER COLUMN "id" SET DATA TYPE boolean USING true;--> statement-breakpoint
 ALTER TABLE "user_preferences" ALTER COLUMN "id" SET DEFAULT true;--> statement-breakpoint
-DELETE FROM "github_tokens" WHERE "user_id" NOT IN (SELECT "user_id" FROM "github_tokens" ORDER BY "updated_at" DESC LIMIT 1);--> statement-breakpoint
+-- The instance now has exactly one GitHub token, not one per user. Picking
+-- "most recently updated" would silently inherit an arbitrary departed
+-- teammate's identity and scopes for the instance's git commit author (see
+-- lib/github/gh-identity.ts) with nothing logged and no prompt to reconnect.
+-- A single-token instance is unambiguous and keeps its token; an instance
+-- with more than one token has no way to know which one is "the operator's",
+-- so it comes up with none and the operator reconnects once, deliberately,
+-- via Settings -> Connections.
+DELETE FROM "github_tokens" WHERE (SELECT count(*) FROM "github_tokens") > 1;--> statement-breakpoint
 ALTER TABLE "github_tokens" ADD COLUMN "id" boolean DEFAULT true NOT NULL;--> statement-breakpoint
 ALTER TABLE "chat_reads" DROP COLUMN "user_id";--> statement-breakpoint
 ALTER TABLE "plugins" DROP COLUMN "installed_by";--> statement-breakpoint
