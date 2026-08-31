@@ -796,28 +796,22 @@ If a preview hostname fails to come up, `journalctl -u paco` after opening
 the link is where a `sudo: a password is required` or a permission error
 writing under `/etc/paco/nginx` would appear.
 
-**Privacy is enforced the same way as before, just fronted by nginx instead
-of Traefik.** Every preview's `location /` runs `auth_request` against
-`GET /api/preview-auth` before proxying anywhere — the same
-`decidePreviewAccess` logic as the old deployment, unchanged. New previews
-are **private** by default; the chat owner can make one **public** from the
-Preview tab, after a warning worth repeating here: a public preview can be
-opened by **anyone with the link, no sign-in required**, serving whatever
-code the agent has just written — code that may be wired to real credentials
-or real data. Treat "make public" as putting a URL on the open internet,
-because that is what it does.
+**A preview is behind the same instance password as everything else — nothing
+more, nothing less.** Every generated `server {}` block carries `auth_basic
+"Paco"` reading `/etc/nginx/paco.htpasswd`, the identical pair the package
+writes for the main site (§`The instance password`). There is no per-chat
+public/private toggle, no "make public" action, and no shareable link that
+bypasses it — a preview that used to be public before this change is no
+longer reachable without the password. **To let someone else see a preview,
+give them the instance password** (or rotate it with `sudo paco password`
+once they no longer need access) — there is no narrower way to share one.
 
-One narrowing worth knowing about: nginx's `auth_request` module only
-understands three outcomes from that subrequest — 2xx (allow), 401, and 403
-(deny) — anything else becomes a bare internal 500. The old Traefik
-forward-auth relayed *any* response, including a 302 that let a private
-preview's owner get redirected through a "grant" round-trip when their
-Paco session cookie couldn't otherwise reach the preview's own hostname.
-Both `nginx-config.ts` and the `/api/preview-auth` route's own comments
-acknowledge that this redirect no longer survives the move to nginx as
-literally as the plain allow/deny paths do — so a private preview's owner,
-opening it for the first time without already holding that preview's grant
-cookie, may see a 500 rather than being signed in automatically.
+This replaced the old `auth_request` subrequest to `/api/preview-auth` and
+its per-chat `decidePreviewAccess` logic entirely, along with the "grant
+cookie" round-trip that used to sign a preview's owner in automatically. Both
+are gone: `auth_basic` is a static check against one password file, so there
+is no subrequest, no cookie, and no separate code path to fail into a bare
+500.
 
 #### Previews over HTTPS
 
@@ -1311,7 +1305,7 @@ port convention that is honoured by convention rather than enforced.
 
 Each candidate is served at its own hostname — `<chat slug>-d<n>.<preview base
 domain>` — routed by the same generated nginx blocks and the same
-`auth_request` forward-auth as an ordinary preview (§8). **With no preview base
+`auth_basic` instance-password gate as an ordinary preview (§8). **With no preview base
 domain set in Settings → Admin → Domain, `buildCandidatePreviews` returns an
 empty list and the design panel has nothing to embed.** The candidates still
 run, still commit, and are still there as branches — you just cannot look at

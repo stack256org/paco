@@ -29,6 +29,14 @@ holding the old password re-prompt on their own.
 This gate exists only where nginx does — the `.deb` install. A development
 checkout (`pnpm web`) and any container run have no nginx and no password.
 
+Each chat's preview hostname is protected by that same instance password,
+nothing else: the generated `server {}` block (`apps/web/lib/preview/nginx-config.ts`)
+carries the identical `auth_basic` pair as the main site. There is no
+per-chat public/private visibility, no shareable public link, and no
+authorization subrequest — that whole apparatus (`/api/preview-auth`,
+`decidePreviewAccess`, grant cookies) was removed. Sharing a preview means
+sharing the instance password; there is no narrower way to do it.
+
 ## GitHub
 
 Paco talks to GitHub through the [`gh` CLI](https://cli.github.com), never a GitHub App and never Octokit. Every call goes through `lib/github/gh.ts`, which pins the request to one user's token: `gh` would otherwise fall back to whatever account ran `gh auth login` on the machine.
