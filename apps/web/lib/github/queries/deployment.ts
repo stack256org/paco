@@ -49,7 +49,7 @@ export async function getDeploymentUrl(params: {
     return { deploymentUrl: null };
   }
 
-  const token = await getGithubToken(sessionRecord.userId);
+  const token = await getGithubToken();
   if (!token) {
     return { deploymentUrl: null };
   }

@@ -1,6 +1,5 @@
 import "server-only";
 
-import { eq } from "drizzle-orm";
 import { open, seal } from "@/lib/crypto/secret-box";
 import { db } from "./client";
 import { githubTokens } from "./schema";
@@ -19,12 +18,14 @@ export type GithubConnection = {
   connectedAt: Date;
 };
 
-export async function getGithubConnection(
-  userId: string,
-): Promise<GithubConnection | null> {
-  const row = await db.query.githubTokens.findFirst({
-    where: eq(githubTokens.userId, userId),
-  });
+/**
+ * The instance's stored connection, unfiltered.
+ *
+ * There is exactly one tenant, so at most one row exists — no `userId` is
+ * needed to find it.
+ */
+export async function getGithubConnection(): Promise<GithubConnection | null> {
+  const row = await db.query.githubTokens.findFirst();
 
   if (!row) {
     return null;
@@ -39,17 +40,16 @@ export async function getGithubConnection(
 }
 
 /**
- * The user's GitHub token, ready to hand to `gh`.
+ * The instance's GitHub token, ready to hand to `gh`.
  *
  * Returns `null` both when there is no credential and when the stored one
  * cannot be decrypted — which happens if `APP_SECRET` changed. Either way the
- * only useful outcome is asking the user to connect again, so the caller does
- * not have to tell the two apart.
+ * only useful outcome is asking to connect again, so the caller does not
+ * have to tell the two apart. Unfiltered read, same reasoning as
+ * `getGithubConnection`.
  */
-export async function getGithubToken(userId: string): Promise<string | null> {
-  const row = await db.query.githubTokens.findFirst({
-    where: eq(githubTokens.userId, userId),
-  });
+export async function getGithubToken(): Promise<string | null> {
+  const row = await db.query.githubTokens.findFirst();
 
   if (!row) {
     return null;
@@ -59,7 +59,7 @@ export async function getGithubToken(userId: string): Promise<string | null> {
     return open(row.sealedToken);
   } catch {
     console.error(
-      `[github] Stored token for user ${userId} could not be decrypted; it was probably sealed under a different APP_SECRET.`,
+      "[github] Stored token could not be decrypted; it was probably sealed under a different APP_SECRET.",
     );
     return null;
   }
@@ -96,6 +96,13 @@ export async function saveGithubToken(params: {
     });
 }
 
-export async function deleteGithubToken(userId: string): Promise<void> {
-  await db.delete(githubTokens).where(eq(githubTokens.userId, userId));
+/**
+ * Removes the instance's stored connection.
+ *
+ * Unconditional delete: there is at most one row, so there is nothing to
+ * filter by — deleting all of `githubTokens` is deleting the one credential
+ * this instance ever had.
+ */
+export async function deleteGithubToken(): Promise<void> {
+  await db.delete(githubTokens);
 }

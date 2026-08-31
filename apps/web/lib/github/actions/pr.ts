@@ -91,7 +91,7 @@ async function resolveChat(params: {
     );
   }
 
-  const token = await getGithubToken(sessionRecord.userId);
+  const token = await getGithubToken();
   if (!token) {
     throw new Error(GITHUB_NOT_CONNECTED);
   }

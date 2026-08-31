@@ -51,7 +51,7 @@ export async function performAutoCreatePr(
   const { sandbox, cwd } = params;
   const branch = chatBranchName(params.chatId);
 
-  const token = await getGithubToken(params.userId);
+  const token = await getGithubToken();
   if (!token) {
     return {
       created: false,

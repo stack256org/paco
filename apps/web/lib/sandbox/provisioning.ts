@@ -116,7 +116,7 @@ function buildSandboxState(session: SessionRecord): SandboxState {
  * called — while the address has to be the GitHub one for attribution to work.
  */
 async function getGitUser(user: UserRecord) {
-  const identity = await getGitIdentity(user.id);
+  const identity = await getGitIdentity();
 
   return {
     // Blank counts as missing: an account with no display name yields "",
@@ -141,7 +141,6 @@ async function getGitUser(user: UserRecord) {
  * case for a workspace that started empty.
  */
 async function getSetupToken(params: {
-  userId: string;
   session: SessionRecord;
 }): Promise<{ token: string } | undefined> {
   if (!params.session.cloneUrl) {
@@ -151,7 +150,7 @@ async function getSetupToken(params: {
     throw new Error("This session isn't connected to a repository.");
   }
 
-  const token = await getGithubToken(params.userId);
+  const token = await getGithubToken();
   if (!token) {
     throw new ProvisioningError(
       "github-not-connected",
@@ -201,10 +200,7 @@ export async function provisionSessionSandbox(params: {
   }
 
   const gitUser = await getGitUser(user);
-  const setupToken = await getSetupToken({
-    userId: session.userId,
-    session,
-  });
+  const setupToken = await getSetupToken({ session });
 
   let sandbox: Sandbox;
   try {

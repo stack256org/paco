@@ -148,7 +148,7 @@ export async function startTask(
     ? ((await getTask(organizationId, node.parentTaskId)) ?? null)
     : null;
 
-  const preferences = await getUserPreferences(session.userId);
+  const preferences = await getUserPreferences();
   /*
    * The roster as it stands NOW, not as it stood when the task was saved.
    * `assignedAgent` is validated on save, but disabling or renaming a roster

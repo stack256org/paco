@@ -98,7 +98,7 @@ export async function resolvePullRequestContextSection(params: {
       }),
       // The connected GitHub account. Read from the stored credential rather
       // than a linked OAuth account, which no longer exists.
-      getGithubConnection(sessionRecord.userId),
+      getGithubConnection(),
     ]);
     const githubUsername = ghProfile?.login?.trim() || null;
     const displayName =

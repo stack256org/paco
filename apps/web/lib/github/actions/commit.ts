@@ -105,7 +105,7 @@ export async function commitChanges(params: {
     };
   }
 
-  const token = await getGithubToken(sessionRecord.userId);
+  const token = await getGithubToken();
   if (!token) {
     return {
       committed: true,

@@ -27,7 +27,7 @@ interface UpdatePreferencesRequest {
 }
 
 export async function GET() {
-  const preferences = await getUserPreferences(await getSoleUserId());
+  const preferences = await getUserPreferences();
   return Response.json({ preferences });
 }
 

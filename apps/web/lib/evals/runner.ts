@@ -428,7 +428,7 @@ export async function runEvalScenario(
       });
     }
 
-    const preferences = await getUserPreferences(session.userId);
+    const preferences = await getUserPreferences();
     const chat = await createChat({
       id: nanoid(),
       sessionId,

@@ -5,12 +5,7 @@ import { generateObject } from "@paco/claude-code";
 import { and, desc, eq, gte } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
-import {
-  chats,
-  organizationMembers,
-  sessionEvents,
-  sessions,
-} from "@/lib/db/schema";
+import { sessionEvents } from "@/lib/db/schema";
 import { createTask } from "@/lib/db/tasks";
 
 /**
@@ -98,25 +93,29 @@ function isTurnStart(
 }
 
 /**
- * The organisation's recent turns, newest first, capped at `MAX_TURNS`.
+ * The instance's recent turns, newest first, capped at `MAX_TURNS`.
  *
- * Scoped through `organizationMembers` rather than assuming every session
- * belongs to the (currently singleton) organisation, so this stays correct
- * if that ever changes. The `INNER JOIN` on `organizationMembers` is
- * deliberate, not an oversight: a session whose owning user has left the
- * organisation (no membership row left to join against) drops out of
- * reflection along with them — an ex-member's turns are not a source of
- * ongoing "project" friction for the org to keep learning from.
+ * Used to scope this through `organizationMembers`, joining `sessionEvents`
+ * through `chats` and `sessions` to reach `sessions.userId` and then to that
+ * user's membership row, filtered to the calling organisation. That whole
+ * chain existed to answer "does this session's owner belong to this
+ * organisation" — and nothing creates `organizationMembers` rows any more
+ * (the invitation and membership modules that populated it are gone), so
+ * the join matched zero rows and this silently gathered no turns, ever.
+ *
+ * The instance has exactly one organisation and `sessions` carries no
+ * `organizationId` of its own, so every session already belongs to it —
+ * there is nothing left to scope by. `chats` and `sessions` drop out of the
+ * query along with `organizationMembers`: they were joined only to reach it,
+ * and `sessionEvents` already carries every column this query selects or
+ * filters on directly.
  *
  * The cap is pushed into the query itself (`orderBy(desc(...))` +
  * `limit(MAX_TURNS)`), so the database only ever hands back at most
  * `MAX_TURNS` rows instead of the whole 7-day window; the JS-side slice
  * below is a defensive backstop, not the primary enforcement.
  */
-async function gatherRecentTurns(
-  organizationId: string,
-  sinceDays: number,
-): Promise<GatheredTurn[]> {
+async function gatherRecentTurns(sinceDays: number): Promise<GatheredTurn[]> {
   const since = new Date();
   since.setDate(since.getDate() - sinceDays);
 
@@ -127,15 +126,8 @@ async function gatherRecentTurns(
       createdAt: sessionEvents.createdAt,
     })
     .from(sessionEvents)
-    .innerJoin(chats, eq(chats.id, sessionEvents.chatId))
-    .innerJoin(sessions, eq(sessions.id, chats.sessionId))
-    .innerJoin(
-      organizationMembers,
-      eq(organizationMembers.userId, sessions.userId),
-    )
     .where(
       and(
-        eq(organizationMembers.organizationId, organizationId),
         eq(sessionEvents.type, "turn/start"),
         gte(sessionEvents.createdAt, since),
       ),
@@ -220,7 +212,7 @@ export async function reflectOnRecentSessions(params: {
 }): Promise<{ proposals: number }> {
   try {
     const sinceDays = params.sinceDays ?? DEFAULT_SINCE_DAYS;
-    const turns = await gatherRecentTurns(params.organizationId, sinceDays);
+    const turns = await gatherRecentTurns(sinceDays);
 
     if (turns.length === 0) {
       return { proposals: 0 };

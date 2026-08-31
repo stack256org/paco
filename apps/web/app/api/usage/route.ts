@@ -2,7 +2,6 @@ import type { NextRequest } from "next/server";
 import { parseUsageQueryRange } from "./_lib/query-range";
 import { getUsageInsights } from "@/lib/db/usage-insights";
 import { getUsageHistory } from "@/lib/db/usage";
-import { getSoleUserId } from "@/lib/db/users";
 
 /**
  * GET /api/usage — Retrieve aggregated usage history + derived insights.
@@ -15,13 +14,12 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const userId = await getSoleUserId();
     const queryOptions = rangeResult.range
       ? { range: rangeResult.range }
       : undefined;
     const [usage, insights] = await Promise.all([
-      getUsageHistory(userId, queryOptions),
-      getUsageInsights(userId, queryOptions),
+      getUsageHistory(queryOptions),
+      getUsageInsights(queryOptions),
     ]);
     return Response.json({ usage, insights });
   } catch (error) {

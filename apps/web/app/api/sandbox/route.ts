@@ -121,7 +121,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const token = await getGithubToken(sessionRecord.userId);
+    const token = await getGithubToken();
     if (!token) {
       return Response.json({ error: GITHUB_NOT_CONNECTED }, { status: 400 });
     }
@@ -135,7 +135,7 @@ export async function POST(req: Request) {
 
   let sandbox: Awaited<ReturnType<typeof connectSandbox>>;
   try {
-    const identity = await getGitIdentity(sessionRecord.userId);
+    const identity = await getGitIdentity();
     const gitUser = {
       name: identity.name,
       email: identity.email,

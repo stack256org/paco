@@ -66,15 +66,14 @@ function disconnected(): GithubConnectionResponse {
 }
 
 export async function GET() {
-  const userId = await getSoleUserId();
-  const connection = await getGithubConnection(userId);
+  const connection = await getGithubConnection();
   if (!connection) {
     return NextResponse.json(disconnected() satisfies GithubConnectionResponse);
   }
 
   // Unsealing is the only way to know the stored token is still usable, and it
   // is a local decrypt — no network, no GitHub call.
-  const tokenUnreadable = (await getGithubToken(userId)) === null;
+  const tokenUnreadable = (await getGithubToken()) === null;
 
   return NextResponse.json({
     connected: true,
@@ -139,7 +138,7 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE() {
-  await deleteGithubToken(await getSoleUserId());
+  await deleteGithubToken();
 
   return NextResponse.json(disconnected() satisfies GithubConnectionResponse);
 }

@@ -3,7 +3,6 @@ import { z } from "zod";
 import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
 import { getGithubToken } from "@/lib/db/github-tokens";
 import { getSessionById, updateSession } from "@/lib/db/sessions";
-import { getSoleUserId } from "@/lib/db/users";
 import { GhError, isGhMissing } from "@/lib/github/gh";
 import { createRepoFromLocal } from "@/lib/github/gh-repo";
 import { GITHUB_NOT_CONNECTED, SESSION_NOT_FOUND } from "@/lib/error-copy";
@@ -46,7 +45,7 @@ export async function POST(request: Request) {
 
   const { sessionId, repoName, description, isPrivate, owner } = parsed.data;
 
-  const token = await getGithubToken(await getSoleUserId());
+  const token = await getGithubToken();
   if (!token) {
     return Response.json({ error: GITHUB_NOT_CONNECTED }, { status: 400 });
   }

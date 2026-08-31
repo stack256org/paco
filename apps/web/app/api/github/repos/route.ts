@@ -1,5 +1,4 @@
 import { getGithubToken } from "@/lib/db/github-tokens";
-import { getSoleUserId } from "@/lib/db/users";
 import { GhError, ghJson, isGhMissing } from "@/lib/github/gh";
 
 /**
@@ -66,7 +65,7 @@ function toSummary(entry: RepoListEntry): GithubRepoSummary | null {
 }
 
 export async function GET(request: Request) {
-  const token = await getGithubToken(await getSoleUserId());
+  const token = await getGithubToken();
   if (!token) {
     return Response.json(
       { error: "Connect GitHub in Settings first.", repos: [] },

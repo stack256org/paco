@@ -78,7 +78,7 @@ async function resolveContext(context: RouteContext) {
     };
   }
 
-  const token = await getGithubToken(session.userId);
+  const token = await getGithubToken();
   if (!token) {
     return {
       ok: false as const,

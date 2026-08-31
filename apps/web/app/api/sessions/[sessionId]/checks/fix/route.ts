@@ -235,7 +235,7 @@ export async function POST(req: Request, context: RouteContext) {
   const allAnnotations: Record<string, CheckAnnotation[]> = {};
 
   if (runsWithIds.length > 0) {
-    const token = await getGithubToken(sessionRecord.userId);
+    const token = await getGithubToken();
     if (!token) {
       return Response.json(
         formatFixResponse(checkRuns, compactedLogs, allAnnotations),

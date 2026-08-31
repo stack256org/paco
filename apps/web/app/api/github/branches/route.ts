@@ -1,5 +1,4 @@
 import { getGithubToken } from "@/lib/db/github-tokens";
-import { getSoleUserId } from "@/lib/db/users";
 import { GhError, ghJson, isGhMissing } from "@/lib/github/gh";
 import { BAD_REQUEST, GITHUB_NOT_CONNECTED } from "@/lib/error-copy";
 
@@ -62,7 +61,7 @@ export async function GET(request: Request) {
     return Response.json({ error: BAD_REPOSITORY }, { status: 400 });
   }
 
-  const token = await getGithubToken(await getSoleUserId());
+  const token = await getGithubToken();
   if (!token) {
     return Response.json({ error: GITHUB_NOT_CONNECTED }, { status: 400 });
   }

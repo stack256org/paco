@@ -15,29 +15,25 @@ let lastLimitArg: number | undefined;
 
 /**
  * Fluent chain matching `reflect.ts`'s exact query shape:
- * `db.select({...}).from(sessionEvents).innerJoin(...).innerJoin(...).innerJoin(...).where(...).orderBy(...).limit(...)`.
- * The arguments each link is handed (besides `limit`'s) are irrelevant to
- * this fake — the mocked rows already stand in for whatever a real
- * join+filter would produce, in the order a real `orderBy(desc(...))` would
- * return them. `limit` both records what it was called with (so a test can
- * assert the cap is pushed into the query) and actually applies it, the way
- * a real `LIMIT` clause would.
+ * `db.select({...}).from(sessionEvents).where(...).orderBy(...).limit(...)`.
+ * No joins: the query reads `sessionEvents` directly now that scoping
+ * through `organizationMembers` (and the `chats`/`sessions` joins that only
+ * existed to reach it) is gone. The arguments each link is handed (besides
+ * `limit`'s) are irrelevant to this fake — the mocked rows already stand in
+ * for whatever a real filter would produce, in the order a real
+ * `orderBy(desc(...))` would return them. `limit` both records what it was
+ * called with (so a test can assert the cap is pushed into the query) and
+ * actually applies it, the way a real `LIMIT` clause would.
  */
 const fakeDb = {
   select: (_columns: unknown) => ({
     from: (_table: unknown) => ({
-      innerJoin: (_t1: unknown, _c1: unknown) => ({
-        innerJoin: (_t2: unknown, _c2: unknown) => ({
-          innerJoin: (_t3: unknown, _c3: unknown) => ({
-            where: (_condition: unknown) => ({
-              orderBy: (_order: unknown) => ({
-                limit: (n: number) => {
-                  lastLimitArg = n;
-                  return Promise.resolve(selectRows.slice(0, n));
-                },
-              }),
-            }),
-          }),
+      where: (_condition: unknown) => ({
+        orderBy: (_order: unknown) => ({
+          limit: (n: number) => {
+            lastLimitArg = n;
+            return Promise.resolve(selectRows.slice(0, n));
+          },
         }),
       }),
     }),

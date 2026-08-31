@@ -216,7 +216,7 @@ export async function POST(req: Request) {
     // exists.
     const userId = await getSoleUserId();
     const titlePromise = resolveSessionTitle(body);
-    const preferencesPromise = getUserPreferences(userId);
+    const preferencesPromise = getUserPreferences();
 
     const [title, rawPreferences] = await Promise.all([
       titlePromise,

@@ -24,7 +24,7 @@ export async function GET(req: Request, context: RouteContext) {
 
   const [chats, rawPreferences] = await Promise.all([
     getChatSummariesBySessionId(sessionId),
-    getUserPreferences(sessionContext.sessionRecord.userId),
+    getUserPreferences(),
   ]);
   const preferences = rawPreferences;
   return Response.json({ chats, defaultModelId: preferences.defaultModelId });
@@ -71,9 +71,7 @@ export async function POST(req: Request, context: RouteContext) {
     }
   }
 
-  const preferences = await getUserPreferences(
-    sessionContext.sessionRecord.userId,
-  );
+  const preferences = await getUserPreferences();
   const chat = await createChat({
     id: requestedChatId ?? nanoid(),
     sessionId,

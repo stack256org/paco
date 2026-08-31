@@ -147,7 +147,7 @@ async function resolveChatModelRuntime(params: {
   const [sessionRecord, chat, rawPreferences] = await Promise.all([
     getSessionById(params.sessionId),
     getChatById(params.chatId),
-    getUserPreferences(params.userId).catch((error) => {
+    getUserPreferences().catch((error) => {
       console.error("Failed to load user preferences:", error);
       return null;
     }),
@@ -1370,7 +1370,7 @@ const runAgentStep = async (
     // by the durable workflow runtime, so a token that crossed a step boundary
     // would be written to the database in clear — the one place the sealed
     // column exists to keep it out of.
-    const githubToken = await getGithubToken(userId);
+    const githubToken = await getGithubToken();
 
     recorder = new TurnEventRecorder(chatId, crypto.randomUUID());
     // Falls back to the assistant row only in the degenerate case of a run

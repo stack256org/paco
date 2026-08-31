@@ -67,32 +67,32 @@ export function toUserPreferencesData(
 }
 
 /**
- * Get user preferences, creating default preferences if none exist
+ * This instance's one set of preferences, creating defaults if none exist yet.
+ *
+ * Unfiltered by design: the instance has exactly one tenant, so whichever
+ * row exists (there is at most one) is the correct read. No `userId` is
+ * needed to ask for it.
  */
-export async function getUserPreferences(
-  userId: string,
-): Promise<UserPreferencesData> {
-  const [existing] = await db
-    .select()
-    .from(userPreferences)
-    .where(eq(userPreferences.userId, userId))
-    .limit(1);
+export async function getUserPreferences(): Promise<UserPreferencesData> {
+  const [existing] = await db.select().from(userPreferences).limit(1);
 
   return toUserPreferencesData(existing);
 }
 
 /**
- * Update user preferences, creating if they don't exist
+ * Update this instance's preferences, creating the row if it doesn't exist.
+ *
+ * The lookup and the update are both unfiltered — there is at most one row
+ * to find or touch. `userId` is needed only on the create path, to satisfy
+ * `userPreferences.userId`'s `NOT NULL` foreign key into `users` (dropped in
+ * a later step of this migration); the caller passes in
+ * `getSoleUserId()`'s result rather than this function resolving it itself.
  */
 export async function updateUserPreferences(
   userId: string,
   updates: Partial<UserPreferencesData>,
 ): Promise<UserPreferencesData> {
-  const [existing] = await db
-    .select()
-    .from(userPreferences)
-    .where(eq(userPreferences.userId, userId))
-    .limit(1);
+  const [existing] = await db.select().from(userPreferences).limit(1);
 
   if (existing) {
     const [updated] = await db
@@ -101,7 +101,7 @@ export async function updateUserPreferences(
         ...updates,
         updatedAt: new Date(),
       })
-      .where(eq(userPreferences.userId, userId))
+      .where(eq(userPreferences.id, existing.id))
       .returning();
 
     return toUserPreferencesData(updated);

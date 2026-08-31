@@ -3,7 +3,6 @@ import "server-only";
 import { chatBranchName } from "@paco/sandbox";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
 import { getGithubToken } from "@/lib/db/github-tokens";
-import { getSoleUserId } from "@/lib/db/users";
 import { findPullRequest } from "./gh-pr";
 
 /**
@@ -121,7 +120,7 @@ export async function refreshPullRequests(params: {
     return [];
   }
 
-  const token = await getGithubToken(await getSoleUserId());
+  const token = await getGithubToken();
   if (!token) {
     return [];
   }

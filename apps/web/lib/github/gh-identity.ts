@@ -16,11 +16,14 @@ import { DEFAULT_GIT_USER } from "@paco/sandbox";
  * Falls back to Paco's own identity when no account is connected. Git refuses
  * to commit without one at all, and a session with no GitHub connection is
  * still a session that has to be able to commit locally.
+ *
+ * Unfiltered read: the instance has exactly one tenant, so its one
+ * connection (if any) is the correct one to use.
  */
 export type GitIdentity = { name: string; email: string };
 
-export async function getGitIdentity(userId: string): Promise<GitIdentity> {
-  const connection = await getGithubConnection(userId);
+export async function getGitIdentity(): Promise<GitIdentity> {
+  const connection = await getGithubConnection();
   if (!connection) {
     return { ...DEFAULT_GIT_USER };
   }

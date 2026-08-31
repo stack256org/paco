@@ -162,7 +162,7 @@ export async function checkPullRequest(params: {
     return cached;
   }
 
-  const token = await getGithubToken(sessionRecord.userId);
+  const token = await getGithubToken();
   if (!token) {
     return cached;
   }
@@ -213,7 +213,7 @@ export async function getMergeReadiness(params: {
     return { ...empty, blockers: [mergeBlocker("no-repository")] };
   }
 
-  const token = await getGithubToken(sessionRecord.userId);
+  const token = await getGithubToken();
   if (!token) {
     return { ...empty, blockers: [mergeBlocker("github-not-connected")] };
   }

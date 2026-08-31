@@ -681,8 +681,8 @@ async function readBodyTextCapped(
 /**
  * Every capability that acts inside a session used to gate on the
  * installer: a plugin could reach whatever administrator installed it could
- * reach, checked live against `plugins.installedBy`, `userExists` and
- * `isAdmin` on every call.
+ * reach, checked live against `plugins.installedBy` and `isAdmin` on every
+ * call.
  *
  * That whole scheme was about telling one requester's reach apart from
  * another's, and there is no more requester to tell apart — this instance

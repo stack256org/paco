@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import { getChatSummariesBySessionId } from "@/lib/db/sessions";
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { getUserPreferences } from "@/lib/db/user-preferences";
-import { getSoleUserId } from "@/lib/db/users";
 import { SessionLayoutShell } from "./session-layout-shell";
 
 interface SessionLayoutProps {
@@ -32,7 +31,7 @@ export default async function SessionLayout({
   try {
     const [chats, rawPreferences] = await Promise.all([
       getChatSummariesBySessionId(sessionId),
-      getUserPreferences(await getSoleUserId()),
+      getUserPreferences(),
     ]);
     const preferences = rawPreferences;
     initialChatsData = {
