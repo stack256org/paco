@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { ModelPreferencesSection } from "../preferences-section";
+import { ClaudeCredentialSection } from "./claude-credential-section";
 
 export const metadata: Metadata = {
   title: "Models",
@@ -19,6 +20,8 @@ export default function ModelsPage() {
       </div>
 
       <ModelPreferencesSection />
+
+      <ClaudeCredentialSection />
     </div>
   );
 }
