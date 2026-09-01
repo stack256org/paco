@@ -72,7 +72,7 @@ describe("/api/models", () => {
   });
 
   describe("with a gateway configured", () => {
-    let previousPacoHome: string | undefined;
+    let previousHome: string | undefined;
     let previousBaseUrl: string | null;
     let tempHome: string;
 
@@ -80,19 +80,22 @@ describe("/api/models", () => {
       previousBaseUrl = claudeBaseUrl;
       claudeBaseUrl = "https://llm.example.com";
 
-      // An isolated, empty PACO_HOME: this instance's gateway has never been
-      // queried by the CLI, so no discovery cache exists yet.
-      previousPacoHome = process.env.PACO_HOME;
+      // An isolated, empty $HOME: this instance's gateway has never been
+      // queried by the CLI, so no discovery cache exists yet. Not
+      // PACO_HOME — the cache path is keyed off the CLI's own $HOME, which
+      // model-catalog.ts's `gatewayModelCachePath` deliberately does not
+      // conflate with Paco's own data directory.
+      previousHome = process.env.HOME;
       tempHome = mkdtempSync(join(tmpdir(), "paco-api-models-test-"));
-      process.env.PACO_HOME = tempHome;
+      process.env.HOME = tempHome;
     });
 
     afterEach(() => {
       claudeBaseUrl = previousBaseUrl;
-      if (previousPacoHome === undefined) {
-        delete process.env.PACO_HOME;
+      if (previousHome === undefined) {
+        delete process.env.HOME;
       } else {
-        process.env.PACO_HOME = previousPacoHome;
+        process.env.HOME = previousHome;
       }
       rmSync(tempHome, { recursive: true, force: true });
     });

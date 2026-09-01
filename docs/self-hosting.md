@@ -350,14 +350,28 @@ this replaced needed an operator to remember existed.
 Add or replace the credential from **Settings → Models**: an API key (bills
 the Anthropic API directly), or a setup token from running `claude
 setup-token` on your own machine against a Claude subscription (bills the
-subscription, not the API). Paco stores exactly one of the two — never
-both — so there is no precedence to reason about. Do this before the first
-chat: without a credential, every turn fails with an error naming Settings,
-not a raw CLI error. Settings → Models also accepts an optional gateway: a
-Base URL for a service speaking the Anthropic Messages format, with an option
-to fetch its model list. Only Claude models are supported through it —
-Anthropic does not support routing Claude Code to non-Claude models through
-any gateway, so there is no way to point this at GPT or Gemini.
+subscription, not the API). Paco stores exactly one of the two, and each
+turn's child `claude` process is built to match: the four environment
+variables that decide which account bills a turn and which server the CLI
+talks to (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) are never
+inherited from the server's own process environment — `packages/claude-code/
+child-env.ts` excludes them outright, even though they'd otherwise match the
+`ANTHROPIC_`/`CLAUDE_` prefixes Paco does pass through wholesale for
+everything else in that namespace. The only route any of the four has into
+the child is `apps/web/lib/agent/run-step.ts` building them fresh from
+Settings on every turn. So there genuinely is no precedence to reason
+about — not merely because the Settings UI only lets you fill in one
+credential, but because an `ANTHROPIC_API_KEY` left over in your shell,
+`apps/web/.env`, or a hand-added line in `paco.env` cannot reach the CLI
+alongside a setup token saved in Settings and silently outrank it. Do this
+before the first chat: without a credential, every turn fails with an error
+naming Settings, not a raw CLI error. Settings → Models also accepts an
+optional gateway: a Base URL for a service speaking the Anthropic Messages
+format, with an option to fetch its model list. Only Claude models are
+supported through it — Anthropic does not support routing Claude Code to
+non-Claude models through any gateway, so there is no way to point this at
+GPT or Gemini.
 
 ### The `paco` command
 

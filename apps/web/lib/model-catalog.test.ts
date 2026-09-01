@@ -87,20 +87,23 @@ describe("isKnownModelId", () => {
 });
 
 describe("listClaudeModels", () => {
-  let previousPacoHome: string | undefined;
+  // The cache path is keyed off the CLI's own `$HOME`, not `PACO_HOME` —
+  // see the comment on `gatewayModelCachePath` in model-catalog.ts for why
+  // those two are deliberately not the same thing.
+  let previousHome: string | undefined;
   let tempHome: string;
 
   beforeEach(() => {
-    previousPacoHome = process.env.PACO_HOME;
+    previousHome = process.env.HOME;
     tempHome = mkdtempSync(join(tmpdir(), "paco-model-catalog-test-"));
-    process.env.PACO_HOME = tempHome;
+    process.env.HOME = tempHome;
   });
 
   afterEach(() => {
-    if (previousPacoHome === undefined) {
-      delete process.env.PACO_HOME;
+    if (previousHome === undefined) {
+      delete process.env.HOME;
     } else {
-      process.env.PACO_HOME = previousPacoHome;
+      process.env.HOME = previousHome;
     }
     rmSync(tempHome, { recursive: true, force: true });
   });

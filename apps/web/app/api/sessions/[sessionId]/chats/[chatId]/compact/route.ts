@@ -50,7 +50,7 @@ export async function POST(_request: Request, context: RouteContext) {
    * (`capabilities.compaction`); this is the same answer for a caller that
    * reaches the route anyway.
    */
-  if (!capabilitiesForBackend(chatContext.chat.backend).compaction) {
+  if (!(await capabilitiesForBackend(chatContext.chat.backend)).compaction) {
     return Response.json(
       {
         error:

@@ -123,7 +123,7 @@ export async function PATCH(req: Request, context: RouteContext) {
       // backend's id reads back through the same fallback rule
       // `resolveBackend` uses (unknown -> claude-code), rather than the
       // client having to know that mapping itself.
-      capabilities: capabilitiesForBackend(updatedChat.backend),
+      capabilities: await capabilitiesForBackend(updatedChat.backend),
     },
   });
 }

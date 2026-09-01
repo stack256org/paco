@@ -1,8 +1,8 @@
 #!/bin/sh
 # Installed as /usr/lib/paco/paco-entrypoint.sh — deliberately NOT
 # /usr/bin/paco, which is the operator CLI (scripts/paco: upgrade, logs,
-# restart, status, auth, tls). This script is what paco.service's ExecStart
-# runs directly, by that path (see packaging/paco.service).
+# restart, status, password, tls). This script is what paco.service's
+# ExecStart runs directly, by that path (see packaging/paco.service).
 #
 # Applies pending database migrations, then execs the server in place, so
 # systemd tracks and signals the actual Node process rather than this

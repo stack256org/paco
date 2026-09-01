@@ -123,6 +123,34 @@ function githubTokenEnv(token: string | undefined): Record<string, string> {
 }
 
 /**
+ * This instance's configured Claude credential, or a thrown `Error` if none
+ * is configured.
+ *
+ * Exported separately from `runAgentTurn` so the workflow
+ * (`app/workflows/chat.ts`) can call it — wrapped in its own `"use step"` —
+ * before provisioning the chat's sandbox, rather than after. Provisioning
+ * can mean pulling a multi-GB sandbox image; running that for a turn that
+ * was always going to fail for want of a credential wastes exactly the
+ * resources checking early is meant to save.
+ *
+ * Thrown as a plain `Error` rather than a new channel: the workflow step
+ * that ultimately drives the turn already wraps its work in a try/catch that
+ * records the turn as failed and rethrows, so this reaches the operator the
+ * same way any other pre-run failure does. Without it, an unconfigured
+ * instance would instead start the CLI and fail deep inside it with an
+ * authentication error that never mentions Paco or where to fix it.
+ */
+export async function requireClaudeCredential(): Promise<ClaudeCredential> {
+  const claudeCredential = await readClaudeCredential();
+  if (claudeCredential === null) {
+    throw new Error(
+      "No Claude credential is configured for this instance. Add one in Settings → Models before running a turn.",
+    );
+  }
+  return claudeCredential;
+}
+
+/**
  * The instance's Claude credential, as exactly one environment variable.
  *
  * Which variable depends on what the operator configured, and only ever one
@@ -222,22 +250,9 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
 }): Promise<AgentStepResult<UI>> {
   const { options } = params;
 
-  /*
-   * Checked before any of the rest of this function's setup work, and thrown
-   * as a plain `Error` rather than a new channel: the workflow step that
-   * calls `runAgentTurn` (`app/workflows/chat.ts`) already wraps its call in
-   * a try/catch that records the turn as failed and rethrows, so this
-   * reaches the operator the same way any other pre-run failure does.
-   * Without it, an unconfigured instance would instead start the CLI and
-   * fail deep inside it with an authentication error that never mentions
-   * Paco or where to fix it.
-   */
-  const claudeCredential = await readClaudeCredential();
-  if (claudeCredential === null) {
-    throw new Error(
-      "No Claude credential is configured for this instance. Add one in Settings → Models before running a turn.",
-    );
-  }
+  // See `requireClaudeCredential`'s own doc for why this throws rather than
+  // letting the CLI start and fail deep inside itself.
+  const claudeCredential = await requireClaudeCredential();
 
   // The gateway is optional, so unlike the credential above this never
   // blocks the turn — a null `claudeBaseUrl` just means Anthropic direct.

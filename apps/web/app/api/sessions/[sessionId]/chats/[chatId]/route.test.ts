@@ -120,6 +120,23 @@ mock.module("@/lib/db/sessions", () => ({
   },
 }));
 
+// `capabilitiesForBackend` reads this to fill `capabilities.models` from a
+// configured gateway (falling back to the static catalog otherwise); no
+// test in this file configures one, and mocking it keeps that read from
+// hitting the real (unconfigured, in this test run) database client.
+mock.module("@/lib/settings/instance-settings", () => ({
+  readInstanceSettings: () =>
+    Promise.resolve({
+      appDomain: null,
+      tlsEnabled: false,
+      previewBaseDomain: null,
+      claudeCredentialKind: null,
+      claudeCredentialSetAt: null,
+      claudeBaseUrl: null,
+      claudeModelDiscovery: false,
+    }),
+}));
+
 mock.module("@/lib/db/user-preferences", () => ({
   getUserPreferences: async () => ({
     defaultModelId: "model-default",

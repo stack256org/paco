@@ -545,10 +545,13 @@ describe("runAgentTurn", () => {
     });
 
     // `startTurn` and the `onSteer` registration happen synchronously inside
-    // `runAgentTurn`, after its two pre-run reads (`readClaudeCredential`,
-    // `readInstanceSettings`) resolve — each a microtask tick even though
-    // both promises are already resolved here. Flushing the same number of
-    // ticks is what makes this assertion robust rather than timing-dependent.
+    // `runAgentTurn`, after its pre-run reads resolve: `requireClaudeCredential`
+    // (itself an `await readClaudeCredential()`, so two microtask hops) and
+    // `readInstanceSettings` (one more) — three ticks total, even though
+    // every promise involved is already resolved here. Flushing the same
+    // number of ticks is what makes this assertion robust rather than
+    // timing-dependent.
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(registeredSteer).toBeDefined();

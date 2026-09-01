@@ -72,15 +72,25 @@ interface GatewayModelCacheEntry {
  * (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, set in
  * `lib/agent/run-step.ts`'s `claudeGatewayEnv`).
  *
- * `PACO_HOME` is the same env var `lib/memory/paths.ts` resolves for Paco's
- * own data dir — the packaged install sets it to the `paco` service
- * account's home directory, which is also `$HOME` for the spawned CLI
- * process. So this is genuinely the same `~/.claude` the CLI itself writes
- * to, not a second guess at its location.
+ * This is **not** `PACO_HOME`. That variable (`lib/memory/paths.ts`'s
+ * `dataDir()`) is Paco's own data directory — the root for memory and
+ * installed plugins, documented in `docs/self-hosting.md` as an operator
+ * override — and has nothing to do with where the `claude` CLI keeps its
+ * config. The packaged install does not even set `PACO_HOME`: `postinst`
+ * never writes it into `paco.env`, and `paco-entrypoint.sh` assigns it as a
+ * plain shell variable without exporting it, so it never reaches the server
+ * process's environment there either. The CLI's cache lives under its own
+ * `$HOME`, which is whatever `HOME` the server process itself runs with —
+ * `child-env.ts` passes that value through to the spawned CLI unchanged.
+ * Using `PACO_HOME` here would have been right only by the accident of it
+ * usually being unset; an operator who *does* set it (to relocate memory or
+ * plugins, exactly as documented) would silently point this function at a
+ * directory the CLI never writes to, and the picker would fall back to the
+ * static aliases forever.
  */
 function gatewayModelCachePath(): string {
   return join(
-    process.env.PACO_HOME ?? homedir(),
+    process.env.HOME ?? homedir(),
     ".claude",
     "cache",
     "gateway-models.json",
@@ -177,7 +187,22 @@ export function listAvailableModels(
   return ALL_MODELS.filter((model) => accepted.includes(model.id));
 }
 
-/** Whether an id names a model this build actually offers, on any backend. */
-export function isKnownModelId(modelId: string): boolean {
-  return ALL_MODELS.some((model) => model.id === modelId);
+/**
+ * Whether an id names a model this build actually offers, on any backend.
+ *
+ * `claudeBaseUrl` widens the accepted set to match what the picker actually
+ * shows: with a gateway configured, `listClaudeModels` returns that
+ * gateway's own ids (from the CLI's discovery cache) instead of the static
+ * tier aliases, and a gateway model id an operator picked must not be
+ * rejected here and silently replaced with the default — the exact failure
+ * `app/api/chat/_lib/model-selection.ts` exists to avoid. Omitted (or
+ * `null`), this checks only the static aliases, which is also what
+ * `listClaudeModels(null)` returns — so passing `null` explicitly and
+ * omitting the argument answer identically.
+ */
+export function isKnownModelId(
+  modelId: string,
+  claudeBaseUrl: string | null = null,
+): boolean {
+  return listClaudeModels(claudeBaseUrl).some((model) => model.id === modelId);
 }

@@ -379,11 +379,11 @@ password_state() {
 }
 
 cmd_status() {
-  echo "Unit:      $(unit_state)"
-  echo "Version:   $(installed_version)"
-  echo "Domain:    $(configured_domain)"
-  echo "Password:  $(password_state)"
-  echo "CLI:       $(claude_cli_present)"
+  echo "Unit:       $(unit_state)"
+  echo "Version:    $(installed_version)"
+  echo "Domain:     $(configured_domain)"
+  echo "Password:   $(password_state)"
+  echo "CLI:        $(claude_cli_present)"
   echo "Credential: $(claude_credential_state)"
 }
 

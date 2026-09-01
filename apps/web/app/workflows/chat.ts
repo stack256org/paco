@@ -9,7 +9,7 @@ import type { ClaudeAgentDefinition, ClaudeRunUsage } from "@paco/claude-code";
 import type { TurnPolicy } from "@paco/agent-backend";
 import type { SkillMetadata } from "@paco/sandbox";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
-import { runAgentTurn } from "@/lib/agent/run-step";
+import { requireClaudeCredential, runAgentTurn } from "@/lib/agent/run-step";
 import { appLoopbackUrl } from "@/lib/app-url";
 import {
   classifySetupFailure,
@@ -63,6 +63,7 @@ import {
 } from "@/lib/chat/attachment-prompt";
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
+import { readInstanceSettings } from "@/lib/settings/instance-settings";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
 import type {
   WorkflowRunStatus,
@@ -142,14 +143,16 @@ async function resolveChatModelRuntime(params: {
 }): Promise<ChatModelRuntime> {
   "use step";
 
-  const [sessionRecord, chat, rawPreferences] = await Promise.all([
-    getSessionById(params.sessionId),
-    getChatById(params.chatId),
-    getUserPreferences().catch((error) => {
-      console.error("Failed to load user preferences:", error);
-      return null;
-    }),
-  ]);
+  const [sessionRecord, chat, rawPreferences, { claudeBaseUrl }] =
+    await Promise.all([
+      getSessionById(params.sessionId),
+      getChatById(params.chatId),
+      getUserPreferences().catch((error) => {
+        console.error("Failed to load user preferences:", error);
+        return null;
+      }),
+      readInstanceSettings(),
+    ]);
 
   if (!sessionRecord) {
     throw new Error("Session not found");
@@ -164,6 +167,9 @@ async function resolveChatModelRuntime(params: {
     selectedModelId,
     effort: chat.effort,
     label: "Selected model",
+    // A gateway model id the operator picked must be accepted, not silently
+    // replaced with the default — see `resolveChatModelSelection`'s doc.
+    claudeBaseUrl,
   });
   /*
    * Three levels, resolved independently, because they are three different
@@ -421,6 +427,22 @@ async function consumeSteerStep(
   ]);
 }
 
+/**
+ * Fail the turn before anything below provisions the chat's sandbox, if no
+ * Claude credential is configured.
+ *
+ * `runAgentTurn` (`lib/agent/run-step.ts`) already checks this, but only
+ * once it runs — well after `resolveChatSandboxRuntime` below has kicked off
+ * provisioning, which can mean pulling a multi-GB sandbox image. An
+ * unconfigured instance has no business starting that pull for a turn that
+ * was always going to fail. `"use step"` because `readClaudeCredential`
+ * does I/O the workflow body cannot do directly.
+ */
+async function ensureClaudeCredentialConfiguredStep(): Promise<void> {
+  "use step";
+  await requireClaudeCredential();
+}
+
 export async function runAgentWorkflow(options: Options) {
   "use workflow";
 
@@ -441,6 +463,10 @@ export async function runAgentWorkflow(options: Options) {
   const inputMessagesPersistPromise = options.inputMessagesPersisted
     ? Promise.resolve()
     : persistInputMessages(options.chatId, options.messages);
+
+  // Before anything below provisions the sandbox. See the step's own doc.
+  await ensureClaudeCredentialConfiguredStep();
+
   const modelRuntimePromise = resolveChatModelRuntime({
     sessionId: options.sessionId,
     chatId: options.chatId,
@@ -1174,7 +1200,7 @@ const buildTurnPromptStep = async (params: {
           import("@/lib/agent/backend-capabilities"),
         ]);
       const chatRow = await readChat(params.chatId);
-      canViewImages = capabilitiesForBackend(chatRow?.backend).images;
+      canViewImages = (await capabilitiesForBackend(chatRow?.backend)).images;
     } catch (error) {
       console.error(
         "[workflow] Could not resolve the backend's image capability:",

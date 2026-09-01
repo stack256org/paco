@@ -2,7 +2,8 @@ import "server-only";
 
 import type { BackendCapabilities } from "@paco/agent-backend";
 import { ClaudeCodeBackend } from "@paco/claude-code";
-import { CLAUDE_MODEL_IDS } from "@/lib/model-catalog";
+import { CLAUDE_MODEL_IDS, listClaudeModels } from "@/lib/model-catalog";
+import { readInstanceSettings } from "@/lib/settings/instance-settings";
 import { normalizeBackendId } from "./backend-factory";
 
 /**
@@ -30,15 +31,15 @@ import { normalizeBackendId } from "./backend-factory";
  * this and `resolveBackend` answer claude-code for it, rather than one of
  * them reporting capabilities for a backend that no longer exists.
  */
-export function capabilitiesForBackend(
+export async function capabilitiesForBackend(
   backend: string | null | undefined,
-): BackendCapabilities {
+): Promise<BackendCapabilities> {
   // Kept only for the console.warn side effect on a retired backend id; the
   // resolved value itself is discarded — capabilities always come from
   // ClaudeCodeBackend.
   normalizeBackendId(backend);
   const capabilities = new ClaudeCodeBackend().capabilities();
-  return withResolvedModels(capabilities);
+  return await withResolvedModels(capabilities);
 }
 
 /**
@@ -64,12 +65,39 @@ export function capabilitiesForBackend(
  * `run-step.ts`'s `resolveModelId` does, and `undefined` correctly means
  * "forward whatever the picker chose" there, since Claude Code resolves tier
  * aliases itself.
+ *
+ * The list itself comes from `listClaudeModels(claudeBaseUrl)`, not the
+ * static `CLAUDE_MODEL_IDS` — with a gateway configured and discovered,
+ * that is the gateway's own ids, and this is the set the composer
+ * (`model-effort-backend-controls.tsx`) filters `modelOptions` against
+ * before deciding whether to render the picker at all. Resolving it against
+ * the static aliases unconditionally is what made the picker vanish for a
+ * configured gateway: `modelOptions` (built from `listClaudeModels`
+ * elsewhere, e.g. `getInitialModels` in `page.tsx`) held gateway ids, none
+ * of which matched the static aliases this used to fall back to, so every
+ * option was filtered out. `readInstanceSettings` failing (or reporting no
+ * gateway) falls back to `CLAUDE_MODEL_IDS`, same as `listClaudeModels`
+ * itself falls back to the static catalog for an absent or unreadable
+ * discovery cache — an operator must never be left with an empty picker.
  */
-function withResolvedModels(
+async function withResolvedModels(
   capabilities: BackendCapabilities,
-): BackendCapabilities {
+): Promise<BackendCapabilities> {
   if (capabilities.models !== undefined) {
     return capabilities;
   }
-  return { ...capabilities, models: CLAUDE_MODEL_IDS };
+  let claudeBaseUrl: string | null = null;
+  try {
+    ({ claudeBaseUrl } = await readInstanceSettings());
+  } catch (error) {
+    console.error(
+      "[backend-capabilities] Could not read instance settings; falling back to the static model catalog:",
+      error,
+    );
+  }
+  const models = listClaudeModels(claudeBaseUrl).map((model) => model.id);
+  return {
+    ...capabilities,
+    models: models.length > 0 ? models : CLAUDE_MODEL_IDS,
+  };
 }

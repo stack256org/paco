@@ -290,7 +290,29 @@ mock.module("./chat-post-finish", () => spies);
  */
 let backendSteerCalls: Array<{ text: string }> = [];
 
+/**
+ * Backs the mocked `requireClaudeCredential` below. Resolved by default so
+ * every existing test here, none of which is about credential
+ * configuration, keeps exercising the same path it always did; the
+ * credential-check test overrides this to reject, to prove
+ * `runAgentWorkflow` fails before `resolveChatSandboxRuntime` is ever
+ * called.
+ */
+let requireClaudeCredentialImpl: () => Promise<{
+  kind: "api_key" | "setup_token";
+  value: string;
+  setAt: Date;
+}> = () =>
+  Promise.resolve({
+    kind: "api_key",
+    value: "sk-ant-test",
+    setAt: new Date(),
+  });
+
 mock.module("@/lib/agent/run-step", () => ({
+  // `runAgentWorkflow` now calls this before provisioning the sandbox
+  // (Minor 3 of the byo-claude-credential final review).
+  requireClaudeCredential: () => requireClaudeCredentialImpl(),
   runAgentTurn: async (params: {
     prompt: string;
     messageId: string;
@@ -440,6 +462,25 @@ mock.module("@/lib/db/sessions", () => ({
 
 mock.module("@/lib/db/user-preferences", () => ({
   getUserPreferences: async () => testPreferences,
+}));
+
+// `resolveChatModelRuntime` reads this directly (for `claudeBaseUrl`, so a
+// gateway model id is accepted rather than rejected — see
+// `model-selection.ts`), rather than only through the wholesale-mocked
+// `@/lib/agent/run-step`. No test in this file configures a gateway, so
+// `null` throughout keeps every existing test on the static-alias path it
+// always exercised.
+mock.module("@/lib/settings/instance-settings", () => ({
+  readInstanceSettings: () =>
+    Promise.resolve({
+      appDomain: null,
+      tlsEnabled: false,
+      previewBaseDomain: null,
+      claudeCredentialKind: null,
+      claudeCredentialSetAt: null,
+      claudeBaseUrl: null,
+      claudeModelDiscovery: false,
+    }),
 }));
 
 mock.module("./chat-sandbox-runtime", () => ({
@@ -607,6 +648,12 @@ beforeEach(() => {
   backendSteerCalls = [];
   generateIdCounter = 0;
   agentAbortsTurn = false;
+  requireClaudeCredentialImpl = () =>
+    Promise.resolve({
+      kind: "api_key",
+      value: "sk-ant-test",
+      setAt: new Date(),
+    });
   testSessionRecord = {
     id: "session-1",
     userId: "user-1",
@@ -662,6 +709,31 @@ describe("runAgentWorkflow", () => {
     } catch (error) {
       expect((error as Error).message).toContain("at least one message");
     }
+  });
+
+  /*
+   * Minor 3 of the final byo-claude-credential review:
+   * `resolveChatSandboxRuntime` can mean pulling a multi-GB sandbox image,
+   * and it used to run before `runAgentTurn`'s no-credential check ever got
+   * a chance to fire. This proves the check now happens first — the
+   * workflow throws, and the sandbox is never touched.
+   */
+  test("fails before provisioning the sandbox when no Claude credential is configured", async () => {
+    requireClaudeCredentialImpl = () =>
+      Promise.reject(
+        new Error(
+          "No Claude credential is configured for this instance. Add one in Settings → Models before running a turn.",
+        ),
+      );
+
+    try {
+      await runAgentWorkflow(makeOptions());
+      expect(true).toBe(false);
+    } catch (error) {
+      expect((error as Error).message).toContain("Settings");
+    }
+
+    expect(spies.resolveChatSandboxRuntime).not.toHaveBeenCalled();
   });
 
   test("exits before side effects when another workflow owns the stream slot", async () => {

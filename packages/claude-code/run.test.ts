@@ -207,4 +207,41 @@ describe("runClaudeCode", () => {
     expect(invocation.env.GH_TOKEN).toBe("gho_deliberate");
     expect(invocation.env.APP_SECRET).toBeUndefined();
   });
+
+  /*
+   * This is the seam Critical 1 lived on. `claudeCredentialEnv` and
+   * `claudeGatewayEnv` (apps/web/lib/agent/run-step.ts) are already correct
+   * in isolation — each returns exactly one credential variable, and their
+   * own unit tests already pass. What let the bug through is that nobody
+   * proved what actually reaches the child process, which is a MERGE of
+   * `agentProcessEnv(process.env)` and `options.env`, not `options.env`
+   * alone. An operator with `ANTHROPIC_API_KEY` in their server's
+   * environment (shell, `apps/web/.env`, or a hand-added line in
+   * `/etc/paco/paco.env`) who saved a setup token in Settings got BOTH in
+   * the child, and the key always wins in `-p` mode — silently billing the
+   * API account while the UI reported a subscription token configured.
+   */
+  test("a Settings-configured credential wins over the same variable leaking in from the server's own environment", async () => {
+    // The operator's server environment carries an API key — e.g. left over
+    // from `apps/web/.env`, or a shell export for `pnpm web`.
+    process.env.ANTHROPIC_API_KEY = "sk-ant-leaked-from-server-env";
+    // Settings has a gateway configured too, so an operator relying on the
+    // static model catalog should never see a stale proxy either.
+    process.env.ANTHROPIC_BASE_URL = "https://stale-proxy.example";
+
+    // This mirrors exactly what `run-step.ts` builds from Settings: a setup
+    // token, and no gateway configured (`claudeGatewayEnv` returns `{}`).
+    const invocation = await invoke({
+      cwd: fakeCliDir,
+      executable: fakeCli,
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth-from-settings" },
+    });
+
+    expect(invocation.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-from-settings");
+    // The leaked key must be gone, not merely overridden in a way that still
+    // left it readable — and the stale gateway must not survive either,
+    // since Settings configured no gateway at all.
+    expect(invocation.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(invocation.env.ANTHROPIC_BASE_URL).toBeUndefined();
+  });
 });

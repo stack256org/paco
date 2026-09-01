@@ -171,7 +171,7 @@ export default async function SessionChatPage({
   // chat bootstrap payload capability-driven UI reads (Section 7 Task 5) —
   // `EffortSelectorCompact` hides itself when `chatCapabilities.effort` is
   // `false`, without ever hardcoding a backend id.
-  const initialCapabilities = capabilitiesForBackend(chat.backend);
+  const initialCapabilities = await capabilitiesForBackend(chat.backend);
 
   return (
     <DiffsProvider themePreference={themePreference}>
