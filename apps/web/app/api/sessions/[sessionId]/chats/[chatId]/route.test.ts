@@ -70,7 +70,7 @@ let chatsInSession: Array<{ id: string }> = [
 
 const updateChatCalls: Array<{
   chatId: string;
-  patch: { title?: string; modelId?: string; backend?: string };
+  patch: { title?: string; modelId?: string };
 }> = [];
 /** Every command the route ran in the workspace, in order. */
 const sandboxCommands: string[] = [];
@@ -108,7 +108,7 @@ mock.module("@/app/api/sessions/_lib/session-context", () => ({
 mock.module("@/lib/db/sessions", () => ({
   updateChat: async (
     chatId: string,
-    patch: { title?: string; modelId?: string; backend?: string },
+    patch: { title?: string; modelId?: string },
   ) => {
     updateChatCalls.push({ chatId, patch });
     return updatedChat;
@@ -302,7 +302,15 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     expect(body.chat.id).toBe("chat-1");
   });
 
-  test("PATCH accepts a known backend and returns its capabilities", async () => {
+  /**
+   * The response always attaches capabilities computed from the persisted
+   * row, regardless of what the request body asked to change — there is no
+   * longer a way to ask this route to change `backend` itself (it is fixed
+   * at `"claude-code"` today), but a stale client, a retired backend's id
+   * left on the row, or plain history still needs the composer to see
+   * accurate capabilities.
+   */
+  test("PATCH returns capabilities computed from the persisted backend", async () => {
     updatedChat = {
       id: "chat-1",
       sessionId: "session-1",
@@ -313,7 +321,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     const { PATCH } = await routeModulePromise;
 
     const response = await PATCH(
-      createPatchRequest({ backend: "claude-code" }),
+      createPatchRequest({ title: "Updated" }),
       createContext(),
     );
     const body = (await response.json()) as {
@@ -329,139 +337,23 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
   });
 
   /**
-   * `modelId` and `backend` used to be written straight through as
-   * independent fields, so a chat could end up storing a `modelId` its
-   * backend does not accept — a row a retired backend's id might have left
-   * behind, for instance. The turn survived it — `run-step.ts`'s
-   * `resolveModelId` refuses to forward an id the backend does not accept —
-   * but the composer renders the stored id, so it showed a model name the
-   * chat could not actually run.
+   * `backend` is no longer a field this route reads from the request body —
+   * the backend-switch UI that once sent it is gone, and `chats.backend` has
+   * only one possible value now. A body that still includes it is treated
+   * exactly as if the field were absent: no error, no effect.
    */
-  test("PATCH reconciles a stale model onto the backend's default", async () => {
-    ownedSessionChatResult = {
-      ok: true,
-      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
-      chat: {
-        id: "chat-1",
-        sessionId: "session-1",
-        modelId: "a-retired-backends-model",
-        activeStreamId: null,
-      },
-    };
+  test("PATCH ignores a backend field in the request body", async () => {
     const { PATCH } = await routeModulePromise;
 
     await PATCH(
-      createPatchRequest({ backend: "claude-code" }),
+      createPatchRequest({ backend: "claude-code", modelId: "haiku" }),
       createContext(),
     );
-
-    expect(updateChatCalls).toEqual([
-      { chatId: "chat-1", patch: { backend: "claude-code", modelId: "opus" } },
-    ]);
-  });
-
-  test("PATCH leaves a model the backend already accepts alone", async () => {
-    ownedSessionChatResult = {
-      ok: true,
-      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
-      chat: {
-        id: "chat-1",
-        sessionId: "session-1",
-        modelId: "sonnet",
-        activeStreamId: null,
-      },
-    };
-    const { PATCH } = await routeModulePromise;
-
-    await PATCH(
-      createPatchRequest({ backend: "claude-code" }),
-      createContext(),
-    );
-
-    expect(updateChatCalls).toEqual([
-      { chatId: "chat-1", patch: { backend: "claude-code" } },
-    ]);
-  });
-
-  /**
-   * A client that switches both at once is judged on what it asked for: the
-   * requested model is accepted by the requested backend, so nothing is
-   * overridden.
-   */
-  test("PATCH keeps a model sent alongside the backend it belongs to", async () => {
-    const { PATCH } = await routeModulePromise;
-
-    await PATCH(
-      createPatchRequest({
-        backend: "claude-code",
-        modelId: "haiku",
-      }),
-      createContext(),
-    );
-
-    expect(updateChatCalls).toEqual([
-      {
-        chatId: "chat-1",
-        patch: {
-          backend: "claude-code",
-          modelId: "haiku",
-        },
-      },
-    ]);
-  });
-
-  /** ...and overridden when it does not belong to it. */
-  test("PATCH overrides a model the requested backend cannot run", async () => {
-    const { PATCH } = await routeModulePromise;
-
-    await PATCH(
-      createPatchRequest({
-        backend: "claude-code",
-        modelId: "a-retired-backends-model",
-      }),
-      createContext(),
-    );
-
-    expect(updateChatCalls).toEqual([
-      {
-        chatId: "chat-1",
-        patch: { backend: "claude-code", modelId: "opus" },
-      },
-    ]);
-  });
-
-  /** No backend in the patch, no reconciliation: only the model is written. */
-  test("PATCH does not touch the model when no backend is requested", async () => {
-    const { PATCH } = await routeModulePromise;
-
-    await PATCH(createPatchRequest({ modelId: "haiku" }), createContext());
 
     expect(updateChatCalls).toEqual([
       { chatId: "chat-1", patch: { modelId: "haiku" } },
     ]);
   });
-
-  /**
-   * Rejected, not normalized — a write is the one moment an unrecognised
-   * value can still be refused rather than silently coerced. `"a-retired-
-   * backend"` stands for an id a previous backend once held: a row already
-   * holding it reads back as `claude-code` (`normalizeBackendId`), but a
-   * client is not allowed to ask for it going forward.
-   */
-  test.each(["some-future-backend", "a-retired-backend"])(
-    "PATCH rejects an unrecognised backend value: %s",
-    async (backend) => {
-      const { PATCH } = await routeModulePromise;
-
-      const response = await PATCH(
-        createPatchRequest({ backend }),
-        createContext(),
-      );
-
-      expect(response.status).toBe(400);
-      expect(updateChatCalls).toHaveLength(0);
-    },
-  );
 
   test("PATCH returns 404 when updateChat returns null", async () => {
     updatedChat = null;

@@ -7,17 +7,12 @@ import {
 import type { WebAgentUIMessage } from "@/app/types";
 import { capabilitiesForBackend } from "@/lib/agent/backend-capabilities";
 import {
-  type ChatBackendId,
-  isKnownBackendId,
-} from "@/lib/agent/backend-factory";
-import {
   deleteChat,
   getChatMessages,
   getChatsBySessionId,
   updateChat,
 } from "@/lib/db/sessions";
 import { type Effort, parseEffort } from "@/lib/effort";
-import { resolveModelIdForBackend } from "@/lib/model-catalog";
 import { BAD_REQUEST, CHAT_NOT_FOUND } from "@/lib/error-copy";
 
 type RouteContext = {
@@ -32,8 +27,6 @@ interface UpdateChatRequest {
    * model uses its own default — so it is distinguished from an absent field.
    */
   effort?: string | null;
-  /** Which `AgentBackend` this chat's turns run on — `chats.backend`. */
-  backend?: string;
 }
 
 export interface ChatRefreshResponse {
@@ -94,28 +87,8 @@ export async function PATCH(req: Request, context: RouteContext) {
   const nextTitle = body.title?.trim();
   const nextModelId = body.modelId?.trim();
   const hasEffort = "effort" in body;
-  const requestedBackend = body.backend?.trim();
 
-  /*
-   * Rejected, not normalized. `normalizeBackendId` is the right rule for
-   * READING a row that already holds something unrecognised, but a write is
-   * the one moment the value can still be refused — quietly storing
-   * `"claude-code"` in response to a client asking for something else would
-   * report success for a switch that did not happen. `isKnownBackendId` is
-   * the same membership test that rule is built on (both read
-   * `CHAT_BACKEND_IDS`), so the two can never disagree about which ids
-   * exist, and its type predicate is what lets `updatePayload.backend`
-   * below be assigned without a cast.
-   */
-  if (requestedBackend && !isKnownBackendId(requestedBackend)) {
-    return Response.json({ error: BAD_REQUEST }, { status: 400 });
-  }
-  const nextBackend: ChatBackendId | undefined =
-    requestedBackend && isKnownBackendId(requestedBackend)
-      ? requestedBackend
-      : undefined;
-
-  if (!(nextTitle || nextModelId || hasEffort || nextBackend)) {
+  if (!(nextTitle || nextModelId || hasEffort)) {
     return Response.json({ error: BAD_REQUEST }, { status: 400 });
   }
 
@@ -123,7 +96,6 @@ export async function PATCH(req: Request, context: RouteContext) {
     title?: string;
     modelId?: string;
     effort?: Effort | null;
-    backend?: ChatBackendId;
   } = {};
   if (nextTitle) {
     updatePayload.title = nextTitle;
@@ -137,37 +109,6 @@ export async function PATCH(req: Request, context: RouteContext) {
     // model default rather than fail to save.
     updatePayload.effort = parseEffort(body.effort);
   }
-  if (nextBackend) {
-    updatePayload.backend = nextBackend;
-
-    /*
-     * A backend switch revisits the model, because the two are not
-     * independent fields however much this request body makes them look it.
-     * `modelId` and `backend` were accepted side by side and written
-     * straight through, which is how a chat could end up storing an id its
-     * new backend cannot run. The turn survived it (`run-step.ts`'s
-     * `resolveModelId` drops an id the backend does not accept), so the only
-     * casualty was the composer, which reads the row and duly showed a model
-     * name the chat could not actually run.
-     *
-     * Reconciled here rather than in the client that sent the switch: this
-     * is the only place the write happens, and the response already carries
-     * the fresh row and capabilities the composer re-renders from, so the
-     * corrected id lands in the UI without a second round trip.
-     *
-     * `nextModelId` wins over the stored value when the same request also
-     * sets one, so a client that switches both at once is judged on what it
-     * asked for.
-     */
-    const currentModelId = nextModelId ?? chatContext.chat.modelId;
-    const reconciledModelId = resolveModelIdForBackend(
-      capabilitiesForBackend(nextBackend),
-      currentModelId,
-    );
-    if (reconciledModelId && reconciledModelId !== currentModelId) {
-      updatePayload.modelId = reconciledModelId;
-    }
-  }
 
   const updatedChat = await updateChat(chatId, updatePayload);
   if (!updatedChat) {
@@ -178,10 +119,10 @@ export async function PATCH(req: Request, context: RouteContext) {
     chat: {
       ...updatedChat,
       modelId: updatedChat.modelId,
-      // Recomputed from the row that was just written, not the client's
-      // patch: `resolveBackend`'s own fallback rule (unknown -> claude-code)
-      // is exactly what a stale/rejected `backend` value should read as
-      // here too.
+      // Computed from the persisted row so a chat still holding a retired
+      // backend's id reads back through the same fallback rule
+      // `resolveBackend` uses (unknown -> claude-code), rather than the
+      // client having to know that mapping itself.
       capabilities: capabilitiesForBackend(updatedChat.backend),
     },
   });

@@ -378,7 +378,9 @@ describe("migration 0015 — the OpenFX backend's stranded rows", () => {
     // the honest outcome for a chat whose agent no longer exists.
     const migratedRow = { resumeTokens: {}, claudeSessionId: null };
     expect(resolveChatResumeToken(migratedRow, "claude-code")).toBeUndefined();
-    expect(resolveChatResumeToken(migratedRow, "poolside")).toBeUndefined();
+    expect(
+      resolveChatResumeToken(migratedRow, "other-backend"),
+    ).toBeUndefined();
   });
 
   test("deletes the stale openfx resume key while leaving every other backend's token alone", async () => {
@@ -399,7 +401,7 @@ describe("migration 0015 — the OpenFX backend's stranded rows", () => {
     expect(
       resolveChatResumeToken(
         { resumeTokens: after, claudeSessionId: null },
-        "poolside",
+        "other-backend",
       ),
     ).toBeUndefined();
     expect(

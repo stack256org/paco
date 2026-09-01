@@ -8,13 +8,15 @@ import { normalizeBackendId } from "./backend-factory";
 /**
  * A chat's `capabilities`, computed from the real backend it runs on.
  *
- * Used wherever a chat crosses from the server to the client (the initial
- * page load in `page.tsx` and the `PATCH` route a backend switch goes
- * through) so the client never has to guess what a backend id supports —
- * `EffortSelectorCompact`'s host in `session-chat-content.tsx` hides the
- * control when `capabilities.effort` is `false` instead of hardcoding a
- * backend check, which is exactly the coupling capability-driven UI exists
- * to avoid.
+ * Used wherever a chat crosses from the server to the client — the initial
+ * page load in `page.tsx`, and the chat `PATCH` route
+ * (`app/api/sessions/[sessionId]/chats/[chatId]/route.ts`), which recomputes
+ * it on every response so a title/model/effort update also refreshes what a
+ * stale client believes the chat supports — so the client never has to guess
+ * what a backend id supports. `EffortSelectorCompact`'s host in
+ * `session-chat-content.tsx` hides the control when `capabilities.effort` is
+ * `false` instead of hardcoding a backend check, which is exactly the
+ * coupling capability-driven UI exists to avoid.
  *
  * Instantiating `ClaudeCodeBackend` here (rather than hand-copying its
  * `capabilities()` literal into a client-safe map) is what keeps this in
@@ -42,10 +44,15 @@ export function capabilitiesForBackend(
  *
  * `BackendCapabilities.models` defines `undefined` as "the app's own catalog
  * applies unchanged" — a shorthand written when the app's catalog was Claude
- * Code's tier aliases and nothing else. The composer re-applies the same
- * filter client-side, because its backend selector can switch a chat after
- * the page was rendered, and there `undefined` can only be read as "show
- * every option you were given".
+ * Code's tier aliases and nothing else. `model-catalog.ts`, which resolves
+ * that shorthand, is `server-only` and cannot be imported into the client
+ * component that renders the model picker
+ * (`model-effort-backend-controls.tsx`), so the client has no way to
+ * interpret `undefined` itself — it can only filter `modelOptions` against
+ * an explicit `capabilities.models` list. That component's own comment says
+ * as much: "`undefined` DOES NOT mean 'show everything'". This function is
+ * what makes that true by construction, by never letting `undefined` reach
+ * the client in the first place.
  *
  * Resolving the shorthand here rather than teaching the client a second copy
  * of the catalog keeps one list and one rule: the client only ever sees an
