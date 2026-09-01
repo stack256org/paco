@@ -52,3 +52,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Locally built packages — build-deb.sh writes these to the repo root.
 *.deb
+
+# Brainer — derived index. rejected.json is your input, keep it.
+.brainer/index.db
+.brainer/index.db-*
+.brainer/models/
+.brainer/hooks/
