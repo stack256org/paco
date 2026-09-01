@@ -10,6 +10,22 @@ import type { UIMessage, UIMessageChunk } from "ai";
 mock.module("server-only", () => ({}));
 
 /**
+ * The instance's Claude credential, mutable per test so the "unconfigured"
+ * path (Task 2, Step 4) can be exercised alongside the default-configured
+ * path every other test in this file relies on. `runAgentTurn` reads it via
+ * `readClaudeCredential()` on every call rather than once, so reassigning
+ * this between tests is enough — no per-test re-mocking needed.
+ */
+let claudeCredential: {
+  kind: "api_key" | "setup_token";
+  value: string;
+} | null = { kind: "api_key", value: "test-anthropic-key" };
+
+mock.module("@/lib/settings/instance-settings", () => ({
+  readClaudeCredential: () => Promise.resolve(claudeCredential),
+}));
+
+/**
  * Assistant messages are persisted with an upsert keyed on the message id, so an
  * id that comes back empty makes every turn in a chat overwrite the same row.
  * The id is not in the chunks this function consumes — the workflow writes the
@@ -512,5 +528,70 @@ describe("runAgentTurn", () => {
     });
 
     expect(step.steered).toBeUndefined();
+  });
+
+  test("fails before starting the run when no Claude credential is configured", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = createSpyBackend();
+    const previousCredential = claudeCredential;
+    claudeCredential = null;
+
+    try {
+      await expect(
+        runAgentTurn<UIMessage>({
+          prompt: "hi",
+          options: makeOptions(),
+          messageId: "assistant-42",
+          originalMessages: [],
+          backend,
+          onChunk: async () => {
+            // no-op
+          },
+        }),
+      ).rejects.toThrow(/Settings.*Models/);
+
+      // The failure is caught before the backend is ever asked to start a
+      // turn — not a run that starts and fails deep inside the CLI.
+      expect(backend.lastCtx).toBeUndefined();
+    } finally {
+      claudeCredential = previousCredential;
+    }
+  });
+});
+
+describe("claudeCredentialEnv", () => {
+  test("exports ANTHROPIC_API_KEY for an api key", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    const env = claudeCredentialEnv({ kind: "api_key", value: "sk-ant-1" });
+
+    expect(env).toEqual({ ANTHROPIC_API_KEY: "sk-ant-1" });
+  });
+
+  test("exports CLAUDE_CODE_OAUTH_TOKEN for a setup token", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    const env = claudeCredentialEnv({ kind: "setup_token", value: "oauth-1" });
+
+    expect(env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "oauth-1" });
+  });
+
+  test("never exports both", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    // ANTHROPIC_API_KEY outranks CLAUDE_CODE_OAUTH_TOKEN and is always used
+    // in -p mode, so both present means the key silently wins.
+    for (const kind of ["api_key", "setup_token"] as const) {
+      const env = claudeCredentialEnv({ kind, value: "v" });
+
+      expect(Object.keys(env)).toHaveLength(1);
+    }
+  });
+
+  test("exports nothing when no credential is configured", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    expect(claudeCredentialEnv(null)).toEqual({});
   });
 });

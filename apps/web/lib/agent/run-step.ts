@@ -12,6 +12,10 @@ import {
   DEFAULT_AGENTS,
 } from "@paco/claude-code";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
+import {
+  type ClaudeCredential,
+  readClaudeCredential,
+} from "@/lib/settings/instance-settings";
 import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
 import { buildAppendSystemPrompt } from "./system-prompt";
 import type { AgentCallOptions, SteerController } from "./types";
@@ -118,6 +122,30 @@ function githubTokenEnv(token: string | undefined): Record<string, string> {
 }
 
 /**
+ * The instance's Claude credential, as exactly one environment variable.
+ *
+ * Which variable depends on what the operator configured, and only ever one
+ * of them is set. `ANTHROPIC_API_KEY` outranks `CLAUDE_CODE_OAUTH_TOKEN` in
+ * the CLI's precedence and is always used in `-p` mode — the mode every turn
+ * runs in — so setting both would silently charge the API account while the
+ * operator believed their subscription token was in use. Settings stores one
+ * credential with its kind precisely so this function has one answer.
+ *
+ * In the environment and never in argv, for the same reason as the `gh`
+ * token above: `ps` shows one process's arguments to every user.
+ */
+export function claudeCredentialEnv(
+  credential: Pick<ClaudeCredential, "kind" | "value"> | null,
+): Record<string, string> {
+  if (credential === null) {
+    return {};
+  }
+  return credential.kind === "api_key"
+    ? { ANTHROPIC_API_KEY: credential.value }
+    : { CLAUDE_CODE_OAUTH_TOKEN: credential.value };
+}
+
+/**
  * Run one agent turn against the sandbox workspace.
  *
  * Each chunk is written out as it arrives and simultaneously fed to
@@ -166,6 +194,23 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
 }): Promise<AgentStepResult<UI>> {
   const { options } = params;
 
+  /*
+   * Checked before any of the rest of this function's setup work, and thrown
+   * as a plain `Error` rather than a new channel: the workflow step that
+   * calls `runAgentTurn` (`app/workflows/chat.ts`) already wraps its call in
+   * a try/catch that records the turn as failed and rethrows, so this
+   * reaches the operator the same way any other pre-run failure does.
+   * Without it, an unconfigured instance would instead start the CLI and
+   * fail deep inside it with an authentication error that never mentions
+   * Paco or where to fix it.
+   */
+  const claudeCredential = await readClaudeCredential();
+  if (claudeCredential === null) {
+    throw new Error(
+      "No Claude credential is configured for this instance. Add one in Settings → Models before running a turn.",
+    );
+  }
+
   const appendSystemPrompt = buildAppendSystemPrompt({
     environmentDetails: options.sandbox.environmentDetails,
     currentBranch: options.sandbox.currentBranch,
@@ -206,6 +251,7 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
       : {}),
     env: {
       ...githubTokenEnv(params.githubToken),
+      ...claudeCredentialEnv(claudeCredential),
       // Read by the PreToolUse hook, which runs as its own process and has
       // no other way to know where Paco is or who it is acting for.
       ...(params.approval && params.chatId
