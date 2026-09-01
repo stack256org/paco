@@ -245,7 +245,7 @@ export function ClaudeCredentialSection() {
             />
             API key
           </label>
-          <p className="label pl-7 text-xs">
+          <p className="pl-7 text-base-content/60 text-xs">
             Bills the Anthropic API directly, on the account the key belongs to.
           </p>
 
@@ -260,7 +260,7 @@ export function ClaudeCredentialSection() {
             />
             Setup token
           </label>
-          <p className="label pl-7 text-xs">
+          <p className="pl-7 text-base-content/60 text-xs">
             Comes from <code>claude setup-token</code> and needs a Claude
             subscription — not API billing.
           </p>
@@ -360,7 +360,7 @@ export function ClaudeCredentialSection() {
             />
             Fetch available models from this gateway
           </label>
-          <p className="label pl-7 text-xs">
+          <p className="pl-7 text-base-content/60 text-xs">
             {baseUrlIsSet
               ? "Lets the CLI query this gateway's model list and fill the picker from it, instead of the fixed opus/sonnet/haiku aliases."
               : "Needs a Base URL above before it can be turned on."}
