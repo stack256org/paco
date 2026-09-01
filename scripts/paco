@@ -44,31 +44,15 @@ Usage: paco <command>
   restart    systemctl restart paco. Re-reads /etc/paco/paco.env — run this
              after hand-editing that file (e.g. APP_URL, SMTP_*).
   status     Unit state, installed version, configured domain, whether the
-             bundled Claude Code CLI is present, whether the paco user is
-             authenticated with it, and how Poolside is (or is not) signed in.
-  auth [PROVIDER] [ARGS...]
-             Sign the paco user in to an agent backend, so the credential is
-             written under /var/lib/paco — the one thing `dpkg` never touches
-             on upgrade or `remove`. Requires root.
+             bundled Claude Code CLI is present, and whether the paco user is
+             authenticated with it.
+  auth       Sign the paco user in to Claude Code (`claude auth login`), so
+             the credential is written under /var/lib/paco — the one thing
+             `dpkg` never touches on upgrade or `remove`. Requires root.
+             That CLI ships inside this package, so a missing one means a
+             broken install, not something to go fetch.
 
-             paco auth           Unchanged: the same as `paco auth claude`.
-             paco auth claude    `claude auth login`. That CLI ships inside
-                                 this package, so a missing one means a
-                                 broken install, not something to go fetch.
-             paco auth poolside  `pool login`, Poolside's own sign-in. You
-                                 install `pool` yourself — Paco does not ship,
-                                 download or build it — so a missing one is
-                                 something to install, not a broken package.
-                                 Signs in the very binary your turns run: the
-                                 absolute path from Settings → Models →
-                                 Poolside if one is set there, otherwise
-                                 whatever `pool` is on the paco user's PATH.
-                                 Extra arguments are passed through to
-                                 `pool login`, e.g. `paco auth poolside
-                                 --api-url https://tenant.example` for an
-                                 enterprise tenant.
-
-             Neither needs a restart afterwards. Each turn spawns a fresh CLI
+             Needs no restart afterwards. Each turn spawns a fresh CLI
              process that reads the credential off disk as it starts.
   password   Set the password protecting this instance, asked for by the
              browser as user `paco`. Requires root.
@@ -161,30 +145,13 @@ cmd_restart() {
 
 # --- auth ------------------------------------------------------------------
 #
-# Two backends, two credentials, one shape. Both write into /var/lib/paco —
-# the directory `dpkg` never touches on upgrade or `apt remove` — and neither
-# needs a restart afterwards, because a turn spawns a fresh CLI process that
-# reads the credential off disk as it starts.
-#
-# They differ in exactly one way that matters to the operator, and every
-# message below turns on it: `claude` is bundled in this package, so a
-# missing one is a broken install; `pool` is not, so a missing one is
-# something to go and install.
+# Writes into /var/lib/paco — the directory `dpkg` never touches on upgrade
+# or `apt remove` — and needs no restart afterwards, because a turn spawns a
+# fresh CLI process that reads the credential off disk as it starts.
 
 require_paco_user() {
   id "$PACO_USER" >/dev/null 2>&1 \
     || fail "the '$PACO_USER' user does not exist — is paco installed? See install.sh."
-}
-
-# Refuse a value that would break out of the single quotes every `su -c`
-# below wraps it in. Only ever reached by a path an admin typed into
-# Settings, so it is a typo guard, not a security boundary — but a `pool`
-# path containing a quote would otherwise run the rest of itself as a command
-# in the service user's shell.
-reject_quote() {
-  case "$1" in
-    *\'*) fail "$2" ;;
-  esac
 }
 
 auth_claude() {
@@ -197,85 +164,10 @@ auth_claude() {
   su -s /bin/sh -l "$PACO_USER" -c 'claude auth login'
 }
 
-# The `pool` this host should sign in, which is deliberately the same one
-# every Poolside turn already runs: the absolute path an admin put in
-# Settings → Models → Poolside (which lib/agent/backend-factory.ts hands the
-# backend as `executable`), else the bare name for the service user's PATH to
-# resolve. Signing in some other `pool` on the host is the trap this avoids —
-# the operator would watch a login succeed and every turn keep failing.
-poolside_binary() {
-  poolside_configured="$(instance_setting poolside_binary_path poolside_binary_path)"
-  if [ -n "$poolside_configured" ]; then
-    printf '%s' "$poolside_configured"
-  else
-    printf 'pool'
-  fi
-}
-
-# Where `pool` keeps its credential for a given user, asked of the binary
-# rather than assumed: `pool config` prints a `credentials file:` line, and
-# it honours HOME/XDG_CONFIG_HOME, so run as the service user it names the
-# service user's file. Empty if the binary does not report one — every caller
-# falls back to naming the directory instead of printing a blank path.
-poolside_credentials_file() {
-  su -s /bin/sh -l "$PACO_USER" -c "'$1' config" 2>/dev/null \
-    | sed -n 's/^credentials file: //p' | tail -1
-}
-
-auth_poolside() {
-  require_root "auth poolside"
-  require_paco_user
-
-  pool_bin="$(poolside_binary)"
-  reject_quote "$pool_bin" \
-    "the Poolside binary path in Settings → Models → Poolside contains a single quote. Move the binary somewhere without one and update that field, then re-run 'sudo paco auth poolside'."
-
-  if ! su -s /bin/sh -l "$PACO_USER" -c "command -v '$pool_bin'" >/dev/null 2>&1; then
-    if [ "$pool_bin" = "pool" ]; then
-      fail "the 'pool' CLI is not on PATH for the '$PACO_USER' user. Paco does not ship, download or build it — unlike the bundled Claude CLI, this is not a broken install. Install it with Poolside's own installer (https://poolside.ai), then re-run 'sudo paco auth poolside'. If it is already installed somewhere the service user's PATH does not reach — systemd's PATH is not your login shell's — put its absolute path in Settings → Models → Poolside → Binary path and re-run this; that field is what your turns use, and so is what this command signs in."
-    fi
-    fail "'$pool_bin' — the binary path set in Settings → Models → Poolside — is not runnable by the '$PACO_USER' user. Every Poolside turn runs that same path, so it is failing too. Fix it there (or clear the field to fall back to whatever 'pool' is on PATH), then re-run 'sudo paco auth poolside'."
-  fi
-
-  # Extra arguments go through to `pool login` verbatim — `--api-url` for an
-  # enterprise tenant, `--api-key` for a key you would rather not paste into
-  # Settings. Re-quoted one at a time because this crosses a `su -c` shell.
-  #
-  # Verified on Debian (systemd 257 image, real `su`), against a service user
-  # shaped like the packaged one — system account, `/usr/sbin/nologin` shell:
-  # `su -s /bin/sh -l` still reaches that user's own PATH, `pool` runs as
-  # `paco`, `--api-url https://tenant.example.com` arrives intact, and an
-  # argument of `$(id -un)x` arrives as those literal characters rather than
-  # being executed. macOS `su` has no `-s`, which is why this could not be
-  # checked on the host it was written on.
-  pool_args=""
-  for pool_arg in "$@"; do
-    reject_quote "$pool_arg" \
-      "arguments to 'paco auth poolside' cannot contain a single quote — they cross a shell on the way to '$pool_bin login'."
-    pool_args="$pool_args '$pool_arg'"
-  done
-
-  pool_creds="$(poolside_credentials_file "$pool_bin")"
-  if [ -n "$pool_creds" ]; then
-    echo "paco: running '$pool_bin login' as $PACO_USER — the credential lands in $pool_creds and survives every future upgrade or 'apt remove'."
-  else
-    echo "paco: running '$pool_bin login' as $PACO_USER — the credential lands under that user's home (/var/lib/paco/.config/poolside) and survives every future upgrade or 'apt remove'."
-  fi
-  echo "paco: follow whatever '$pool_bin login' asks for below; Paco does not drive it."
-
-  su -s /bin/sh -l "$PACO_USER" -c "'$pool_bin' login$pool_args"
-
-  echo "paco: done — and there is nothing to restart. Every Poolside turn spawns a fresh '$pool_bin' process which reads this credential off disk as it starts, so the next turn picks it up."
-  if [ -n "$(instance_setting 1 poolside_api_key_sealed)" ]; then
-    echo "paco: NOTE — an API key is also stored in Settings → Models → Poolside. It reaches every turn as POOLSIDE_API_KEY, and that takes precedence over the credential you just wrote. Clear that field if you want this login to be the thing your turns use." >&2
-  fi
-}
-
 cmd_auth() {
   # Bare `paco auth` keeps the meaning it has always had, and the meaning
-  # docs/self-hosting.md §3 documents: sign in to Claude. The provider is a
-  # new, optional first argument rather than a new command, so nothing an
-  # operator has in a runbook changes.
+  # docs/self-hosting.md §3 documents: sign in to Claude. `paco auth claude`
+  # is the same command spelled explicitly.
   provider="${1:-claude}"
   if [ $# -gt 0 ]; then
     shift
@@ -283,12 +175,11 @@ cmd_auth() {
 
   case "$provider" in
     claude)
-      [ $# -eq 0 ] || fail "'paco auth claude' takes no arguments. (Did you mean 'paco auth poolside $*'? That one does forward them.)"
+      [ $# -eq 0 ] || fail "'paco auth claude' takes no arguments."
       auth_claude
       ;;
-    poolside) auth_poolside "$@" ;;
     *)
-      fail "unknown auth provider: '$provider'. Use 'paco auth claude' (what bare 'paco auth' has always meant, and still does) or 'paco auth poolside'."
+      fail "unknown auth provider: '$provider'. Use 'paco auth' or 'paco auth claude'."
       ;;
   esac
 }
@@ -517,65 +408,6 @@ claude_auth_state() {
   fi
 }
 
-# Whether the paco user can sign a Poolside turn in, and how.
-#
-# Deliberately weaker than claude_auth_state() above, because `pool` has no
-# equivalent of `claude auth status` to ask (`pool --help` lists login and
-# logout, and nothing that reports state). What can be checked without
-# spending a turn is that the credential FILE `pool config` names exists —
-# so that is what this says, in those words. A stored file that the service
-# has since rejected still reads as present here; the first turn is what
-# proves it.
-#
-# The API key in Settings is reported alongside rather than instead: it is
-# the other way to authenticate, it takes precedence over this file, and an
-# instance configured that way is correctly configured with no login at all.
-poolside_state() {
-  if [ "$(id -u)" != "0" ]; then
-    echo "unknown (run as root to check)"
-    return 0
-  fi
-  if ! id "$PACO_USER" >/dev/null 2>&1; then
-    echo "unknown (the $PACO_USER user does not exist)"
-    return 0
-  fi
-
-  # An `a && b` list here would abort the whole function under `set -eu` on
-  # the ordinary "no key stored" path, and this runs inside a command
-  # substitution, so the failure would surface as a blank status line.
-  poolside_key=""
-  if [ -n "$(instance_setting 1 poolside_api_key_sealed)" ]; then
-    poolside_key="yes"
-  fi
-
-  status_bin="$(poolside_binary)"
-  case "$status_bin" in
-    *\'*)
-      echo "unknown (the binary path in Settings contains a single quote)"
-      return 0
-      ;;
-  esac
-  if ! su -s /bin/sh -l "$PACO_USER" -c "command -v '$status_bin'" >/dev/null 2>&1; then
-    echo "not installed ('$status_bin' is not runnable by the $PACO_USER user - Paco does not ship it; see 'paco auth poolside')"
-    return 0
-  fi
-
-  status_creds="$(poolside_credentials_file "$status_bin")"
-  if [ -n "$status_creds" ] && [ -f "$status_creds" ]; then
-    if [ -n "$poolside_key" ]; then
-      echo "credential file present ($status_creds), but an API key in Settings takes precedence over it"
-    else
-      echo "credential file present ($status_creds)"
-    fi
-    return 0
-  fi
-  if [ -n "$poolside_key" ]; then
-    echo "no login, using the API key in Settings"
-    return 0
-  fi
-  echo "no (run 'sudo paco auth poolside', or set an API key in Settings)"
-}
-
 # Whether this instance is still using the password postinst generated.
 #
 # The marker file is what distinguishes the two, not the hash: a bcrypt hash
@@ -612,7 +444,6 @@ cmd_status() {
   echo "Password:  $(password_state)"
   echo "CLI:       $(claude_cli_present)"
   echo "Claude:    $(claude_auth_state)"
-  echo "Poolside:  $(poolside_state)"
 }
 
 # --- password ----------------------------------------------------------------
@@ -723,7 +554,7 @@ case "$command" in
   tls) cmd_tls "$@" ;;
   uninstall)
     echo "paco: there is no uninstall." >&2
-    echo "'apt remove paco' stops Paco and keeps /etc/paco and /var/lib/paco (including the Claude and Poolside credentials and every workspace)." >&2
+    echo "'apt remove paco' stops Paco and keeps /etc/paco and /var/lib/paco (including the Claude credential and every workspace)." >&2
     echo "'apt purge paco' also destroys /etc/paco and /var/lib/paco — see docs/self-hosting.md before running it." >&2
     exit 1
     ;;
