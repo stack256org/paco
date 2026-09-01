@@ -1,4 +1,3 @@
-import { Waves } from "lucide-react";
 import type { SVGProps } from "react";
 
 type IconProps = SVGProps<SVGSVGElement>;
@@ -14,22 +13,6 @@ function AnthropicIcon(props: IconProps) {
   );
 }
 
-/**
- * Poolside's mark: water, not their logo.
- *
- * Lucide's `Waves`, the set every other glyph in these pickers comes from, so
- * it carries the same stroke weight and stays legible at the `size-3.5` the
- * compact trigger renders it at — a hand-drawn pool-ladder mark collapsed
- * into a blob at that size. It inherits `currentColor`, so it takes the
- * trigger's muted colour and the list's opacity with no per-theme treatment.
- * Anthropic's is the one icon here carrying a fixed brand colour, which is
- * the daisyUI skill's own exception for an SVG that must not change with the
- * theme.
- */
-function PoolsideIcon(props: IconProps) {
-  return <Waves {...props} />;
-}
-
 function DefaultProviderIcon(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
@@ -40,23 +23,22 @@ function DefaultProviderIcon(props: IconProps) {
 
 const providerIconMap: Record<string, React.FC<IconProps>> = {
   anthropic: AnthropicIcon,
-  poolside: PoolsideIcon,
 };
 
 const providerDisplayNames: Record<string, string> = {
   anthropic: "Anthropic",
-  poolside: "Poolside",
 };
 
 /**
  * Prefixes in model display names that match the provider brand (stripped in
  * compact UI).
  *
- * Poolside is deliberately absent. Its labels are "Laguna S" and "Laguna XS",
- * and "Laguna" is the model family, not the vendor: stripping it would leave
- * a trigger reading "S" and a list of "S" and "XS". The rule this table
- * encodes is "drop the word that only repeats the provider icon beside it",
- * and no Poolside label does that.
+ * Not every vendor belongs here. A vendor whose labels are the model family
+ * name rather than "<Brand> <Model>" (e.g. "Laguna S" rather than "Acme
+ * Laguna S") has nothing to strip: doing so would leave a trigger reading
+ * "S" and a list of "S" and "XS". The rule this table encodes is "drop the
+ * word that only repeats the provider icon beside it", and a family-named
+ * label never does that.
  */
 const providerLabelPrefixes: Record<string, string[]> = {
   anthropic: ["Claude"],

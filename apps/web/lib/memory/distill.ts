@@ -197,13 +197,14 @@ export async function distillTurn(params: {
      * makes the same call for the same reason.
      *
      * The honest cost, since this one DOES have a chat id in hand and could
-     * therefore have inherited the chat's backend: a chat running on Poolside
-     * still has its memory distilled by Claude Code, so distillation is not
-     * free for an operator who chose Poolside to avoid Claude entirely. That is
-     * a billing surprise rather than a correctness or safety one, which is
-     * why it is documented here instead of rewired — but it is the reason to
-     * revisit this if a backend is ever selected to avoid a *provider* rather
-     * than to change agent behaviour.
+     * therefore have inherited the chat's backend: a chat running on a
+     * different backend still has its memory distilled by Claude Code, so
+     * distillation is not free for an operator who chose that backend to
+     * avoid Claude entirely. That is a billing surprise rather than a
+     * correctness or safety one, which is why it is documented here instead
+     * of rewired — but it is the reason to revisit this if a backend is
+     * ever selected to avoid a *provider* rather than to change agent
+     * behaviour.
      */
     const raw = await generateStructuredOutput<unknown>(
       transcript,

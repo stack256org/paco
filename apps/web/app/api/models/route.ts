@@ -7,9 +7,9 @@ const CACHE_CONTROL = "private, no-store";
  *
  * `useModelOptions` replaces the server-rendered options with this response
  * once it loads, and the composer filters them client-side against
- * `capabilities.models`. Narrowing here would empty the picker for a
- * Poolside chat the moment the fetch resolved, and there is no per-user data
- * in the list to gate anyway.
+ * `capabilities.models`. Narrowing here would empty the picker for a chat
+ * running a backend other than the default the moment the fetch resolved,
+ * and there is no per-user data in the list to gate anyway.
  */
 export function GET() {
   try {

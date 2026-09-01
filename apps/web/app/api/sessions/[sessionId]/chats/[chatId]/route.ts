@@ -144,11 +144,11 @@ export async function PATCH(req: Request, context: RouteContext) {
      * A backend switch revisits the model, because the two are not
      * independent fields however much this request body makes them look it.
      * `modelId` and `backend` were accepted side by side and written
-     * straight through, so a chat moved to Poolside kept `opus` — an id
-     * that backend cannot run. The turn survived it (`run-step.ts`'s
+     * straight through, which is how a chat could end up storing an id its
+     * new backend cannot run. The turn survived it (`run-step.ts`'s
      * `resolveModelId` drops an id the backend does not accept), so the only
-     * casualty was the composer, which reads the row and duly showed "opus"
-     * on a chat whose picker offered nothing but Laguna.
+     * casualty was the composer, which reads the row and duly showed a model
+     * name the chat could not actually run.
      *
      * Reconciled here rather than in the client that sent the switch: this
      * is the only place the write happens, and the response already carries

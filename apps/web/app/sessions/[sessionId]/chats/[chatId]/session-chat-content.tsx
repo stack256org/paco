@@ -3447,12 +3447,12 @@ export function SessionChatContent({
                             {/*
                               The dial is a button only where something can
                               act on it. `capabilities.compaction` is false
-                              for Poolside — `pool` compacts on its own
-                              schedule and has no client-callable way in (see
-                              that field's doc) — so the chat gets a readout
-                              that says so, rather than a control that POSTs
-                              to a Claude-only route and comes back with an
-                              error about the wrong thing.
+                              for a backend that compacts on its own schedule
+                              with no client-callable way in (see that
+                              field's doc) — so the chat gets a readout that
+                              says so, rather than a control that POSTs to a
+                              Claude-only route and comes back with an error
+                              about the wrong thing.
                             */}
                             <ContextUsageIndicator
                               isCompacting={isCompacting}

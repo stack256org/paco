@@ -567,13 +567,13 @@ export async function updateChatActiveStreamId(
  * per-backend `resumeTokens` map.
  *
  * `chats.backend` is a mutable, per-chat choice, and each backend's resume
- * token means something only to that backend's own session store — Claude
- * Code's `--resume` id and Poolside's `pool` session id are not
- * interchangeable (handing one to the other backend either fails outright
- * or, worse, resumes the wrong conversation). Reading the token under the
- * *current* backend's key, rather than one shared column, is what makes
- * switching a chat's backend and switching it back resume correctly on both
- * sides instead of one clobbering the other.
+ * token means something only to that backend's own session store — one
+ * backend's resume id and another's are not interchangeable (handing one to
+ * the other backend either fails outright or, worse, resumes the wrong
+ * conversation). Reading the token under the *current* backend's key, rather
+ * than one shared column, is what makes switching a chat's backend and
+ * switching it back resume correctly on both sides instead of one
+ * clobbering the other.
  *
  * A key for a backend that no longer exists is never resurrected here: it
  * is deleted from the map by migration (0015 did this for the removed

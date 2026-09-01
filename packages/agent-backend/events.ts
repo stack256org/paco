@@ -95,10 +95,9 @@ const evalRunFinishedStatusSchema = z.enum(["passed", "failed", "error"]);
  * Spec invariant: anything that reaches a model request must be
  * reconstructable from the log. UI-chunk-native backends log tool activity
  * inside `assistant/chunk`; `tool/call` and `tool/result` exist for a
- * backend without a chunk protocol. Both shipped backends take the chunk
- * route — Claude Code natively, Poolside by mapping ACP session updates —
- * so the `tool/*` route currently has no writer. Both are legal; the
- * projection understands the chunk route.
+ * backend without a chunk protocol. The shipped backend takes the chunk
+ * route — Claude Code natively — so the `tool/*` route currently has no
+ * writer. Both are legal; the projection understands the chunk route.
  */
 export const sessionEventSchema = z.discriminatedUnion("type", [
   z.object({

@@ -95,7 +95,7 @@ let sessionResult: unknown = {
 let chatResult: unknown = {
   id: "chat-1",
   activeStreamId: null,
-  backend: "poolside",
+  backend: "other-backend",
 };
 
 const getSessionByIdSpy = mock(() => Promise.resolve(sessionResult));
@@ -166,14 +166,14 @@ mock.module("@/lib/agent/run-step", () => ({ runAgentTurn: runAgentTurnSpy }));
 
 /**
  * The backend the chat runs on, as far as its capabilities go.
- * `structuredOutput: false` is Poolside: it returns free text whatever schema
- * it is handed (`packages/agent-backend/interface.ts`).
+ * `structuredOutput: false` names a backend that returns free text whatever
+ * schema it is handed (`packages/agent-backend/interface.ts`).
  */
 let backendStructuredOutput: boolean | undefined;
 const resolveBackendSpy = mock(() =>
   Promise.resolve({
     capabilities: () => ({
-      id: backendStructuredOutput === false ? "poolside" : "claude-code",
+      id: backendStructuredOutput === false ? "other-backend" : "claude-code",
       ...(backendStructuredOutput === undefined
         ? {}
         : { structuredOutput: backendStructuredOutput }),
@@ -261,7 +261,7 @@ beforeEach(() => {
     branch: "main",
     sandboxState: { type: "docker", sandboxName: "session_1" },
   };
-  chatResult = { id: "chat-1", activeStreamId: null, backend: "poolside" };
+  chatResult = { id: "chat-1", activeStreamId: null, backend: "other-backend" };
   turnResult = {
     responseMessage: undefined,
     usage: {},
@@ -615,7 +615,7 @@ describe("runReviewerGate", () => {
     await runReviewerGate(task, "chat-1");
 
     const call = runAgentTurnSpy.mock.calls[0]?.[0];
-    expect(call?.chatBackend).toBe("poolside");
+    expect(call?.chatBackend).toBe("other-backend");
   });
 
   test("leaves the backend unset when the chat row cannot be read", async () => {

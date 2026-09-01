@@ -24,7 +24,6 @@
     "@paco/claude-code": "workspace:*",
     "@paco/plugin-host": "workspace:*",
     "@paco/plugin-kit": "workspace:*",
-    "@paco/poolside-backend": "workspace:*",
     "@paco/sandbox": "workspace:*",
     "@paco/shared": "workspace:*",
     "@pierre/diffs": "^1.0.10",

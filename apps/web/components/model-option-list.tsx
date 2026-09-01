@@ -21,11 +21,12 @@ interface ModelOptionListProps {
  *
  * Its own file, and not inlined in `ModelSelectorCompact`, for two reasons.
  * The heading used to be a hardcoded `"Anthropic"` above every model in the
- * catalog — so a Poolside chat filed `poolside/laguna-*` under Anthropic —
- * and a rule with a bug in it deserves somewhere it can be rendered on its
- * own. Which is the second reason: the list lives inside a popover that only
- * mounts on open, so as long as it was inline no test and no screenshot could
- * see it. This component renders under a plain `<Command>`.
+ * catalog — so a chat running a second vendor's models filed them under
+ * Anthropic — and a rule with a bug in it deserves somewhere it can be
+ * rendered on its own. Which is the second reason: the list lives inside a
+ * popover that only mounts on open, so as long as it was inline no test and
+ * no screenshot could see it. This component renders under a plain
+ * `<Command>`.
  */
 export function ModelOptionList({
   options,
@@ -52,10 +53,10 @@ export function ModelOptionList({
               <span className="min-w-0 truncate">{option.shortLabel}</span>
               {/*
                 The app's own starting model, not the group's. It is a Claude
-                tier alias, so a Poolside chat's list carries no "default"
-                marker at all — which is the honest answer: Paco has no
-                opinion about which Laguna a new chat should use, `pool`
-                does.
+                tier alias, so a chat running a different vendor's models
+                carries no "default" marker at all — which is the honest
+                answer: Paco has no opinion about which of that vendor's
+                models a new chat should use.
               */}
               {option.id === APP_DEFAULT_MODEL_ID && (
                 <span className="ml-auto shrink-0 text-base-content/60 text-xs">

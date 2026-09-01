@@ -210,17 +210,16 @@ let testChatRecord: {
   sessionId: string;
   modelId: string | null;
   turnPolicy: "steer" | "queue";
-  backend: "claude-code" | "poolside";
+  backend: "claude-code";
 };
 /**
  * Backs the `resolveChatResumeToken`/`setChatResumeToken` mock below, one
- * slot per backend id — this chat's resume token is scoped by backend
- * so a Claude Code token and a Poolside token must be able to coexist
- * without one clobbering the other across a backend switch.
+ * slot per backend id — this chat's resume token is scoped by backend, the
+ * seam that keeps one backend's resume token from ever clobbering another's
+ * even though there is only one backend id today.
  */
 let testResumeTokens: Record<string, string | null> = {
   "claude-code": null,
-  poolside: null,
 };
 /** What the mocked `runAgentTurn` reports as this turn's resume token. */
 let agentResumeTokenToReturn = "claude-session-1";
@@ -624,7 +623,7 @@ beforeEach(() => {
     turnPolicy: "steer",
     backend: "claude-code",
   };
-  testResumeTokens = { "claude-code": null, poolside: null };
+  testResumeTokens = { "claude-code": null };
   agentResumeTokenToReturn = "claude-session-1";
   testPreferences = {
     defaultModelId: "anthropic/claude-haiku-4.5",
@@ -1872,68 +1871,6 @@ describe("turn steering", () => {
   });
 });
 
-/**
- * Resume tokens are scoped per backend (`chats.resumeTokens`, keyed by
- * backend id) rather than one shared column — the CRITICAL bug this closes:
- * `PoolsideBackend` calling `session/load` with a Claude Code session id
- * (or the reverse, `--resume <an ACP session id>` handed to Claude Code) is
- * what a single shared `claudeSessionId` column produced the moment a
- * chat's backend was switched mid-conversation. See
- * `resolveChatResumeToken`'s doc in `lib/db/sessions.ts`.
- */
-describe("resume tokens scoped per backend", () => {
-  test("switching backends never resumes with the other backend's token, and switching back resumes the original", async () => {
-    disableAutoSave();
-
-    // Turn 1: claude-code, from a fresh chat.
-    testChatRecord.backend = "claude-code";
-    agentResumeTokenToReturn = "claude-session-1";
-    await runAgentWorkflow(makeOptions());
-
-    // Turn 2: switched to poolside. Must NOT attempt to resume with the
-    // Claude Code session id from turn 1 — this is the bug: Poolside would
-    // call `session/load` with a session id it never created.
-    testChatRecord.backend = "poolside";
-    agentResumeTokenToReturn = "poolside-session-1";
-    await runAgentWorkflow(makeOptions());
-
-    // Turn 3: switched back to claude-code. Must resume with the ORIGINAL
-    // claude-code token from turn 1, not undefined and not poolside's.
-    testChatRecord.backend = "claude-code";
-    agentResumeTokenToReturn = "claude-session-1-continued";
-    await runAgentWorkflow(makeOptions());
-
-    expect(agentTurnCalls).toEqual([
-      expect.objectContaining({
-        chatBackend: "claude-code",
-        claudeSessionId: undefined,
-      }),
-      expect.objectContaining({
-        chatBackend: "poolside",
-        // The critical assertion: no resume token crosses from
-        // claude-code's session into poolside's turn. `undefined` here is
-        // what tells `resolveBackend`'s `PoolsideBackend` to start a fresh
-        // `session/new` rather than `session/load`.
-        claudeSessionId: undefined,
-      }),
-      expect.objectContaining({
-        chatBackend: "claude-code",
-        // Resumes the ORIGINAL claude-code token from turn 1 — proving the
-        // poolside turn in between did not overwrite or clear it.
-        claudeSessionId: "claude-session-1",
-      }),
-    ]);
-
-    // Each turn's result was written back under the backend that actually
-    // produced it, never under the other one's key.
-    expect(setChatResumeTokenSpy.mock.calls).toEqual([
-      ["chat-1", "claude-code", "claude-session-1"],
-      ["chat-1", "poolside", "poolside-session-1"],
-      ["chat-1", "claude-code", "claude-session-1-continued"],
-    ]);
-  });
-});
-
 /*
  * Attachments.
  *
@@ -2097,56 +2034,6 @@ describe("attachments", () => {
     expect(pathMatch).not.toBeNull();
     const staged = await readFile(pathMatch?.[1] ?? "");
     expect(staged.toString("base64")).toBe(base64);
-  });
-
-  /**
-   * Staging a PNG and telling the agent to `Read` it is only honest if the
-   * agent can see one. Poolside's models cannot — verified live on both
-   * `poolside/laguna-s-2.1` and `poolside/laguna-xs-2.1` against `pool`
-   * 1.0.16 — so this is the point where the prompt has to stop implying
-   * otherwise. Before this, a screenshot on a Poolside chat produced a
-   * confident "Use `Read` on that path to view it." and a blind agent.
-   */
-  test("a blind backend is told plainly that it cannot see the attached image", async () => {
-    const { mkdtempSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-
-    hostWorkspaceDir = mkdtempSync(join(tmpdir(), "paco-attachment-test-"));
-    testChatRecord = { ...testChatRecord, backend: "poolside" };
-
-    const base64 =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-
-    await runAgentWorkflow(
-      makeOptions({
-        messages: [
-          {
-            id: "user-1",
-            role: "user" as const,
-            parts: [
-              { type: "text", text: "What is in this screenshot?" },
-              {
-                type: "file",
-                mediaType: "image/png",
-                filename: "shot.png",
-                url: `data:image/png;base64,${base64}`,
-              },
-            ],
-          },
-        ],
-      }),
-    );
-
-    const prompt = agentTurnCalls[0]?.prompt ?? "";
-    expect(prompt).not.toContain("Use `Read` on that path to view it.");
-    expect(prompt).toContain("You cannot see images");
-    expect(prompt).toContain("NOT available to you");
-    // Still staged and still named: moving the file, renaming it or checking
-    // its size needs no eyes, and dropping it would remove a capability
-    // Poolside genuinely has.
-    expect(prompt).toContain("shot.png");
-    expect(prompt).toMatch(/\/\S*shot\.png/);
   });
 
   test("a sighted backend's image prompt is unchanged", async () => {

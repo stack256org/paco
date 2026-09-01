@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { POOLSIDE_DEFAULT_MODEL } from "@paco/poolside-backend";
 
 // The route now pulls in `backend-capabilities.ts` (to attach `capabilities`
 // to a PATCH response), which is server-only; the marker throws outside a
@@ -309,12 +308,12 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
       sessionId: "session-1",
       title: "Updated",
       modelId: "model-updated",
-      backend: "poolside",
+      backend: "claude-code",
     };
     const { PATCH } = await routeModulePromise;
 
     const response = await PATCH(
-      createPatchRequest({ backend: "poolside" }),
+      createPatchRequest({ backend: "claude-code" }),
       createContext(),
     );
     const body = (await response.json()) as {
@@ -325,70 +324,27 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     };
 
     expect(response.status).toBe(200);
-    expect(body.chat.capabilities?.id).toBe("poolside");
-    expect(body.chat.capabilities?.effort).toBe(false);
+    expect(body.chat.capabilities?.id).toBe("claude-code");
+    expect(body.chat.capabilities?.effort).toBe(true);
   });
 
   /**
    * `modelId` and `backend` used to be written straight through as
-   * independent fields, so a chat switched to Poolside kept whatever Claude
-   * tier alias it held. The turn survived it — `run-step.ts`'s
+   * independent fields, so a chat could end up storing a `modelId` its
+   * backend does not accept — a row a retired backend's id might have left
+   * behind, for instance. The turn survived it — `run-step.ts`'s
    * `resolveModelId` refuses to forward an id the backend does not accept —
-   * but the composer renders the stored id, so it showed "opus" on a chat
-   * that could only run Laguna.
+   * but the composer renders the stored id, so it showed a model name the
+   * chat could not actually run.
    */
-  test("PATCH moves a stranded model onto the new backend's default", async () => {
+  test("PATCH reconciles a stale model onto the backend's default", async () => {
     ownedSessionChatResult = {
       ok: true,
       sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
       chat: {
         id: "chat-1",
         sessionId: "session-1",
-        modelId: "opus",
-        activeStreamId: null,
-      },
-    };
-    const { PATCH } = await routeModulePromise;
-
-    await PATCH(createPatchRequest({ backend: "poolside" }), createContext());
-
-    expect(updateChatCalls).toEqual([
-      {
-        chatId: "chat-1",
-        patch: { backend: "poolside", modelId: POOLSIDE_DEFAULT_MODEL },
-      },
-    ]);
-  });
-
-  test("PATCH leaves a model the new backend accepts alone", async () => {
-    ownedSessionChatResult = {
-      ok: true,
-      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
-      chat: {
-        id: "chat-1",
-        sessionId: "session-1",
-        modelId: "poolside/laguna-xs-2.1",
-        activeStreamId: null,
-      },
-    };
-    const { PATCH } = await routeModulePromise;
-
-    await PATCH(createPatchRequest({ backend: "poolside" }), createContext());
-
-    expect(updateChatCalls).toEqual([
-      { chatId: "chat-1", patch: { backend: "poolside" } },
-    ]);
-  });
-
-  /** And back: a Poolside id cannot survive a switch to Claude Code. */
-  test("PATCH reconciles the model when switching back to Claude Code", async () => {
-    ownedSessionChatResult = {
-      ok: true,
-      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
-      chat: {
-        id: "chat-1",
-        sessionId: "session-1",
-        modelId: "poolside/laguna-s-2.1",
+        modelId: "a-retired-backends-model",
         activeStreamId: null,
       },
     };
@@ -404,6 +360,29 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     ]);
   });
 
+  test("PATCH leaves a model the backend already accepts alone", async () => {
+    ownedSessionChatResult = {
+      ok: true,
+      sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
+      chat: {
+        id: "chat-1",
+        sessionId: "session-1",
+        modelId: "sonnet",
+        activeStreamId: null,
+      },
+    };
+    const { PATCH } = await routeModulePromise;
+
+    await PATCH(
+      createPatchRequest({ backend: "claude-code" }),
+      createContext(),
+    );
+
+    expect(updateChatCalls).toEqual([
+      { chatId: "chat-1", patch: { backend: "claude-code" } },
+    ]);
+  });
+
   /**
    * A client that switches both at once is judged on what it asked for: the
    * requested model is accepted by the requested backend, so nothing is
@@ -414,8 +393,8 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
 
     await PATCH(
       createPatchRequest({
-        backend: "poolside",
-        modelId: "poolside/laguna-xs-2.1",
+        backend: "claude-code",
+        modelId: "haiku",
       }),
       createContext(),
     );
@@ -424,8 +403,8 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
       {
         chatId: "chat-1",
         patch: {
-          backend: "poolside",
-          modelId: "poolside/laguna-xs-2.1",
+          backend: "claude-code",
+          modelId: "haiku",
         },
       },
     ]);
@@ -436,14 +415,17 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     const { PATCH } = await routeModulePromise;
 
     await PATCH(
-      createPatchRequest({ backend: "poolside", modelId: "opus" }),
+      createPatchRequest({
+        backend: "claude-code",
+        modelId: "a-retired-backends-model",
+      }),
       createContext(),
     );
 
     expect(updateChatCalls).toEqual([
       {
         chatId: "chat-1",
-        patch: { backend: "poolside", modelId: POOLSIDE_DEFAULT_MODEL },
+        patch: { backend: "claude-code", modelId: "opus" },
       },
     ]);
   });
@@ -459,17 +441,27 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     ]);
   });
 
-  test("PATCH rejects an unrecognised backend value", async () => {
-    const { PATCH } = await routeModulePromise;
+  /**
+   * Rejected, not normalized — a write is the one moment an unrecognised
+   * value can still be refused rather than silently coerced. `"a-retired-
+   * backend"` stands for an id a previous backend once held: a row already
+   * holding it reads back as `claude-code` (`normalizeBackendId`), but a
+   * client is not allowed to ask for it going forward.
+   */
+  test.each(["some-future-backend", "a-retired-backend"])(
+    "PATCH rejects an unrecognised backend value: %s",
+    async (backend) => {
+      const { PATCH } = await routeModulePromise;
 
-    const response = await PATCH(
-      createPatchRequest({ backend: "some-future-backend" }),
-      createContext(),
-    );
+      const response = await PATCH(
+        createPatchRequest({ backend }),
+        createContext(),
+      );
 
-    expect(response.status).toBe(400);
-    expect(updateChatCalls).toHaveLength(0);
-  });
+      expect(response.status).toBe(400);
+      expect(updateChatCalls).toHaveLength(0);
+    },
+  );
 
   test("PATCH returns 404 when updateChat returns null", async () => {
     updatedChat = null;

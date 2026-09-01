@@ -260,14 +260,14 @@ describe("resolveChatResumeToken", () => {
       {
         resumeTokens: {
           "claude-code": "claude-session-1",
-          poolside: "pool-session-1",
+          "other-backend": "other-session-1",
         },
         claudeSessionId: "legacy-value-should-not-be-read",
       },
-      "poolside",
+      "other-backend",
     );
 
-    expect(token).toBe("pool-session-1");
+    expect(token).toBe("other-session-1");
   });
 
   test("returns undefined for a backend with no token yet — a fresh session, not a crash", async () => {
@@ -278,7 +278,7 @@ describe("resolveChatResumeToken", () => {
         resumeTokens: { "claude-code": "claude-session-1" },
         claudeSessionId: null,
       },
-      "poolside",
+      "other-backend",
     );
 
     expect(token).toBeUndefined();
@@ -291,9 +291,10 @@ describe("resolveChatResumeToken", () => {
       claudeSessionId: null,
     };
 
-    // The chat has run on claude-code, never on poolside: poolside must
-    // start a fresh session, not resume with claude-code's session id.
-    expect(resolveChatResumeToken(chat, "poolside")).toBeUndefined();
+    // The chat has run on claude-code, never on the other backend: the
+    // other backend must start a fresh session, not resume with
+    // claude-code's session id.
+    expect(resolveChatResumeToken(chat, "other-backend")).toBeUndefined();
     // Reading it back for claude-code still returns the original token.
     expect(resolveChatResumeToken(chat, "claude-code")).toBe(
       "claude-session-1",
@@ -309,7 +310,9 @@ describe("resolveChatResumeToken", () => {
       );
       // The legacy column is Claude Code's own value; it must never answer
       // for a different backend.
-      expect(resolveChatResumeToken(legacyRow, "poolside")).toBeUndefined();
+      expect(
+        resolveChatResumeToken(legacyRow, "other-backend"),
+      ).toBeUndefined();
     });
   });
 
@@ -336,7 +339,7 @@ describe("setChatResumeToken", () => {
   test("writes a resumeTokens merge, not the whole column, keyed by backend", async () => {
     const { setChatResumeToken } = await sessionsModulePromise;
 
-    await setChatResumeToken("chat-1", "poolside", "pool-session-1");
+    await setChatResumeToken("chat-1", "other-backend", "other-session-1");
 
     // A `sql` template fragment (a jsonb `||` merge), not a plain object:
     // asserting it exists and isn't a bare literal is what's testable

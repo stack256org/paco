@@ -1131,10 +1131,9 @@ function extractLatestUserAttachments(
  * being rebuilt against a directory a later turn has since pruned.
  *
  * Staging an image and naming its path only works if the backend's model can
- * see one. Poolside's cannot — verified on both `poolside/laguna-*` models —
- * so the path is still named but the prompt says outright that the picture
- * is not available, rather than issuing a `Read` instruction that fails.
- * See `BackendCapabilities.images`.
+ * see one. A backend that can't declares so via `BackendCapabilities.images`,
+ * and the prompt says outright that the picture is not available, rather
+ * than issuing a `Read` instruction that fails.
  */
 const buildTurnPromptStep = async (params: {
   messages: WebAgentUIMessage[];
@@ -1159,9 +1158,9 @@ const buildTurnPromptStep = async (params: {
    * is a `"use step"` that may do I/O.
    *
    * Dynamically imported like `attachment-staging` below —
-   * `backend-capabilities` instantiates the real backends, so a static
-   * import would pull `@paco/claude-code` and `@paco/poolside-backend` into
-   * a module reachable from a `"use workflow"` body.
+   * `backend-capabilities` instantiates the real backend, so a static
+   * import would pull `@paco/claude-code` into a module reachable from a
+   * `"use workflow"` body.
    *
    * Failing open (`true`) on an error: an unreadable chat row must not turn
    * a working Claude Code turn into one that tells the model it is blind.

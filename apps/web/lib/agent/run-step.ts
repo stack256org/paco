@@ -11,11 +11,6 @@ import {
   type ClaudeBackendOptions,
   DEFAULT_AGENTS,
 } from "@paco/claude-code";
-import {
-  allowAllPermissionHandler,
-  type PoolsideBackendOptions,
-  type PoolsideMcpServer,
-} from "@paco/poolside-backend";
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
 import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
 import { buildAppendSystemPrompt } from "./system-prompt";
@@ -90,10 +85,10 @@ function resolveAgents(
  * resolves its own model and takes none.
  *
  * Forwarding regardless is how a Claude tier alias like `opus` used to reach
- * a second backend that had never heard of it. Poolside is the case that
- * makes the list form real rather than theoretical: it accepts its OWN ids
- * (`poolside/laguna-*`) over ACP, so this filter is what stops `opus` going
- * one way and lets `poolside/laguna-xs-2.1` through the other.
+ * a backend that had never heard of it. The list form exists for a backend
+ * that accepts its own ids rather than Claude's tier aliases — nothing in
+ * this build does today, but the filter is what would stop `opus` reaching
+ * one and let its own ids through instead.
  */
 function resolveModelId(
   capabilities: BackendCapabilities,
@@ -108,40 +103,18 @@ function resolveModelId(
 /**
  * The turn's `gh` credentials, as environment variables.
  *
- * Shared by both backends: without them the CLI falls back to the host's
- * keyring login and the agent pushes and opens pull requests as whoever set
- * up the machine, which is the exact thing AGENTS.md's GitHub section exists
- * to prevent (`lib/github/gh.ts` pins every one of Paco's own calls the same
- * way). In the environment and never in argv — `ps` shows one process's
- * arguments to every user on the machine.
+ * Without them the CLI falls back to the host's keyring login and the agent
+ * pushes and opens pull requests as whoever set up the machine, which is the
+ * exact thing AGENTS.md's GitHub section exists to prevent (`lib/github/
+ * gh.ts` pins every one of Paco's own calls the same way). In the
+ * environment and never in argv — `ps` shows one process's arguments to
+ * every user on the machine.
  */
 function githubTokenEnv(token: string | undefined): Record<string, string> {
   if (token === undefined) {
     return {};
   }
   return { GH_TOKEN: token, GITHUB_TOKEN: token };
-}
-
-/**
- * Paco's name-keyed MCP config, as the array Poolside's `session/new` wants.
- *
- * Two shapes, not one: the Claude Code CLI takes `--mcp-config`'s
- * `{ "<name>": { command, args, env } }` record, while ACP's `session/new`
- * takes a list whose entries each carry their own `name`. Nothing else
- * differs — no filtering, no dropped entries. A relative `command` is fine
- * (the package verified a bare `node` resolves on `PATH`), so every server
- * Paco configures reaches the turn; in practice they are absolute anyway,
- * since `buildPluginMcpConfig` uses `process.execPath`.
- */
-function toPoolsideMcpServers(
-  mcpServers: NonNullable<AgentCallOptions["mcpServers"]>,
-): PoolsideMcpServer[] {
-  return Object.entries(mcpServers).map(([name, server]) => ({
-    name,
-    command: server.command,
-    args: server.args,
-    env: server.env,
-  }));
 }
 
 /**
@@ -227,147 +200,60 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
 
   const hostCwd = resolveHostCwd(options);
 
-  /*
-   * Each backend gets its own options shape (`ClaudeBackendOptions` vs.
-   * `PoolsideBackendOptions` — `TurnContext.backendOptions` is an
-   * intentionally untyped bag per backend, see `@paco/agent-backend`'s
-   * `interface.ts`), so this branches on which backend was actually resolved
-   * rather than trying to force one shape to describe both.
-   *
-   * The branches are deliberately near-symmetric now. They used to not be:
-   * the second backend got a two-field bag (`model`, `onApprovalRequest`)
-   * while everything the turn had been built with — the system prompt, the
-   * MCP servers, the user's GitHub token — was assembled and then dropped on
-   * the floor. Poolside accepts all three, so it receives all three; the
-   * only fields it does not get are the ones its `capabilities()` declares
-   * it cannot take, which is what lets the UI stop offering them instead of
-   * letting them vanish silently.
-   */
-  const backendOptions: ClaudeBackendOptions | PoolsideBackendOptions =
-    backendId === "poolside"
-      ? ({
-          ...(modelId ? { model: modelId } : {}),
-          /*
-           * The same instructions the Claude branch passes as
-           * `appendSystemPrompt`. ACP has no system-prompt parameter, and
-           * the package established against the real binary that Poolside's
-           * `poolside/system_prompt` capability is a read-only GETTER for
-           * the effective prompt rather than a setter — so this rides in as
-           * a leading text block on `session/prompt`. Dropping it — which is
-           * what used to happen — takes memory, skills, project
-           * instructions, the environment details and the "## Running the
-           * app" briefing with it, and an agent without that last one starts
-           * its dev server on the host, where the container's preview URL
-           * cannot reach it.
-           */
-          ...(appendSystemPrompt && { systemContext: appendSystemPrompt }),
-          /*
-           * One `pool acp` process per turn, so per-turn env reaches the
-           * agent's own `gh`. Unlike the Claude branch there are no
-           * PACO_APPROVAL_* vars: approvals come back over the ACP
-           * connection itself, not through a spawned hook.
-           */
-          ...(params.githubToken
-            ? { env: githubTokenEnv(params.githubToken) }
-            : {}),
-          ...(options.mcpServers && {
-            mcpServers: toPoolsideMcpServers(options.mcpServers),
-          }),
-          /*
-           * Not passed, because Poolside cannot take them — declared as
-           * `customAgents: false` / `structuredOutput: false` on its
-           * capabilities rather than left as a silent omission here:
-           * `agents` (nothing in the ACP surface installs a caller-defined
-           * roster; Poolside runs its own) and `jsonSchema` (no
-           * schema-constrained output). `tools`/`disallowedTools` are not
-           * passed either: tool policy is the `session/request_permission`
-           * handler below, not a flag.
-           *
-           * `effort` is not passed, and `capabilities().effort` is `false`.
-           * Poolside DOES have a reasoning knob — `thought_level`, with
-           * values `max` and `none` — but Paco's picker has five levels, so
-           * forwarding one would collapse `low`/`medium` onto `none` and
-           * `high`/`xhigh`/`max` onto `max` with nothing on screen saying
-           * four of the five choices were indistinguishable. Declaring
-           * `false` hides the control instead, which is the honest answer
-           * until `BackendCapabilities` can express an accepted-values list
-           * for effort the way it already does for `models`.
-           *
-           * `permissionMode` is `always-allow` — pool's own equivalent of
-           * running the CLI with its prompts off, the mode Claude Code is
-           * already run in (`bypassPermissions`, below).
-           *
-           * This is a deliberate policy choice, and it is worth being precise
-           * about what it costs. The session stops sending
-           * `session/request_permission`, so `decideApproval` no longer sees
-           * pool's tool calls, and with it goes the check that a write stays
-           * inside the chat's worktree. The containment that remains is the
-           * sandbox: every turn runs in a container with only this session's
-           * workspace mounted, so "anything the agent likes" is bounded by
-           * that container rather than by the policy.
-           *
-           * The handler below is still passed, because the package's default
-           * is `denyPermissionHandler`: if a pool build ignored the config
-           * option, falling back to deny would strand a turn waiting on a
-           * prompt that never appears.
-           */
-          permissionMode: "always-allow",
-          onApprovalRequest: allowAllPermissionHandler,
-        } satisfies PoolsideBackendOptions)
-      : ({
-          ...(params.approval && params.chatId
-            ? { settings: buildApprovalSettings() }
-            : {}),
-          env: {
-            ...githubTokenEnv(params.githubToken),
-            // Read by the PreToolUse hook, which runs as its own process and has
-            // no other way to know where Paco is or who it is acting for.
-            ...(params.approval && params.chatId
-              ? {
-                  PACO_APPROVAL_URL: params.approval.url,
-                  PACO_APPROVAL_TOKEN: params.approval.token,
-                  PACO_APPROVAL_CHAT_ID: params.chatId,
-                }
-              : {}),
-          },
-          model: modelId,
-          ...(options.model?.effort && { effort: options.model.effort }),
-          agents: resolveAgents(options),
-          ...(appendSystemPrompt && { appendSystemPrompt }),
-          ...(options.structuredOutput && {
-            jsonSchema: options.structuredOutput.jsonSchema,
-          }),
-          ...(options.tools && { tools: options.tools }),
-          ...(options.disallowedTools && {
-            disallowedTools: options.disallowedTools,
-          }),
-          ...(options.mcpServers && { mcpServers: options.mcpServers }),
-          /*
-           * The run is non-interactive, so anything that asks for approval is simply
-           * refused — there is no one to ask.
-           *
-           * `acceptEdits` sounds right but only covers file edits: the CLI still
-           * gates Bash, so the agent could write an app and then fail to install,
-           * build, or serve it. That was observed — it tried four times to start a
-           * dev server and gave up. `dontAsk` is worse, denying Bash outright.
-           *
-           * Bypassing the CLI's own prompts does not mean nothing is checked.
-           * A `PreToolUse` hook fires even in this mode, and Paco routes every
-           * tool call through it: reads and in-worktree edits proceed untouched,
-           * while anything that reaches outside the worktree or is destructive
-           * stops and asks the user. That is the approval an interactive session
-           * would give, without the modes that make the product unusable —
-           * `acceptEdits` gates Bash, so the agent could write an app and then not
-           * be allowed to start it, and `dontAsk` denies Bash outright.
-           */
-          permissionMode: "bypassPermissions",
-          // Resume keeps the CLI's own history so the full transcript is not
-          // replayed on every turn.
-          // --session-id requires a UUID; message ids are nanoids, so mint one.
-          ...(params.claudeSessionId ? {} : { sessionId: crypto.randomUUID() }),
-          ...(params.maxTurns !== undefined && { maxTurns: params.maxTurns }),
-          includePartialMessages: true,
-        } satisfies ClaudeBackendOptions);
+  const backendOptions: ClaudeBackendOptions = {
+    ...(params.approval && params.chatId
+      ? { settings: buildApprovalSettings() }
+      : {}),
+    env: {
+      ...githubTokenEnv(params.githubToken),
+      // Read by the PreToolUse hook, which runs as its own process and has
+      // no other way to know where Paco is or who it is acting for.
+      ...(params.approval && params.chatId
+        ? {
+            PACO_APPROVAL_URL: params.approval.url,
+            PACO_APPROVAL_TOKEN: params.approval.token,
+            PACO_APPROVAL_CHAT_ID: params.chatId,
+          }
+        : {}),
+    },
+    model: modelId,
+    ...(options.model?.effort && { effort: options.model.effort }),
+    agents: resolveAgents(options),
+    ...(appendSystemPrompt && { appendSystemPrompt }),
+    ...(options.structuredOutput && {
+      jsonSchema: options.structuredOutput.jsonSchema,
+    }),
+    ...(options.tools && { tools: options.tools }),
+    ...(options.disallowedTools && {
+      disallowedTools: options.disallowedTools,
+    }),
+    ...(options.mcpServers && { mcpServers: options.mcpServers }),
+    /*
+     * The run is non-interactive, so anything that asks for approval is simply
+     * refused — there is no one to ask.
+     *
+     * `acceptEdits` sounds right but only covers file edits: the CLI still
+     * gates Bash, so the agent could write an app and then fail to install,
+     * build, or serve it. That was observed — it tried four times to start a
+     * dev server and gave up. `dontAsk` is worse, denying Bash outright.
+     *
+     * Bypassing the CLI's own prompts does not mean nothing is checked.
+     * A `PreToolUse` hook fires even in this mode, and Paco routes every
+     * tool call through it: reads and in-worktree edits proceed untouched,
+     * while anything that reaches outside the worktree or is destructive
+     * stops and asks the user. That is the approval an interactive session
+     * would give, without the modes that make the product unusable —
+     * `acceptEdits` gates Bash, so the agent could write an app and then not
+     * be allowed to start it, and `dontAsk` denies Bash outright.
+     */
+    permissionMode: "bypassPermissions",
+    // Resume keeps the CLI's own history so the full transcript is not
+    // replayed on every turn.
+    // --session-id requires a UUID; message ids are nanoids, so mint one.
+    ...(params.claudeSessionId ? {} : { sessionId: crypto.randomUUID() }),
+    ...(params.maxTurns !== undefined && { maxTurns: params.maxTurns }),
+    includePartialMessages: true,
+  };
 
   const handle = backend.startTurn({
     cwd: hostCwd,

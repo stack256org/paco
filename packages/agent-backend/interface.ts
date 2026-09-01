@@ -6,7 +6,7 @@ import type { TurnFinishReason, TurnUsage } from "./events.ts";
  * workflow adapt instead of breaking when a backend lacks a feature (spec 1b).
  */
 export interface BackendCapabilities {
-  /** Stable identifier, e.g. "claude-code", "poolside". */
+  /** Stable identifier, e.g. "claude-code". */
   id: string;
   /** Can a later turn resume this backend's own conversation state? */
   resume: boolean;
@@ -22,18 +22,13 @@ export interface BackendCapabilities {
    * Can the backend's CONFIGURED MODEL actually accept image input?
    *
    * Not a protocol question, and that distinction is the whole reason this
-   * field exists. ACP's `initialize` handshake answers
-   * `promptCapabilities: {image: true}` for Poolside — the TRANSPORT will
-   * carry an image content block — while every model behind it is blind.
-   * Measured against `pool` 1.0.16, both shipped models, both delivery
-   * paths:
-   *
-   * - An inline `{type: "image"}` block in `session/prompt` is accepted
-   *   with `stopReason: "end_turn"` and NO error, and the model answers
-   *   "IMAGE-NOT-VISIBLE" — a silent drop, on `poolside/laguna-s-2.1` and
-   *   `poolside/laguna-xs-2.1` alike.
-   * - The agent's own `Read` on a staged `.png` fails with "the configured
-   *   model does not support image inputs", again on both models.
+   * field exists. A backend's connection handshake can answer "the
+   * TRANSPORT will carry an image content block" while every model behind
+   * it is blind — verified against a past ACP-based backend, where an
+   * inline image block in the prompt was accepted with no error at all and
+   * the model answered "IMAGE-NOT-VISIBLE", and the agent's own `Read` on a
+   * staged `.png` failed with "the configured model does not support image
+   * inputs".
    *
    * So do NOT "fix" a `false` here by re-reading the handshake: the
    * handshake is what makes the failure silent. Change it only when a live
@@ -53,22 +48,19 @@ export interface BackendCapabilities {
    * Claude Code answers yes: `/compact` is a real command, and
    * `compactSession` drives it.
    *
-   * Poolside answers no, and the distinction is the same one `images` draws
-   * — a capability the handshake advertises is not the same as a capability
-   * the caller can invoke. `pool` 1.0.16 declares
-   * `poolside/compaction_update: true`, which says the AGENT compacts and
-   * tells the client afterwards; it does not put compaction under the
-   * client's control. Probed against the live binary: `session/compact`,
-   * `session/summarize` and `poolside/compact` all answer
-   * `-32601 Method not found`, `availableCommands` is null (so there is no
-   * slash command either), and the four session config options are `mode`,
-   * `agent_mode`, `thought_level` and `model` — none of them compaction.
+   * A backend can answer no, and the distinction is the same one `images`
+   * draws — a capability the handshake advertises is not the same as a
+   * capability the caller can invoke. Verified against a past ACP-based
+   * backend: it declared a capability meaning "the AGENT compacts and tells
+   * the client afterwards", which does not put compaction under the
+   * client's control, and every compaction-shaped method it was probed with
+   * answered "method not found" with no slash command either.
    *
-   * So a compact control on a Poolside chat has nothing to call. Offering
-   * one anyway is what this field prevents: the button used to render for
-   * every backend and POST to a Claude-only route, which answered a
-   * Poolside chat with "this chat has not run a turn yet" — an error about
-   * the wrong thing entirely.
+   * So a compact control on such a chat would have nothing to call.
+   * Offering one anyway is what this field prevents: the button used to
+   * render for every backend and POST to a Claude-only route, which
+   * answered a chat on that other backend with "this chat has not run a
+   * turn yet" — an error about the wrong thing entirely.
    *
    * Required, not optional, for `images`' reason: a default of "yes" is
    * exactly how a control ends up offered for a backend that cannot serve
@@ -80,11 +72,10 @@ export interface BackendCapabilities {
    * agents, with their per-agent model tiers)?
    *
    * Distinct from `subagents`, which only says the backend delegates at
-   * all: Poolside runs a roster of its own — its usage `_meta` reports
-   * `poolside/subagentTotals` — but the only handle its protocol offers,
-   * `_meta["poolside/session_agent_config"]`, SELECTS an agent that is
-   * already defined rather than defining one. So it reports
-   * `subagents: true, customAgents: false`.
+   * all: a past ACP-based backend ran a roster of its own — its usage
+   * reporting named individual subagents by total — but the only handle its
+   * protocol offered SELECTED an agent that was already defined rather than
+   * defining one. So it reported `subagents: true, customAgents: false`.
    *
    * Optional, and `undefined` means "yes" — the assumption every backend
    * written before this field existed was built on, and the one
@@ -112,9 +103,9 @@ export interface BackendCapabilities {
    * - `undefined` — the app's own catalog applies unchanged (Claude Code,
    *   whose tier aliases the catalog is written in).
    * - A NON-EMPTY array — a narrowing, not a loss. The picker still
-   *   applies; it just offers these ids. Poolside reports its two
-   *   `poolside/laguna-*` ids, read off a live `session/new`'s `model`
-   *   config option. They are not Claude tier aliases, which is the whole
+   *   applies; it just offers these ids. A past ACP-based backend reported
+   *   its own model ids this way, read off a live session's own model
+   *   config option. They were not Claude tier aliases, which is the whole
    *   reason the list has to be declared: handing `opus` to a backend that
    *   has never heard of it is the failure this field prevents.
    * - An EMPTY array — the backend resolves its own model and takes none

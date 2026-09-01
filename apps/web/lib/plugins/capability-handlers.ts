@@ -280,9 +280,8 @@ async function handleStorageKv(
     case "setSecret": {
       // Sealed with the same `lib/crypto/secret-box` every other stored
       // secret on this branch uses (`githubTokens.sealedToken`,
-      // `plugins.ingressSecret`, `poolsideApiKeySealed`), so a database dump,
-      // a backup, or a `select *` in a log does not hand over a plugin's
-      // bot token.
+      // `plugins.ingressSecret`), so a database dump, a backup, or a
+      // `select *` in a log does not hand over a plugin's bot token.
       const envelope: SealedSecretEnvelope = {
         [SEALED_SECRET_MARKER]: 1,
         sealed: seal(op.value),
