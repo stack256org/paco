@@ -13,21 +13,21 @@ function headings(items: TestItem[]): string[] {
 describe("groupModelsByProvider", () => {
   /**
    * Bug 2, at the level the compact picker got it wrong: its heading was the
-   * literal string "Anthropic" above every model in the list, so a Poolside
-   * chat read "Anthropic / Laguna S / Laguna XS".
+   * literal string "Anthropic" above every model in the list, so a chat
+   * running a second vendor's models read "Anthropic / Model A / Model B".
    */
-  test("heads Poolside's models with Poolside, not with Anthropic", () => {
+  test("heads a second vendor's models with that vendor, not with Anthropic", () => {
     const groups = groupModelsByProvider([
-      { id: "poolside/laguna-s-2.1" },
-      { id: "poolside/laguna-xs-2.1" },
+      { id: "acme/model-a" },
+      { id: "acme/model-b" },
     ]);
 
     expect(groups).toHaveLength(1);
-    expect(groups[0]?.provider).toBe("poolside");
-    expect(groups[0]?.label).toBe("Poolside");
+    expect(groups[0]?.provider).toBe("acme");
+    expect(groups[0]?.label).toBe("Acme");
     expect(groups[0]?.options.map((option) => option.id)).toEqual([
-      "poolside/laguna-s-2.1",
-      "poolside/laguna-xs-2.1",
+      "acme/model-a",
+      "acme/model-b",
     ]);
   });
 
@@ -56,20 +56,17 @@ describe("groupModelsByProvider", () => {
   test("splits a mixed list into one group per vendor", () => {
     const groups = groupModelsByProvider([
       { id: "opus" },
-      { id: "poolside/laguna-s-2.1" },
+      { id: "acme/model-a" },
       { id: "sonnet" },
     ]);
 
-    expect(groups.map((group) => group.label)).toEqual([
-      "Anthropic",
-      "Poolside",
-    ]);
+    expect(groups.map((group) => group.label)).toEqual(["Anthropic", "Acme"]);
     expect(groups[0]?.options.map((option) => option.id)).toEqual([
       "opus",
       "sonnet",
     ]);
     expect(groups[1]?.options.map((option) => option.id)).toEqual([
-      "poolside/laguna-s-2.1",
+      "acme/model-a",
     ]);
   });
 
@@ -79,19 +76,15 @@ describe("groupModelsByProvider", () => {
    * nothing useful can still be filed correctly.
    */
   test("prefers an explicit provider over the id's prefix", () => {
-    expect(
-      headings([{ id: "some-internal-id", provider: "poolside" }]),
-    ).toEqual(["Poolside"]);
+    expect(headings([{ id: "some-internal-id", provider: "acme" }])).toEqual([
+      "Acme",
+    ]);
   });
 
   test("orders priority providers first, then the rest alphabetically", () => {
     expect(
-      headings([
-        { id: "zeta/one" },
-        { id: "poolside/laguna-s-2.1" },
-        { id: "opus" },
-      ]),
-    ).toEqual(["Anthropic", "Poolside", "Zeta"]);
+      headings([{ id: "zeta/one" }, { id: "acme/model-a" }, { id: "opus" }]),
+    ).toEqual(["Anthropic", "Acme", "Zeta"]);
   });
 
   test("preserves input order inside a group", () => {

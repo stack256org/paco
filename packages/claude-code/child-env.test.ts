@@ -65,12 +65,13 @@ describe("agentProcessEnv", () => {
     expect(env.LANG).toBe("en_US.UTF-8");
   });
 
-  test("keeps the CLI's own configuration and credentials", () => {
+  test("keeps the CLI's own configuration, but not credential or gateway variables", () => {
     const env = agentProcessEnv(
       serverEnv({
         ANTHROPIC_API_KEY: "sk-ant-test",
         ANTHROPIC_BASE_URL: "https://proxy.example",
         CLAUDE_CODE_OAUTH_TOKEN: "oauth-test",
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
         CLAUDE_CONFIG_DIR: "/Users/paco/.claude",
         MAX_THINKING_TOKENS: "20000",
         DISABLE_AUTOUPDATER: "1",
@@ -78,13 +79,23 @@ describe("agentProcessEnv", () => {
       }),
     );
 
-    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-test");
-    expect(env.ANTHROPIC_BASE_URL).toBe("https://proxy.example");
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-test");
+    // Ordinary CLI configuration still passes through the ANTHROPIC_/CLAUDE_
+    // prefix rule.
     expect(env.CLAUDE_CONFIG_DIR).toBe("/Users/paco/.claude");
     expect(env.MAX_THINKING_TOKENS).toBe("20000");
     expect(env.DISABLE_AUTOUPDATER).toBe("1");
     expect(env.MCP_TIMEOUT).toBe("30000");
+
+    // The four names that decide which account bills a turn and which
+    // server the CLI talks to are excluded even though they match the same
+    // prefixes: only Settings, via `ClaudeCodeOptions.env`, may set them —
+    // see `CREDENTIAL_AND_GATEWAY_NAMES` in child-env.ts. `run.test.ts`
+    // proves the seam: a Settings-configured credential wins over one of
+    // these leaking in from the server's own process environment.
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
   });
 
   test("keeps proxy and private-CA settings, which a self-hosted instance needs to reach the API", () => {

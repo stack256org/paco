@@ -7,7 +7,7 @@ import {
 const PRIORITY_PROVIDERS = ["anthropic", "openai"];
 
 export interface ModelProviderGroup<T> {
-  /** The provider key — `anthropic`, `poolside`, … */
+  /** The provider key — `anthropic`, `openai`, … */
   provider: string;
   /** The heading to render — `getProviderDisplayName`'s answer. */
   label: string;
@@ -20,8 +20,8 @@ export interface ModelProviderGroup<T> {
  *
  * Shared by both pickers rather than living in one of them, because the
  * compact composer picker had a hardcoded `heading="Anthropic"` while the
- * settings combobox grouped properly — so a Poolside chat listed
- * `poolside/laguna-*` under "Anthropic". One implementation is what makes
+ * settings combobox grouped properly — so a chat running a second vendor's
+ * model once listed it under "Anthropic". One implementation is what makes
  * the two agree by construction; nothing here knows a vendor's name.
  *
  * `item.provider` wins over the id when present (`ModelOption` computes it

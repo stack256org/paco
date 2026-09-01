@@ -502,7 +502,7 @@ systemctl restart paco.service
 # better than one that reports success and lets it surface as a confusing
 # first-chat failure. `paco status` also reports this (see scripts/paco).
 if [ ! -x /usr/bin/claude ]; then
-  echo "paco: WARNING — the bundled Claude Code CLI was not found at /usr/bin/claude. Every chat will fail, and 'paco auth' has nothing to run, until this is fixed. This means the .deb was built or staged incorrectly; try 'apt-get install --reinstall paco', or rebuild the package (packaging/build-deb.sh)." >&2
+  echo "paco: WARNING — the bundled Claude Code CLI was not found at /usr/bin/claude. Every chat will fail until this is fixed, no matter what credential is saved in Settings. This means the .deb was built or staged incorrectly; try 'apt-get install --reinstall paco', or rebuild the package (packaging/build-deb.sh)." >&2
 fi
 
 # -----------------------------------------------------------------------------

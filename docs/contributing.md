@@ -36,7 +36,9 @@ only *Paco's own* deployment mechanism changed.
 - pnpm 11 (via Corepack)
 - Docker — for the local Postgres container below and for the sandbox image
 - Postgres 17 (the container below is the quickest way to get one)
-- The [Claude Code CLI](https://code.claude.com/docs/en/setup), authenticated
+- The [Claude Code CLI](https://code.claude.com/docs/en/setup) on `PATH` —
+  Paco drives it directly with a credential from Settings, not through a
+  login session, so there is nothing to sign it in to ahead of time
 - The [GitHub CLI](https://cli.github.com) (`gh`), for anything GitHub-related
 
 ## Setup
@@ -66,18 +68,20 @@ cp apps/web/.env.example apps/web/.env
 #    happens when nothing is there under that tag.
 docker build -t ghcr.io/stack256org/paco-sandbox:latest packages/sandbox/docker
 
-# 4. Sign in to Claude. Paco drives the Claude Code CLI with your subscription.
-claude auth login
-claude auth status          # should print a logged-in account
-
-# 5. Create the schema. This applies the migrations and the workflow tables.
+# 4. Create the schema. This applies the migrations and the workflow tables.
 #    If it prints "POSTGRES_URL not set — skipping", your .env is not being
 #    read: fix that before continuing.
 pnpm --dir apps/web db:migrate:apply
 
-# 6. Run it.
+# 5. Run it.
 pnpm web
 ```
+
+Before your first chat, add a Claude credential: open **Settings → Models**
+and paste in an API key, or a setup token from running `claude setup-token`
+on your own machine against a Claude subscription. It is stored sealed in
+your local Postgres (with the `APP_SECRET` from step 2) and read fresh on
+every turn — there is no CLI login session to sign in to.
 
 > **A development checkout has no password.** The instance password is
 > enforced by nginx, which only the `.deb` install sets up — so `pnpm web`

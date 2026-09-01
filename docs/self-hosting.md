@@ -38,9 +38,11 @@ curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 >   to describe — claim the instance → Platform → Mail → Done — no longer
 >   exists: accounts are gone, so `/` now goes straight past the instance
 >   password gate into the app, with nothing to configure first.)
-> - `APP_SECRET`, the database, and `/var/lib/paco/.claude` all survive
->   reinstall → `apt remove` → reinstall. `apt purge` removes exactly the two
->   things it says it will, and leaves the Postgres database alone (§10).
+> - `APP_SECRET`, the database, and the Claude credential saved in it all
+>   survive reinstall → `apt remove` → reinstall. `apt purge` removes exactly
+>   the two directories it says it will and leaves the Postgres database
+>   alone (§10) — though without the `APP_SECRET` it also deleted, the
+>   credential row left behind in that database is unusable (§6).
 > - A real domain with a real Let's Encrypt chain, served over HTTPS — via the
 >   platform's edge, with `paco tls` and **Request certificate** both correctly
 >   declining rather than running certbot (§8).
@@ -86,7 +88,7 @@ install *and* every upgrade:
 - creates the `paco` system user and its home, `/var/lib/paco`;
 - creates `/etc/paco` and generates `/etc/paco/paco.env` — **once, ever** —
   with a fresh `APP_SECRET`, the Postgres connection string, and the
-  workspace root (see §2 and §19);
+  workspace root (see §2 and §18);
 - creates the `paco` Postgres role and the `paco` database, over a Unix
   socket, as the `postgres` OS user — there is no TCP listener to reach, and
   no password, ever (peer authentication matches the connecting OS user to
@@ -131,8 +133,9 @@ Almost nothing. Docker is installed and started, the `paco` user is put in the
 `docker` group, PostgreSQL and nginx are configured, a secret is generated and
 the service is running — all before the installer returns. What is left:
 
-- **`sudo paco auth`** — see §3. It needs your Claude account, so no installer
-  can do it for you, and nothing runs a chat until it is done.
+- **A Claude credential**, added in **Settings → Models** — see §3. It needs
+  your Claude account, so no installer can do it for you, and nothing runs a
+  chat until it is done.
 - **A domain**, set in **Settings → Admin → Domain** or with `--domain` at
   install time. Not for reaching Paco — it answers on whatever address the
   request came in on, so the IP the installer prints works straight away —
@@ -146,7 +149,7 @@ Two things that look like steps but are not:
 - **The workspace image.** The first chat pulls
   `ghcr.io/stack256org/paco-sandbox` itself. It is a few gigabytes, so
   pulling it ahead of time moves that wait somewhere you chose — but doing
-  nothing is fine. The tag is `v<your version>`, not `latest`; see §21 for the
+  nothing is fine. The tag is `v<your version>`, not `latest`; see §20 for the
   exact command.
 - **The docker group.** `postinst` adds the `paco` user to it, so
   `apt install paco` is as complete as the `curl | sh` route. It only skips
@@ -306,11 +309,11 @@ to `/etc/paco/paco.env` (`dockerode` honours it) and restarting `paco`.
 | Path | What's there |
 | --- | --- |
 | `/usr/lib/paco` | The app: `apps/web/server.js`, its migration scripts, and a real `node_modules` — plus a bundled Node runtime and the Claude Code CLI, both under `node/`, so nothing else needs installing on the host to run either one. |
-| `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `auth [claude\|poolside]`, `tls`. See §3. |
+| `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `tls`, `password`. See §3. |
 | `/usr/lib/paco/paco-entrypoint.sh` | What `paco.service` runs: applies pending migrations, resolves a domain saved in Settings into `APP_URL`, then `exec`s the server so systemd signals the Node process rather than a wrapper. |
 | `/usr/bin/claude` | A thin wrapper `exec`ing `/usr/lib/paco/node/bin/claude`, so `claude` is on `PATH` without also putting the bundled Node/npm/npx on it. |
-| `/etc/paco/paco.env` | Configuration: `POSTGRES_URL`, `PGHOST`, `APP_SECRET`, `PACO_WORKSPACE_ROOT`, plus `APP_URL` if you or `install.sh --domain` add it. Mode `640`, owned `root:paco` — generated once by `postinst` and never regenerated. See §19. |
-| `/var/lib/paco` | The `paco` user's home, and all of its state: `workspaces/` (every session's git repository and chat worktrees), `.claude/` (the Claude Code credential, written by `paco auth`) and — if you use Poolside and signed in rather than pasting a key — `.config/poolside/` (written by `paco auth poolside`, §18). This directory is the entire reason the delivery model changed — see §3. |
+| `/etc/paco/paco.env` | Configuration: `POSTGRES_URL`, `PGHOST`, `APP_SECRET`, `PACO_WORKSPACE_ROOT`, plus `APP_URL` if you or `install.sh --domain` add it. Mode `640`, owned `root:paco` — generated once by `postinst` and never regenerated. See §18. |
+| `/var/lib/paco` | The `paco` user's home: `workspaces/` (every session's git repository and chat worktrees) and `.paco/` (installed plugins, §12; memory, §13). The Claude credential does not live here — it is saved in Settings, in Postgres — but this directory is still the reason the delivery model is a `.deb`: `dpkg` never touches it on upgrade, only `apt purge` does (§5). See §3. |
 | `/etc/nginx/sites-available/paco` (+ `sites-enabled/paco`) | The nginx site proxying to the app. Edited by `paco tls` when you add a domain (§8). |
 | `/lib/systemd/system/paco.service` | The systemd unit. `Requires=postgresql.service`; runs as `User=paco Group=paco`. |
 
@@ -320,36 +323,55 @@ paco's own to remove (see §5).
 
 ---
 
-## 3. `paco auth`, and why any of this is a `.deb` at all
+## 3. The Claude credential, and why any of this is a `.deb` at all
 
-The Claude Code CLI authenticates with a subscription, not an API key, so
-there is a credential to keep. Under the Docker Compose deployment this
-replaced, that credential lived on a named volume — durable in principle, but
-one more piece of state an operator had to know to back up separately, and
-exactly the kind of thing a `docker compose down -v` could take out by
-accident (see the old deployment's own warnings about that command). Under
-the native package it is a plain directory, `/var/lib/paco/.claude`, and
-`dpkg` never touches `/var/lib/paco` on an upgrade — only `apt purge` does
-(§5). **That's the whole reason the delivery model changed:** an `apt
-upgrade` should never be able to sign Claude out, and a directory `dpkg`
-already knows not to touch on upgrade is a simpler guarantee of that than a
-Docker volume an operator has to remember exists.
+The Claude Code CLI runs on an API key or a subscription-backed setup token —
+not an interactive login — and Paco stores exactly one of the two:
+**Settings → Models → Claude credential**, sealed with `APP_SECRET`
+(`apps/web/lib/crypto/secret-box.ts`) and saved in Postgres alongside every
+other instance setting. There is nothing to run as root and nothing under
+`/var/lib/paco` for it: a turn reads the credential out of the database and
+exports it into the `claude` process's environment for that one turn, so
+rotating it takes effect on the very next turn with no restart.
 
-```bash
-sudo paco auth
-```
+That is new. An earlier release signed the `paco` system user in to the CLI
+interactively, and the resulting credential landed at `/var/lib/paco/.claude`
+— a directory `dpkg` never touches on upgrade, only `apt purge` does (§5).
+That command, and that file, are both gone. What has not changed is why this
+product ships as a `.deb` in the first place:
+`/var/lib/paco` still holds every chat's workspace (§2, §10) and every
+installed plugin's state (§12), and the same guarantee the credential used to
+lean on now applies to those instead — an `apt upgrade` should never be able
+to destroy a running chat's git worktree, any more than it used to be able to
+sign Claude out. A directory `dpkg` already knows not to touch on upgrade is
+a simpler guarantee of that than the Docker volumes the Compose deployment
+this replaced needed an operator to remember existed.
 
-Runs `claude auth login` as the `paco` user, so the credential lands at
-`/var/lib/paco/.claude`. Do this before the first chat — without it, every
-turn fails with nothing to run.
-
-A provider name is an optional first argument, added when the Poolside backend
-(§18) grew a second credential to keep. Bare `paco auth` still means Claude and
-always will — it is what every runbook and every older copy of this document
-says — so `paco auth` and `paco auth claude` are the same command.
-`paco auth poolside` is the other one, and §18 covers it: it runs `pool login`
-as the same service user, into the same `/var/lib/paco` that `dpkg` does not
-touch, for the same reason.
+Add or replace the credential from **Settings → Models**: an API key (bills
+the Anthropic API directly), or a setup token from running `claude
+setup-token` on your own machine against a Claude subscription (bills the
+subscription, not the API). Paco stores exactly one of the two, and each
+turn's child `claude` process is built to match: the four environment
+variables that decide which account bills a turn and which server the CLI
+talks to (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) are never
+inherited from the server's own process environment — `packages/claude-code/
+child-env.ts` excludes them outright, even though they'd otherwise match the
+`ANTHROPIC_`/`CLAUDE_` prefixes Paco does pass through wholesale for
+everything else in that namespace. The only route any of the four has into
+the child is `apps/web/lib/agent/run-step.ts` building them fresh from
+Settings on every turn. So there genuinely is no precedence to reason
+about — not merely because the Settings UI only lets you fill in one
+credential, but because an `ANTHROPIC_API_KEY` left over in your shell,
+`apps/web/.env`, or a hand-added line in `paco.env` cannot reach the CLI
+alongside a setup token saved in Settings and silently outrank it. Do this
+before the first chat: without a credential, every turn fails with an error
+naming Settings, not a raw CLI error. Settings → Models also accepts an
+optional gateway: a Base URL for a service speaking the Anthropic Messages
+format, with an option to fetch its model list. Only Claude models are
+supported through it — Anthropic does not support routing Claude Code to
+non-Claude models through any gateway, so there is no way to point this at
+GPT or Gemini.
 
 ### The `paco` command
 
@@ -362,10 +384,7 @@ touch, for the same reason.
 | `paco upgrade` | `apt-get update && apt-get install --only-upgrade paco` |
 | `paco logs [-n N]` | Follow the unit's journal; extra args pass through |
 | `paco restart` | Re-reads `paco.env` — the only way to apply a hand-edited `APP_URL` |
-| `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, whether `paco` is authenticated, and how Poolside is signed in |
-| `paco auth` | Unchanged: the same as `paco auth claude` |
-| `paco auth claude` | Signs the `paco` user into Claude Code, so the credential lands in `/var/lib/paco/.claude` and survives every upgrade |
-| `paco auth poolside` | Runs `pool login` as the `paco` user, for the Poolside backend (§18). You install `pool` yourself; extra arguments pass through to it |
+| `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, and whether a Claude credential is configured in Settings |
 | `paco tls <domain>` | A certificate via certbot, DNS-checked first, nginx reloaded after. Optional — and skip it entirely if something in front of this host already terminates TLS (§8) |
 | `paco password` | Rotates the instance password; prompts twice (or reads stdin with `paco password --stdin`) |
 
@@ -471,8 +490,10 @@ script:
 ```text
 paco: purging — this destroys:
 paco:   /etc/paco (APP_SECRET and paco.env)
-paco:   /var/lib/paco (chat workspaces, Claude credentials, everything under it)
-paco: the Postgres database is NOT touched — see postrm if you also want it gone.
+paco:   /var/lib/paco (chat workspaces, installed plugins, everything under it)
+paco: the Postgres database is NOT touched, but the Claude credential and
+paco: the GitHub token stored in it are both sealed with the APP_SECRET this
+paco: just deleted, so they are unusable without a backup of paco.env.
 ```
 
 It also removes the nginx site files it installed, reloading nginx if the
@@ -529,20 +550,14 @@ purpose, not by skipping this section.
 
 ### The Claude credential
 
-(And, on a Poolside instance signed in from the terminal, `.config/poolside`
-beside it — same reasoning, same commands, `sudo paco auth poolside` to
-recreate it.)
-
-Simplest is not to back it up — after a restore, `sudo paco auth` again. To
-keep it anyway, it's now a plain directory, not a Docker volume to unpack
-through a throwaway container:
-
-```bash
-sudo tar -C /var/lib/paco -czf paco-claude-$(date +%F).tar.gz .claude
-```
-
-Treat that archive as a credential: it authenticates as your Claude
-subscription.
+There is no separate file to archive for this — it lives in
+`instance_settings.claude_credential_sealed`, sealed with `APP_SECRET`, and
+comes back automatically with the Postgres dump above. It is only readable,
+though, if that dump is restored alongside the **same** `APP_SECRET` it was
+sealed under — see the warning right below, which now covers this credential
+exactly as it covers the GitHub token. Simplest fallback if you did not keep
+`APP_SECRET`: after a restore, open Settings → Models and paste the
+credential in again.
 
 ### `APP_SECRET` and the rest of `paco.env`
 
@@ -551,22 +566,45 @@ sudo cp /etc/paco/paco.env paco-env-$(date +%F).txt   # contains APP_SECRET — 
 ```
 
 **Read this before you rely on any of the above.** Paco has no
-application-level authentication and no accounts, so `APP_SECRET` now has
-exactly one job (`apps/web/lib/crypto/secret-box.ts`): it derives — via
-scrypt with a fixed salt — the AES-256-GCM key that encrypts the instance's
-one stored GitHub token. That makes it *more* important to back up than
-before, not less — there is no second purpose left to notice it broke.
-**A database restored under a different `APP_SECRET` loses that GitHub
-token permanently** — the ciphertext is authenticated, so decryption fails
+application-level authentication and no accounts, so `APP_SECRET`
+(`apps/web/lib/crypto/secret-box.ts`) has exactly two jobs now, both the
+same shape: it derives — via scrypt with a fixed salt — the AES-256-GCM key
+that seals the instance's one stored GitHub token, **and, as of this
+release, the one Claude credential saved in Settings → Models.** That makes
+it *more* important to back up than before, not less — losing it now costs
+you both the ability to push code and the ability to run a single turn, not
+one or the other.
+
+**A database restored under a different `APP_SECRET` loses both
+permanently** — the ciphertext is authenticated, so decryption fails
 outright instead of returning garbage, and there is no recovery path short
-of pasting a new personal access token into Settings → Connections. The
-failure is quiet: `getGithubToken()` catches the error, logs it, and returns
-`null`; Settings → Connections keeps showing the instance as connected,
-because that view reads the login and scopes columns and never decrypts
-anything — only pushes and pull requests behave as though nothing were
-connected. So: back up `paco.env`, specifically `APP_SECRET`, in a password
-manager or secrets store — not only as the file sitting on the machine
-you're backing up.
+of pasting a new value into the relevant Settings page. The two fail
+differently, though, so don't expect the same symptom: the GitHub token
+fails quietly — `getGithubToken()` catches the error, logs it, and returns
+`null`, while Settings → Connections keeps showing the instance as
+connected, because that view reads the login and scopes columns and never
+decrypts anything, so only pushes and pull requests behave as though nothing
+were connected. The Claude credential fails loudly — reading it throws, so
+the very next turn fails outright with a decryption error rather than the
+friendlier "add a credential in Settings" message an instance with no
+credential at all would show. Either way the fix is the same: paste the
+value into Settings again.
+
+This is also, concretely, what `apt purge` now does to your agent. The old
+CLI login under `/var/lib/paco` was never touched by `dpkg` on upgrade *or*
+remove, and `apt purge` deleting it was the one moment it went away. The
+Claude credential's durability story is the opposite: it lives in Postgres,
+which `apt purge` does not touch — but `apt purge` does delete
+`/etc/paco`, and `APP_SECRET` with it, and without that secret the
+credential row left behind in the database is exactly as unusable as if it
+had been deleted outright. If you plan to `apt purge` and reinstall, back up
+`paco.env` first or budget for re-entering the credential in Settings
+afterward — there is no in-between.
+
+So: back up `paco.env`, specifically `APP_SECRET`, in a password manager or
+secrets store — not only as the file sitting on the machine you're backing
+up. It is the only thing standing between an `apt purge` and having to
+reconnect GitHub and re-paste your Claude credential from scratch.
 
 ### Restore
 
@@ -582,13 +620,14 @@ sudo systemctl stop paco
 sudo cp paco-env-2026-01-01.txt /etc/paco/paco.env
 sudo chown root:paco /etc/paco/paco.env && sudo chmod 640 /etc/paco/paco.env
 
-# 3. Workspaces and the Claude credential, at the same absolute path.
+# 3. Workspaces, at the same absolute path.
 sudo tar -C /var/lib/paco -xzf paco-workspaces-2026-01-01.tar.gz
-sudo tar -C /var/lib/paco -xzf paco-claude-2026-01-01.tar.gz   # if you kept it
 sudo chown -R paco:paco /var/lib/paco
 
-# 4. Recreate the database and load the dump. dropdb/createdb need to run as
-#    the postgres OS user — the paco role owns the database but was never
+# 4. Recreate the database and load the dump — this is what brings the
+#    Claude credential back too, decryptable because step 2 already put the
+#    matching APP_SECRET in place. dropdb/createdb need to run as the
+#    postgres OS user — the paco role owns the database but was never
 #    granted CREATEDB (see postinst); pg_restore itself can run as paco.
 sudo -u postgres dropdb --if-exists paco
 sudo -u postgres createdb -O paco paco
@@ -598,10 +637,9 @@ sudo -u paco pg_restore -h /var/run/postgresql -d paco --no-owner \
 # 5. Start the app. Migrations run here, bringing an older dump up to date.
 sudo systemctl start paco
 
-# 6. Re-authenticate the agent if you didn't restore the credential.
-sudo paco auth
-# ...and `sudo paco auth poolside` too, on an instance that uses Poolside
-# without an API key in Settings (§18).
+# 6. If you did not restore the original APP_SECRET in step 2, the restored
+#    Claude credential is undecryptable: open Settings -> Models and paste
+#    it in again.
 ```
 
 The workspace path must land at the identical absolute path it had before:
@@ -917,17 +955,24 @@ host:
 - **The host port is ephemeral.** Paco asks Docker for `HostPort: "0"`, so
   each container gets whatever's free — that's what lets several sandboxes
   run at once. Find them with `docker ps --filter label=paco.sandbox=true`.
+- **Bound to loopback, not to every interface.** Paco publishes with
+  `HostIp: "127.0.0.1"` (`packages/sandbox/docker/sandbox.ts`,
+  `buildPortBindings`), so a sandbox's dev server is reachable only from the
+  host itself. Docker binds `0.0.0.0` when told nothing, which would put
+  whatever the agent started on every interface with no password and with
+  nginx — the only thing holding the instance password — bypassed entirely.
 - **Not proxied through Paco, and not the preview-hostname path above.** A
   raw port URL (`http://localhost:<ephemeral-port>`) is handed to your
-  browser as-is. Nothing about reaching a container this way is
-  authenticated, and a chat's private/public setting has no effect on it —
-  that setting only governs the nginx-routed hostname.
-- **On a public machine, these bind all interfaces by default.** Whatever an
-  agent starts on 3000, 5173, 4321, or 8000 inside a sandbox becomes
-  reachable from outside on the mapped port unless a firewall says
-  otherwise — regardless of whether a preview domain is configured, and
-  regardless of that chat's visibility setting. Check `docker ps` and your
-  firewall rules on any instance with a public IP.
+  browser as-is, and reaching a container that way is not authenticated. On
+  a single-operator instance that is unremarkable, because loopback means
+  "someone already on this machine". It does mean any other process or user
+  on the host can reach a running sandbox without the instance password.
+- **Upgrading from before this changed:** Docker cannot rebind a running
+  container, so a sandbox created earlier keeps its old all-interfaces
+  binding until it is recreated. Find them with
+  `docker ps --filter name=paco-sandbox --format '{{.Names}}\t{{.Ports}}'`
+  and look for anything published on `0.0.0.0`; stopping those chats'
+  sandboxes once is enough.
 
 ---
 
@@ -1048,7 +1093,7 @@ fails, all at once, for the same reason**:
   ```
 
 - The fix is to point `PACO_PLUGIN_NODE_EXECUTABLE` at a Node >= 24 binary in
-  `/etc/paco/paco.env` and restart (§19). It is a pointer, not a bypass:
+  `/etc/paco/paco.env` and restart (§18). It is a pointer, not a bypass:
   `start()` re-checks whatever it resolves to and refuses again if that binary
   is also too old.
 
@@ -1069,7 +1114,7 @@ otherwise the service user's home plus `/.paco`. **On the native package that
 resolves to `/var/lib/paco/.paco/plugins`** — `postinst` uses `PACO_HOME` as a
 shell variable while generating `paco.env` but never writes it into the file,
 so the home-relative fallback is what actually applies, and the `paco` user's
-home is `/var/lib/paco`. `PACO_PLUGINS_DIR` overrides the whole path (§19).
+home is `/var/lib/paco`. `PACO_PLUGINS_DIR` overrides the whole path (§18).
 
 That directory is inside `/var/lib/paco`, so `apt remove` keeps it and
 `apt purge` destroys it (§5) — but **§6's workspaces tarball does not cover
@@ -1120,7 +1165,7 @@ It is given exactly three environment variables — `PACO_INTERNAL_URL`,
 `PACO_INTERNAL_TOKEN` and `PACO_PLUGIN_TOOLS` — and deletes every other key off
 `process.env` before its first network call, recording on stderr which keys
 survived. **These are set by Paco, per turn; never put them in `paco.env`**
-(§19).
+(§18).
 
 The callback URL is loopback, derived from `APP_URL`'s port — and `APP_URL` on
 a native install usually names no port, so it falls back to `:80`. On this
@@ -1214,12 +1259,11 @@ has no relationship to a repository at all.
   skill. It is **human-gated by construction**: a proposal only ever files a
   `blocked` task on the board (§14), and never writes a skill file itself.
 
-One cost worth stating plainly: **distillation and reflection are always
-Claude Code**, not the chat's backend — so a chat you moved to Poolside
-specifically to avoid Claude still has its memory distilled by Claude
-(`lib/memory/distill.ts` says so at the call site). And **instance memory is
-injected into every turn on this instance**, so a distilled entry is shared
-context for everything that runs here, not just the chat that produced it.
+One cost worth stating plainly: **distillation and reflection always run on
+Claude Code** (`lib/memory/distill.ts` says so at the call site). And
+**instance memory is injected into every turn on this instance**, so a
+distilled entry is shared context for everything that runs here, not just the
+chat that produced it.
 
 Nothing here can fail a turn. A missing or unreadable memory directory reads as
 an empty list, and any unexpected error is logged and treated as "nothing to
@@ -1252,7 +1296,7 @@ operator are the ones that end somewhere else:
   third it goes `blocked` instead of looping forever.
 - **`done` is terminal.** There is no edge out of it.
 
-### Four ways an unattended task ends that are not "it worked"
+### Three ways an unattended task ends that are not "it worked"
 
 1. **An approval prompt.** An unattended turn hits exactly the same approval
    gate a human's chat does, and there is nobody watching it. The task blocks.
@@ -1261,13 +1305,7 @@ operator are the ones that end somewhere else:
    task reaches `done` without anything having reviewed it. That only happens
    if someone disabled the seeded `reviewer` (§15); builtin agents cannot be
    deleted.
-3. **A chat running on Poolside.** The reviewer answers through structured
-   output, which Poolside cannot produce (§18). The gate detects this *before*
-   spending a turn and blocks the task with
-   `Not reviewed: backend "poolside" cannot produce structured output …`. It
-   deliberately does not pass the task, does not fail it, and does not try to
-   read a verdict out of free text.
-4. **The 200-turn cap.** An unattended task gets `TASK_DEFAULT_MAX_TURNS`
+3. **The 200-turn cap.** An unattended task gets `TASK_DEFAULT_MAX_TURNS`
    rather than the much larger interactive default, so a runaway task fails
    loudly instead of burning turns indefinitely.
 
@@ -1491,182 +1529,7 @@ a job already enqueued for a tick at the moment the schedule was disabled, and
 
 ---
 
-## 18. The Poolside backend
-
-A chat can run on **Poolside** instead of Claude Code — a second agent
-backend, driven over ACP (`pool acp`, one process per turn) rather than the
-Claude Code CLI. It is chosen per chat, from the composer's backend control,
-and it exists so an instance is not tied to one provider.
-
-### You install the binary; nothing here does
-
-**Paco does not ship, download, or build `pool`.** You install it with
-Poolside's own installer. Paco spawns whatever `pool` is on `PATH`, or the
-absolute path you put in **Settings → Models → Poolside**. On a native install
-that means the binary has to be reachable by the `paco` service user, and
-`PATH` under systemd is not your login shell's — give it an absolute path
-rather than relying on `PATH` picking it up.
-
-The environment that process gets is **built from scratch**, not inherited
-from the service: `PATH`, `HOME`, `XDG_CONFIG_HOME`, and the credentials
-below. Two consequences worth knowing before you debug one of them:
-
-- Putting `POOLSIDE_API_KEY` in the instance's `.env` does nothing. The key
-  comes from Settings, and only from there.
-- `pool login` still works, because `HOME`/`XDG_CONFIG_HOME` are passed
-  through and `pool` reads `~/.config/poolside/credentials.json` under them —
-  but it is the **service user's** home that counts, not yours. `sudo paco
-  auth poolside` is how you sign that user in without a `su` incantation; see
-  *Two ways to authenticate* below.
-
-Configure it in **Settings → Models → Poolside**:
-
-| Field | What it does |
-| --- | --- |
-| **Binary path** | Absolute path to `pool`. Unset, Paco spawns the bare name `pool` and relies on the service's `PATH`. |
-| **API key** | Optional — see *Two ways to authenticate* below. Passed to the process as `POOLSIDE_API_KEY`. Sealed with `APP_SECRET` the same way the GitHub token is, and never sent back to the browser. Unset, `pool` falls back to the credentials `pool login` wrote in the service user's home; **set, it wins over them.** |
-| **Base URL** | Passed to the process as `POOLSIDE_STANDALONE_BASE_URL`, and genuinely honoured — point it at your own Poolside deployment. Unset, `pool` uses its own default (`inference.poolside.ai`). |
-
-Settings are read fresh on every turn rather than cached, so an edit takes
-effect on the very next turn with no restart.
-
-### Two ways to authenticate
-
-The form above lists an API key, and it is easy to read that as a requirement.
-It is not one. `pool` takes a credential from either of two places, and the
-one most operators want is the terminal:
-
-```bash
-sudo paco auth poolside
-```
-
-That runs `pool login` as the `paco` user — Poolside's own sign-in, driven by
-Poolside, not by Paco — so the credential lands in that user's own config
-directory (`/var/lib/paco/.config/poolside/`, which `pool config` will print
-for you) rather than in Paco's database. Nothing goes in Settings at all.
-
-It is the same shape as `paco auth` for Claude, with one difference that
-changes the error you get when it goes wrong: **Paco ships `claude` and does
-not ship `pool`.** A missing `claude` means a broken package; a missing `pool`
-means you have not installed it yet, and the command says so rather than
-telling you to reinstall Paco.
-
-Two details worth knowing before you run it:
-
-- **It signs in the binary your turns run.** If **Binary path** is set in
-  Settings, that is the binary `paco auth poolside` invokes — not some other
-  `pool` earlier on root's `PATH`. Signing in the wrong one is the failure
-  mode this avoids: a login that succeeds while every turn keeps failing.
-- **Extra arguments go through to `pool login`.** `paco auth poolside
-  --api-url https://tenant.example` configures enterprise tenant mode;
-  `--api-key …` configures standalone mode without the browser step, if you
-  would rather not store a key in Paco's database.
-
-**No restart afterwards.** Every turn spawns a fresh `pool` process which
-reads the credential off disk as it starts, so the next turn picks it up.
-That is the same reason a Settings edit needs no restart, arrived at from the
-other direction.
-
-`sudo paco status` reports what it found:
-
-```text
-Poolside:  credential file present (/var/lib/paco/.config/poolside/credentials.json)
-```
-
-Read that line for exactly what it says. `pool` has no `auth status`
-subcommand to ask, so this is the presence of the credential *file* and not a
-statement that the service still accepts it — a revoked credential looks
-identical here. The first turn is what proves it. The line also names the
-other two states plainly: `no login, using the API key in Settings` when a key
-is stored and no file exists, and `not installed` when `pool` is not runnable
-by the service user at all.
-
-#### If you use the API key instead
-
-Two behaviours of `pool` 1.0.16, both checked against the binary rather than
-inferred, decide how the two ways interact:
-
-- **The key wins.** `POOLSIDE_API_KEY` overrides the credentials file. Set
-  both and the key is the one in use — which is why `paco auth poolside`
-  prints a warning when it finds a key stored, and why `paco status` says
-  "but an API key in Settings takes precedence over it".
-- **The key alone is not enough.** `pool` resolves an API *URL* separately —
-  from the `settings.yaml` that `pool login` writes, or from
-  `POOLSIDE_STANDALONE_BASE_URL`. On a host that has never run `pool login`,
-  a key with no **Base URL** fails every session with `Authentication
-  required` / `API URL not configured`, which reads like a rejected key and
-  is not one. **Set Base URL to `https://inference.poolside.ai`** (or your own
-  deployment) alongside the key, or sign in from the terminal and skip the key
-  entirely.
-
-### Prove it before a chat depends on it
-
-**Test connection** on that same page spawns the binary, exchanges the
-`initialize` handshake, and tears the process down — the same first frame a
-real turn exchanges, with a 15-second timeout, without creating a session or
-running a prompt. A missing binary, a wrong path, or a process that never
-answers is reported here with the host's own error text. It runs against a
-temporary directory, so nothing in a chat's worktree affects the result.
-
-It uses the *same* settings-to-process mapping a real turn uses, so a green
-result is a statement about the configuration a turn would actually run with,
-not a hand-written approximation of it.
-
-A green result also reports **the endpoint the binary resolved** — read out of
-the handshake's own `poolside/service_mode`, `provider: inference.poolside.ai`
-by default. Check it against what you typed: a wrong **Base URL** is the
-likeliest mistake on this form, and a handshake succeeds against the wrong
-endpoint exactly as happily as the right one. (Some builds do not report it;
-then the result simply makes the weaker claim.)
-
-Be clear about what a green result proves: **the binary starts, speaks the
-protocol, and resolved that endpoint.** It creates no session and runs no
-prompt, so it does not exercise the API key against a provider — `initialize`
-does not authenticate. A working handshake and a failing first turn is a
-credential problem, not a path problem.
-
-### What a Poolside chat keeps
-
-Worth stating first, because a second backend is usually assumed to be a
-stripped-down one. These are not degraded on Poolside:
-
-- **Memory, skills, and project instructions.** They ride in ahead of the
-  prompt on every turn, so the agent has the same briefing a Claude Code chat
-  gets (§13).
-- **Plugin MCP servers and any project MCP configuration.** They are really
-  spawned and handshaken by `pool`, not merely accepted and dropped.
-- **Session resume.** A later turn reattaches to Poolside's own session rather
-  than replaying the conversation.
-- **The model picker**, narrowed to the model ids Poolside publishes for
-  itself. They are Poolside's own — not Claude tier names — so the picker
-  offers what the backend will actually accept.
-- **Approvals.** Every tool call arrives as a permission request and is
-  answered by Paco's own approval policy, the same gate a Claude Code chat
-  passes through.
-
-### What a chat gives up by running on Poolside
-
-These are not opinions about the backend; they are the capabilities it reports
-as unsupported, each with a visible consequence:
-
-| Not supported | Consequence |
-| --- | --- |
-| **Reasoning effort** | Poolside has a thinking level of its own, but with two settings against Paco's five — there is no honest mapping, so the instruction is simply not passed on. The effort control is hidden and the chat runs at Poolside's own default. It is not thinking less hard; it is not taking the instruction. |
-| **Custom subagents** | Paco's roster (§15) and its per-agent model tiers have no way in — Poolside's protocol can select an agent it already defines, but not define one. Poolside delegates to its own internal subagents instead. |
-| **Structured output** | Turns that need a schema-shaped answer cannot run. Concretely: the task board's reviewer gate blocks the task rather than guessing a verdict (§14), and task planning does not use a chat backend at all. |
-
-The composer hides the controls that do not apply, and Settings → Models lists
-these same lines — derived from what the backend reports, not written out by
-hand — so choosing Poolside is a visible trade rather than a silent downgrade.
-
-One cost that is *not* on that list, because it is not a capability: **memory
-distillation and daily reflection always run on Claude Code** regardless of a
-chat's backend (§13). An instance that moved to Poolside to avoid Claude
-entirely will still see Claude usage from those two paths.
-
----
-
-## 19. Environment variables
+## 18. Environment variables
 
 Everything lives in `/etc/paco/paco.env` — a flat `KEY=value` file, mode
 `640`, owned `root:paco`. Hand-edit it and run `sudo paco restart` (or
@@ -1693,7 +1556,7 @@ own.
 | `PACO_HOME` | Paco's own data directory — the root under which memory (§13) and installed plugins (§12) live. Unset, it falls back to the service user's home plus `/.paco`, which on this package is `/var/lib/paco/.paco`. `postinst` does **not** write it into `paco.env`, so the fallback is what applies unless you add it. Moving it moves both subsystems; nothing migrates the old directory for you. | `paco.env` |
 | `PACO_PLUGINS_DIR` | Where plugins are installed, overriding `<data dir>/plugins` for plugins only. A relative value is resolved against the server process's working directory (`/usr/lib/paco`), so give it an absolute path. Unset, plugins go to `/var/lib/paco/.paco/plugins`. | `paco.env` |
 | `PACO_PLUGIN_NODE_EXECUTABLE` | The Node binary plugin workers are spawned with. Unset, Paco spawns plugin workers with the runtime it is itself running on — correct on this package, whose bundled Node is 24.19.0. Point it at a Node >= 24 binary on any host whose runtime is older: below the floor **every** plugin fails to start, with `not-running` on the Plugins page and one log line as the only diagnosis (§12). | `paco.env` |
-| `PACO_SANDBOX_IMAGE` | A full image reference for the sandbox, overriding the `ghcr.io/stack256org/paco-sandbox:v<version>` tag Paco derives from the installed package. For a mirror or a locally built image; see §21. | `paco.env` |
+| `PACO_SANDBOX_IMAGE` | A full image reference for the sandbox, overriding the `ghcr.io/stack256org/paco-sandbox:v<version>` tag Paco derives from the installed package. For a mirror or a locally built image; see §20. | `paco.env` |
 
 ### Set by Paco itself — do not set these
 
@@ -1714,7 +1577,7 @@ variable an operator wants is `PACO_PLUGIN_NODE_EXECUTABLE`, above.
 
 ---
 
-## 20. Instance health
+## 19. Instance health
 
 Settings → Health answers "is this instance healthy, and what is it costing
 me?" without grepping logs or opening `psql`. It's read-only; reclaiming disk
@@ -1751,7 +1614,7 @@ couldn't be read is unknown, not clean.
 
 ---
 
-## 21. Troubleshooting
+## 20. Troubleshooting
 
 ### "Paco couldn't download the workspace image"
 
@@ -1786,13 +1649,23 @@ avoids the download entirely.
 
 ### Chats fail immediately, or the agent never starts
 
-```bash
-sudo paco auth
-sudo su -s /bin/sh -l paco -c "claude auth status"   # should print a logged-in account
+If the failure names Settings rather than a raw CLI error, there is no
+credential configured yet (or the one saved cannot be decrypted — see the
+`APP_SECRET` warning in §6). Fix it from the browser:
+
+```text
+Settings -> Models -> Claude credential -> paste an API key or setup token -> Save
 ```
 
-For a chat whose backend is Poolside, it is a different credential entirely —
-`paco auth` does not touch it. Use `sudo paco status` and §18.
+`paco status` also reports this without opening a browser:
+
+```bash
+sudo paco status   # look at the "Credential:" row
+```
+
+If the CLI itself is missing (`paco status`'s `CLI:` row says so), that is a
+broken install, not a missing credential — see `apt-get install --reinstall
+paco` in §1.
 
 ### Chats fail trying to reach the Docker socket
 
@@ -1896,7 +1769,7 @@ sudo paco logs | grep "plugin registry"
 ```
 
 `host runtime is below the required Node floor` is the line. Set
-`PACO_PLUGIN_NODE_EXECUTABLE` to a Node >= 24 binary and restart (§12, §19).
+`PACO_PLUGIN_NODE_EXECUTABLE` to a Node >= 24 binary and restart (§12, §18).
 A single plugin reading `not-running` while the others run is a different
 problem — a symlink in its tree, or its files changing on disk since install
 — and the same log grep names it.
@@ -1927,10 +1800,8 @@ problem — a symlink in its tree, or its files changing on disk since install
 
 ### A task is stuck in `blocked` and nobody knows why
 
-Read the task's own summary on the card — it says which of the four cases it
-is (§14). `Not reviewed: backend "poolside" cannot produce structured output`
-is the one that surprises people: the chat was moved to Poolside, and the
-reviewer cannot return a verdict there (§18).
+Read the task's own summary on the card — it says which of the three cases it
+is (§14).
 
 ### A design candidate's preview is blank or unreachable
 
@@ -1943,27 +1814,3 @@ reviewer cannot return a verdict there (§18).
 - **A previous candidate is still holding the port.** The 60-second
   reconciliation sweep reclaims those (§16); give it a minute before
   concluding anything.
-
-### Poolside chats fail on the first turn, but Test connection passed
-
-Test connection proves the binary starts and completes the `initialize`
-handshake. It creates no session and runs no prompt, so it never exercises
-the API key against a provider (§18). A green test and a failing first turn
-points at the credential, not the path — either the API key in Settings, or
-the `pool login` credentials it falls back to, which live in the *service
-user's* home and not yours.
-
-```bash
-sudo paco status          # the Poolside: line says which of the two it found
-sudo paco auth poolside   # sign the service user in, if it found neither
-```
-
-Two failures here are worth telling apart, because both name a credential and
-only one is about one. `Authentication required` with no API key stored means
-exactly what it says: sign in. The same message *with* a key stored usually
-means the key has no API URL to go with it — set **Base URL** as well, or sign
-in from the terminal and clear the key (§18, *If you use the API key
-instead*).
-
-If instead the turns succeed but reach the wrong deployment, compare the
-endpoint Test connection reports with the **Base URL** you typed (§18).

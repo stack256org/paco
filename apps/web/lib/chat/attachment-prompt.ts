@@ -257,12 +257,12 @@ function renderStagedBinary(
    * converting it, wiring it into a page. Dropping it would take away a
    * capability the backend genuinely has.
    *
-   * What must not survive is the instruction to `Read` it "to view it".
-   * On Poolside that call fails outright, and an inline image block is
-   * dropped without even an error, so a prompt that implies the picture
-   * arrived is the exact silent failure the unstaged fallback below was
-   * written to avoid. Same rule, applied one step earlier: state what is
-   * NOT available.
+   * What must not survive is the instruction to `Read` it "to view it". On
+   * a backend whose model cannot see images, that call fails outright, and
+   * an inline image block can be dropped without even an error, so a
+   * prompt that implies the picture arrived is the exact silent failure the
+   * unstaged fallback below was written to avoid. Same rule, applied one
+   * step earlier: state what is NOT available.
    */
   return [
     heading,

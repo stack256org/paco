@@ -10,6 +10,34 @@ import type { UIMessage, UIMessageChunk } from "ai";
 mock.module("server-only", () => ({}));
 
 /**
+ * The instance's Claude credential, mutable per test so the "unconfigured"
+ * path (Task 2, Step 4) can be exercised alongside the default-configured
+ * path every other test in this file relies on. `runAgentTurn` reads it via
+ * `readClaudeCredential()` on every call rather than once, so reassigning
+ * this between tests is enough — no per-test re-mocking needed.
+ */
+let claudeCredential: {
+  kind: "api_key" | "setup_token";
+  value: string;
+} | null = { kind: "api_key", value: "test-anthropic-key" };
+
+/**
+ * The instance's gateway configuration, mutable per test for the same reason
+ * as `claudeCredential` above. Defaults to "no gateway" — Anthropic direct —
+ * so every test that doesn't care about the gateway sees the same
+ * unconfigured state `readInstanceSettings()` returns on a fresh instance.
+ */
+let claudeGatewaySettings: {
+  claudeBaseUrl: string | null;
+  claudeModelDiscovery: boolean;
+} = { claudeBaseUrl: null, claudeModelDiscovery: false };
+
+mock.module("@/lib/settings/instance-settings", () => ({
+  readClaudeCredential: () => Promise.resolve(claudeCredential),
+  readInstanceSettings: () => Promise.resolve(claudeGatewaySettings),
+}));
+
+/**
  * Assistant messages are persisted with an upsert keyed on the message id, so an
  * id that comes back empty makes every turn in a chat overwrite the same row.
  * The id is not in the chunks this function consumes — the workflow writes the
@@ -51,10 +79,6 @@ mock.module("@paco/claude-code", () => ({
   DEFAULT_AGENTS: {},
   buildApprovalSettings: () => ({ hooks: {} }),
   ClaudeCodeBackend: class {
-    // `runAgentTurn` now resolves its backend through `backend-factory.ts`,
-    // which switches on `capabilities().id` to decide which options shape to
-    // build — the default-path tests below exercise that switch too, not
-    // just `startTurn`, so this stub needs a real-shaped `capabilities()`.
     capabilities() {
       return {
         id: "claude-code" as const,
@@ -135,93 +159,8 @@ function makeStructuredOutputOptions() {
   } as never;
 }
 
-/**
- * The fixture for the Poolside parity tests: every field that used to be
- * built and then dropped on the floor whenever a chat was switched off
- * Claude Code.
- *
- * `model: { id: "opus" }` is a Claude tier alias on purpose — Poolside
- * declares its own ids, so this fixture is what proves the alias is filtered
- * out rather than handed to a binary that has never heard of it. The
- * companion fixture below supplies an id Poolside really accepts.
- */
-function makePoolsideOptions() {
-  return {
-    sandbox: {
-      state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
-      environmentDetails: "Container: paco-sandbox-1",
-      currentBranch: "chat/abc",
-    },
-    model: { id: "opus", effort: "high" },
-    customInstructions: "Always run the linter.",
-    memorySection: "## Memory\n\n- The user prefers pnpm.",
-    mcpServers: {
-      "paco-plugins": {
-        command: "/usr/bin/node",
-        args: ["/opt/paco/plugin-mcp-server.ts"],
-        env: { PACO_INTERNAL_TOKEN: "secret" },
-      },
-    },
-  } as never;
-}
-
 interface SpyBackend extends AgentBackend {
   lastCtx?: TurnContext;
-}
-
-/**
- * A spy reporting Poolside's real capability set — copied from
- * `PoolsideBackend.capabilities()`, including the fields that say what it
- * cannot carry, which is what the parity tests below turn on.
- *
- * `models` is a real list rather than the empty array the previous ACP
- * backend reported: Poolside accepts its own model ids over ACP's `model`
- * config option, so `resolveModelId` has something to let through as well as
- * something to filter out.
- */
-const POOLSIDE_MODELS = [
-  "poolside/laguna-s-2.1",
-  "poolside/laguna-xs-2.1",
-] as const;
-
-function createPoolsideSpyBackend(): SpyBackend {
-  const spy: SpyBackend = {
-    lastCtx: undefined,
-    capabilities(): BackendCapabilities {
-      return {
-        id: "poolside",
-        resume: true,
-        steering: "restart",
-        mcp: true,
-        effort: false,
-        subagents: true,
-        images: false,
-        compaction: false,
-        customAgents: false,
-        structuredOutput: false,
-        models: POOLSIDE_MODELS,
-      };
-    },
-    startTurn(ctx: TurnContext): TurnHandle {
-      spy.lastCtx = ctx;
-      return {
-        chunks: (async function* () {
-          // no chunks: this backend only exists to record its TurnContext
-        })(),
-        result: Promise.resolve({
-          finishReason: "stop",
-          isError: false,
-          usage: zeroUsage(),
-          resumeToken: "poolside-session-1",
-        }),
-        steer: () => Promise.resolve(),
-        interrupt: () => {
-          // no-op: not exercised here
-        },
-      };
-    },
-  };
-  return spy;
 }
 
 /**
@@ -229,8 +168,14 @@ function createPoolsideSpyBackend(): SpyBackend {
  * what `runAgentTurn` forwards to a backend — the thing missing before this
  * test, per review: a dropped option (e.g. `model`) would otherwise go
  * unnoticed since no test inspected the call args.
+ *
+ * `capabilitiesOverride` lets a test report a `models` list narrower than
+ * "accepts anything", which is what `resolveModelId`'s filtering tests below
+ * need.
  */
-function createSpyBackend(): SpyBackend {
+function createSpyBackend(
+  capabilitiesOverride?: Partial<BackendCapabilities>,
+): SpyBackend {
   const spy: SpyBackend = {
     lastCtx: undefined,
     capabilities(): BackendCapabilities {
@@ -243,6 +188,7 @@ function createSpyBackend(): SpyBackend {
         subagents: false,
         images: false,
         compaction: false,
+        ...capabilitiesOverride,
       };
     },
     startTurn(ctx: TurnContext): TurnHandle {
@@ -407,203 +353,50 @@ describe("runAgentTurn", () => {
     expect(env.PACO_APPROVAL_URL).toBe("https://example.test/approve");
     expect(env.PACO_APPROVAL_TOKEN).toBe("approval-token-xyz");
     expect(env.PACO_APPROVAL_CHAT_ID).toBe("chat-123");
+    // No gateway configured in this fixture (the default from
+    // `claudeGatewaySettings`), so nothing gateway-related reaches the turn.
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
   });
 
-  test("builds PoolsideBackendOptions, not Claude's shape, when the resolved backend reports id 'poolside'", async () => {
+  test("forwards the configured gateway into the turn's environment", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createPoolsideSpyBackend();
+    const backend = createSpyBackend();
+    const previousGatewaySettings = claudeGatewaySettings;
+    claudeGatewaySettings = {
+      claudeBaseUrl: "https://llm.example.com",
+      claudeModelDiscovery: true,
+    };
 
-    await runAgentTurn<UIMessage>({
-      prompt: "build the thing",
-      options: makeOptions(),
-      messageId: "assistant-42",
-      originalMessages: [],
-      backend: spy,
-      chatId: "chat-123",
-      approval: {
-        url: "https://example.test/approve",
-        token: "approval-token-xyz",
-      },
-      onChunk: async () => {
-        // no-op: this test only inspects the recorded TurnContext
-      },
-    });
-
-    const backendOptions = spy.lastCtx?.backendOptions as Record<
-      string,
-      unknown
-    >;
-    // Claude-only fields must not leak into a Poolside turn's options.
-    expect(backendOptions.agents).toBeUndefined();
-    expect(backendOptions.settings).toBeUndefined();
-    expect(backendOptions.sessionId).toBeUndefined();
-    expect(backendOptions.env).toBeUndefined();
-
-    // Pool runs with its prompts off, the same posture Claude Code runs in.
-    // Both halves matter: the mode is what stops the agent asking, and the
-    // handler is what answers consistently if it asks anyway — the package
-    // default is deny, which would hang a turn on a prompt nobody sees.
-    expect(backendOptions.permissionMode).toBe("always-allow");
-    expect(typeof backendOptions.onApprovalRequest).toBe("function");
-  });
-
-  /**
-   * THE regression this rewrite exists to prevent, in one assertion.
-   *
-   * `appendSystemPrompt` and `mcpServers` were both built unconditionally
-   * and then spread in only on the `claude-code` branch, so flipping a chat
-   * to the second backend silently dropped memory, skills, project
-   * instructions, the environment details, the "## Running the app" briefing
-   * — the last of which is why an agent starts its dev server on the host
-   * and the preview comes up blank — AND every MCP server, while the
-   * backend's own `capabilities()` went on claiming `mcp: true`.
-   *
-   * Deliberately asserted together: a turn is only correctly wired if BOTH
-   * arrive, and splitting them into two tests is how one of them gets
-   * quietly deleted.
-   */
-  test("a Poolside turn RECEIVES the system context and the mcpServers", async () => {
-    const { runAgentTurn } = await modulePromise;
-
-    const spy = createPoolsideSpyBackend();
-
-    await runAgentTurn<UIMessage>({
-      prompt: "build the thing",
-      options: makePoolsideOptions(),
-      messageId: "assistant-42",
-      originalMessages: [],
-      backend: spy,
-      onChunk: async () => {
-        // no-op: this test only inspects the recorded TurnContext
-      },
-    });
-
-    const backendOptions = spy.lastCtx?.backendOptions as Record<
-      string,
-      unknown
-    >;
-
-    const systemContext = backendOptions.systemContext as string;
-    expect(systemContext).toContain("The user prefers pnpm.");
-    expect(systemContext).toContain("Always run the linter.");
-    expect(systemContext).toContain("Container: paco-sandbox-1");
-    expect(systemContext).toContain("## Running the app");
-
-    // An array, each entry carrying its own `name` — ACP's `session/new`
-    // shape, not the Claude Code CLI's name-keyed record.
-    expect(backendOptions.mcpServers).toEqual([
-      {
-        name: "paco-plugins",
-        command: "/usr/bin/node",
-        args: ["/opt/paco/plugin-mcp-server.ts"],
-        env: { PACO_INTERNAL_TOKEN: "secret" },
-      },
-    ]);
-  });
-
-  /**
-   * The previous ACP backend rejected a relative `command` outright, failing
-   * the whole session, so `run-step` dropped such a server with a warning.
-   * Poolside resolves a bare command on `PATH`, so nothing is dropped — a
-   * filter kept "just in case" would be the silent-drop bug all over again,
-   * in the one place this file is meant to have eliminated it.
-   */
-  test("a Poolside turn keeps an MCP server whose command is not an absolute path", async () => {
-    const { runAgentTurn } = await modulePromise;
-
-    const spy = createPoolsideSpyBackend();
-
-    await runAgentTurn<UIMessage>({
-      prompt: "build the thing",
-      options: {
-        sandbox: {
-          state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
-          environmentDetails: "",
-          currentBranch: "main",
+    try {
+      await runAgentTurn<UIMessage>({
+        prompt: "hi",
+        options: makeOptions(),
+        messageId: "assistant-42",
+        originalMessages: [],
+        backend,
+        onChunk: async () => {
+          // no-op
         },
-        mcpServers: {
-          relative: { command: "node", args: ["server.ts"], env: {} },
-        },
-      } as never,
-      messageId: "assistant-42",
-      originalMessages: [],
-      backend: spy,
-      onChunk: async () => {
-        // no-op
-      },
-    });
+      });
 
-    const backendOptions = spy.lastCtx?.backendOptions as Record<
-      string,
-      unknown
-    >;
-    expect(backendOptions.mcpServers).toEqual([
-      { name: "relative", command: "node", args: ["server.ts"], env: {} },
-    ]);
-  });
-
-  test("a Poolside turn carries the user's GitHub token, so `gh` is not the host keyring's account", async () => {
-    const { runAgentTurn } = await modulePromise;
-
-    const spy = createPoolsideSpyBackend();
-
-    await runAgentTurn<UIMessage>({
-      prompt: "open a pull request",
-      options: makePoolsideOptions(),
-      messageId: "assistant-42",
-      originalMessages: [],
-      backend: spy,
-      githubToken: "gh-token-abc",
-      onChunk: async () => {
-        // no-op
-      },
-    });
-
-    const backendOptions = spy.lastCtx?.backendOptions as Record<
-      string,
-      unknown
-    >;
-    const env = backendOptions.env as Record<string, string>;
-    expect(env.GH_TOKEN).toBe("gh-token-abc");
-    expect(env.GITHUB_TOKEN).toBe("gh-token-abc");
+      const backendOptions = backend.lastCtx?.backendOptions as Record<
+        string,
+        unknown
+      >;
+      const env = backendOptions.env as Record<string, string>;
+      expect(env.ANTHROPIC_BASE_URL).toBe("https://llm.example.com");
+      expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1");
+    } finally {
+      claudeGatewaySettings = previousGatewaySettings;
+    }
   });
 
   test("a backend that names model ids is not handed the picker's Claude tier alias", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createPoolsideSpyBackend();
-
-    await runAgentTurn<UIMessage>({
-      prompt: "build the thing",
-      // The fixture's model is `opus`.
-      options: makePoolsideOptions(),
-      messageId: "assistant-42",
-      originalMessages: [],
-      backend: spy,
-      onChunk: async () => {
-        // no-op
-      },
-    });
-
-    const backendOptions = spy.lastCtx?.backendOptions as Record<
-      string,
-      unknown
-    >;
-    // "opus" means nothing to Poolside; it resolves its own default instead.
-    expect(backendOptions.model).toBeUndefined();
-  });
-
-  /**
-   * The other half of the same rule, and the half the previous ACP backend
-   * could never exercise because it accepted no ids at all: a model the
-   * backend DOES declare is forwarded rather than filtered, so the picker is
-   * not decorative.
-   */
-  test("a model id the backend declares is forwarded", async () => {
-    const { runAgentTurn } = await modulePromise;
-
-    const spy = createPoolsideSpyBackend();
+    const spy = createSpyBackend({ models: ["custom/model-a"] });
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
@@ -613,7 +406,9 @@ describe("runAgentTurn", () => {
           environmentDetails: "",
           currentBranch: "main",
         },
-        model: { id: "poolside/laguna-xs-2.1" },
+        // A Claude tier alias, which this backend's declared `models` does
+        // not include.
+        model: { id: "opus" },
       } as never,
       messageId: "assistant-42",
       originalMessages: [],
@@ -627,23 +422,30 @@ describe("runAgentTurn", () => {
       string,
       unknown
     >;
-    expect(backendOptions.model).toBe("poolside/laguna-xs-2.1");
+    // "opus" means nothing to this backend; it resolves its own default
+    // instead.
+    expect(backendOptions.model).toBeUndefined();
   });
 
   /**
-   * `capabilities().effort` is `false` for Poolside, so the picker's effort
-   * is not forwarded. Poolside does have a reasoning knob, but it holds two
-   * values against Paco's five — see `poolsideThoughtLevel`'s doc in the
-   * package. The fixture sets `effort: "high"`; nothing should carry it.
+   * The other half of the same rule: a model id the backend DOES declare is
+   * forwarded rather than filtered, so the picker is not decorative.
    */
-  test("a Poolside turn is not handed Paco's five-level effort setting", async () => {
+  test("a model id the backend declares is forwarded", async () => {
     const { runAgentTurn } = await modulePromise;
 
-    const spy = createPoolsideSpyBackend();
+    const spy = createSpyBackend({ models: ["custom/model-a"] });
 
     await runAgentTurn<UIMessage>({
       prompt: "build the thing",
-      options: makePoolsideOptions(),
+      options: {
+        sandbox: {
+          state: { hostWorkspace: "/tmp/paco-workspaces/session_x" },
+          environmentDetails: "",
+          currentBranch: "main",
+        },
+        model: { id: "custom/model-a" },
+      } as never,
       messageId: "assistant-42",
       originalMessages: [],
       backend: spy,
@@ -656,8 +458,7 @@ describe("runAgentTurn", () => {
       string,
       unknown
     >;
-    expect(backendOptions.effort).toBeUndefined();
-    expect(backendOptions.thoughtLevel).toBeUndefined();
+    expect(backendOptions.model).toBe("custom/model-a");
   });
 
   test("surfaces a backend's structuredOutput on the step result", async () => {
@@ -743,10 +544,15 @@ describe("runAgentTurn", () => {
       },
     });
 
-    // `startTurn` and the `onSteer` registration both happen synchronously
-    // inside `runAgentTurn`, before its first `await` — so this is already
-    // set by the time the call above returns a promise. Awaiting a resolved
-    // promise first keeps the assertion robust even if that ever changes.
+    // `startTurn` and the `onSteer` registration happen synchronously inside
+    // `runAgentTurn`, after its pre-run reads resolve: `requireClaudeCredential`
+    // (itself an `await readClaudeCredential()`, so two microtask hops) and
+    // `readInstanceSettings` (one more) — three ticks total, even though
+    // every promise involved is already resolved here. Flushing the same
+    // number of ticks is what makes this assertion robust rather than
+    // timing-dependent.
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
     expect(registeredSteer).toBeDefined();
 
@@ -777,5 +583,109 @@ describe("runAgentTurn", () => {
     });
 
     expect(step.steered).toBeUndefined();
+  });
+
+  test("fails before starting the run when no Claude credential is configured", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = createSpyBackend();
+    const previousCredential = claudeCredential;
+    claudeCredential = null;
+
+    try {
+      await expect(
+        runAgentTurn<UIMessage>({
+          prompt: "hi",
+          options: makeOptions(),
+          messageId: "assistant-42",
+          originalMessages: [],
+          backend,
+          onChunk: async () => {
+            // no-op
+          },
+        }),
+      ).rejects.toThrow(/Settings.*Models/);
+
+      // The failure is caught before the backend is ever asked to start a
+      // turn — not a run that starts and fails deep inside the CLI.
+      expect(backend.lastCtx).toBeUndefined();
+    } finally {
+      claudeCredential = previousCredential;
+    }
+  });
+});
+
+describe("claudeCredentialEnv", () => {
+  test("exports ANTHROPIC_API_KEY for an api key", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    const env = claudeCredentialEnv({ kind: "api_key", value: "sk-ant-1" });
+
+    expect(env).toEqual({ ANTHROPIC_API_KEY: "sk-ant-1" });
+  });
+
+  test("exports CLAUDE_CODE_OAUTH_TOKEN for a setup token", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    const env = claudeCredentialEnv({ kind: "setup_token", value: "oauth-1" });
+
+    expect(env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "oauth-1" });
+  });
+
+  test("never exports both", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    // ANTHROPIC_API_KEY outranks CLAUDE_CODE_OAUTH_TOKEN and is always used
+    // in -p mode, so both present means the key silently wins.
+    for (const kind of ["api_key", "setup_token"] as const) {
+      const env = claudeCredentialEnv({ kind, value: "v" });
+
+      expect(Object.keys(env)).toHaveLength(1);
+    }
+  });
+
+  test("exports nothing when no credential is configured", async () => {
+    const { claudeCredentialEnv } = await modulePromise;
+
+    expect(claudeCredentialEnv(null)).toEqual({});
+  });
+});
+
+describe("claudeGatewayEnv", () => {
+  test("exports nothing when no base URL is set", async () => {
+    const { claudeGatewayEnv } = await modulePromise;
+
+    expect(claudeGatewayEnv({ baseUrl: null, modelDiscovery: false })).toEqual(
+      {},
+    );
+  });
+
+  test("exports the base URL when one is set", async () => {
+    const { claudeGatewayEnv } = await modulePromise;
+
+    const env = claudeGatewayEnv({
+      baseUrl: "https://llm.example.com",
+      modelDiscovery: false,
+    });
+
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://llm.example.com");
+  });
+
+  test("enables discovery only alongside a base URL", async () => {
+    const { claudeGatewayEnv } = await modulePromise;
+
+    // The CLI ignores discovery when the base URL is unset or points at
+    // api.anthropic.com, so setting it alone would be a lie in the process
+    // environment rather than a working feature.
+    expect(claudeGatewayEnv({ baseUrl: null, modelDiscovery: true })).toEqual(
+      {},
+    );
+
+    const env = claudeGatewayEnv({
+      baseUrl: "https://llm.example.com",
+      modelDiscovery: true,
+    });
+
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1");
   });
 });

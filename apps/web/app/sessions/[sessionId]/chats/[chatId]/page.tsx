@@ -10,9 +10,10 @@ import {
   getChatSummariesBySessionId,
 } from "@/lib/db/sessions";
 import { getSessionByIdCached } from "@/lib/db/sessions-cache";
+import { listClaudeModels } from "@/lib/model-catalog";
 import { buildModelOptions } from "@/lib/model-options";
-import { listAllModels } from "@/lib/model-catalog";
 import { enabledPluginRenderers } from "@/lib/plugins/renderer-info";
+import { readInstanceSettings } from "@/lib/settings/instance-settings";
 import { parseThemePreference, THEME_COOKIE_NAME } from "@/lib/theme";
 import { getInitialIsOnlyChatInSession } from "./only-chat-in-session";
 import { SessionChatContent } from "./session-chat-content";
@@ -45,10 +46,17 @@ const OPTIMISTIC_CHAT_RETRY_ATTEMPTS = 50;
  * (`ModelEffortBackendControls`), and its backend selector can switch the
  * chat after this page was rendered. Narrowing the list here would leave
  * that switch with nothing to reveal.
+ *
+ * `listClaudeModels` is what makes this reflect a configured gateway: with
+ * no base URL it is exactly the static tier aliases, and with one set it
+ * reads the CLI's own discovery cache (falling back to the aliases when
+ * that cache is absent or unreadable, so a freshly configured gateway never
+ * leaves this page with nothing to render).
  */
-function getInitialModels() {
+async function getInitialModels() {
   try {
-    return listAllModels();
+    const { claudeBaseUrl } = await readInstanceSettings();
+    return listClaudeModels(claudeBaseUrl);
   } catch {
     return [];
   }
@@ -163,7 +171,7 @@ export default async function SessionChatPage({
   // chat bootstrap payload capability-driven UI reads (Section 7 Task 5) —
   // `EffortSelectorCompact` hides itself when `chatCapabilities.effort` is
   // `false`, without ever hardcoding a backend id.
-  const initialCapabilities = capabilitiesForBackend(chat.backend);
+  const initialCapabilities = await capabilitiesForBackend(chat.backend);
 
   return (
     <DiffsProvider themePreference={themePreference}>

@@ -11,9 +11,10 @@ const CLAUDE_MODELS: AvailableModel[] = [
   { id: "haiku", name: "Haiku" },
 ];
 
-const POOLSIDE_MODELS: AvailableModel[] = [
-  { id: "poolside/laguna-s-2.1", name: "Laguna S" },
-  { id: "poolside/laguna-xs-2.1", name: "Laguna XS" },
+/** A hypothetical second vendor's models, for exercising the grouping rule. */
+const OTHER_VENDOR_MODELS: AvailableModel[] = [
+  { id: "acme/model-a", name: "Model A" },
+  { id: "acme/model-b", name: "Model B" },
 ];
 
 const noop = () => {
@@ -54,17 +55,17 @@ function headings(html: string): string[] {
 
 describe("ModelOptionList", () => {
   /**
-   * Bug 2 as the operator saw it: a Poolside chat's dropdown listed
-   * Laguna S and Laguna XS under a heading that read "Anthropic", because
-   * the group heading was the literal string.
+   * Bug 2 as the operator saw it: a chat running a second vendor's models
+   * had its dropdown list them under a heading that read "Anthropic",
+   * because the group heading was the literal string.
    */
-  test("heads Poolside's models with Poolside", () => {
-    const html = render(POOLSIDE_MODELS);
+  test("heads a second vendor's models with that vendor", () => {
+    const html = render(OTHER_VENDOR_MODELS);
 
-    expect(headings(html)).toEqual(["Poolside"]);
+    expect(headings(html)).toEqual(["Acme"]);
     expect(html).not.toContain("Anthropic");
-    expect(html).toContain("Laguna S");
-    expect(html).toContain("Laguna XS");
+    expect(html).toContain("Model A");
+    expect(html).toContain("Model B");
   });
 
   /**
@@ -80,32 +81,33 @@ describe("ModelOptionList", () => {
   });
 
   test("splits a mixed list into one heading per vendor", () => {
-    const html = render([...CLAUDE_MODELS, ...POOLSIDE_MODELS]);
+    const html = render([...CLAUDE_MODELS, ...OTHER_VENDOR_MODELS]);
 
-    expect(headings(html)).toEqual(["Anthropic", "Poolside"]);
+    expect(headings(html)).toEqual(["Anthropic", "Acme"]);
   });
 
   test("ticks the selected model and nothing else", () => {
-    const html = render(POOLSIDE_MODELS, "poolside/laguna-xs-2.1");
+    const html = render(OTHER_VENDOR_MODELS, "acme/model-b");
 
     // One visible tick, and it is inside the selected model's own row.
     expect([...html.matchAll(/opacity-100/g)]).toHaveLength(1);
     const rows = html.split("<button");
-    const selectedRow = rows.find((row) => row.includes("Laguna XS"));
-    const otherRow = rows.find((row) => row.includes(">Laguna S<"));
+    const selectedRow = rows.find((row) => row.includes("Model B"));
+    const otherRow = rows.find((row) => row.includes(">Model A<"));
     expect(selectedRow).toContain("opacity-100");
     expect(otherRow).toContain("opacity-0");
   });
 
   /**
    * The "default" marker names the model a NEW chat starts on, which is a
-   * Claude tier alias. A Poolside list therefore carries no marker at all —
-   * the honest answer, since Paco has no opinion about which Laguna to start
-   * on, rather than a marker moved onto whichever model happens to be first.
+   * Claude tier alias. A different vendor's list therefore carries no
+   * marker at all — the honest answer, since Paco has no opinion about
+   * which of that vendor's models to start on, rather than a marker moved
+   * onto whichever model happens to be first.
    */
   test("marks the app default only where the backend offers it", () => {
     expect(render(CLAUDE_MODELS)).toContain("default");
-    expect(render(POOLSIDE_MODELS)).not.toContain(">default<");
+    expect(render(OTHER_VENDOR_MODELS)).not.toContain(">default<");
   });
 
   test("renders nothing for an empty option list", () => {

@@ -198,20 +198,20 @@ export const chats = pgTable(
       .notNull()
       .default("steer"),
     /**
-     * Which agent backend runs this chat's turns.
+     * Which agent backend ran this chat's turns.
      *
-     * A per-chat choice rather than instance-wide config: `"claude-code"` is
-     * always available and stays the default so every existing chat and
-     * insert keeps working unchanged; `"poolside"` runs the turn through
-     * Poolside's `pool` CLI instead. Recording it on the chat, not just at
-     * submit time, is what lets a chat's turn history stay attributable to
-     * the backend that actually produced it.
+     * Recorded per chat, not just at submit time, so a chat's turn history
+     * stays attributable to the backend that actually produced it. There is
+     * only one backend today, `"claude-code"`, but the column is kept as the
+     * seam a future second backend slots into — see
+     * `packages/agent-backend` — rather than removed now that it names a
+     * single live choice.
      *
-     * `"openfx"` was the second backend until migration 0015. It is gone,
-     * and that migration rewrites any row still carrying it back to
-     * `"claude-code"` rather than to `"poolside"` — see the SQL for why.
+     * `"openfx"` and `"poolside"` were earlier backends, removed in
+     * migrations 0015 and 0021 respectively. Both migrations rewrite any row
+     * still carrying the removed value back to `"claude-code"`.
      */
-    backend: text("backend", { enum: ["claude-code", "poolside"] })
+    backend: text("backend", { enum: ["claude-code"] })
       .notNull()
       .default("claude-code"),
     activeStreamId: text("active_stream_id"),
@@ -228,18 +228,17 @@ export const chats = pgTable(
     claudeSessionId: text("claude_session_id"),
     /**
      * Resume tokens per agent backend, keyed by backend id
-     * (`"claude-code"` / `"poolside"`).
+     * (currently only `"claude-code"`).
      *
-     * `backend` above is a mutable, per-chat choice, and each backend's
-     * resume token means something only to that backend's own session
-     * store: Claude Code's `--resume` id and Poolside's `pool` session id
-     * are not interchangeable — handing one to the other backend either
-     * fails outright or, worse, resumes the wrong conversation. Keying the
-     * resume token by backend means switching back and forth needs no
-     * clearing at all: each side's token just sits under its own key until
-     * that backend runs again, and a round trip (claude-code -> poolside ->
-     * claude-code) resumes both sides correctly. See
-     * `resolveChatResumeToken`/`setChatResumeToken` in `lib/db/sessions.ts`.
+     * `backend` above records which backend ran a chat's turns, and each
+     * backend's resume token means something only to that backend's own
+     * session store — a token from one backend handed to a different one
+     * either fails outright or, worse, resumes the wrong conversation.
+     * Keying the resume token by backend is what let this table carry more
+     * than one backend's tokens at once when there was more than one
+     * backend, and is kept as part of the same seam `backend` is kept for.
+     * See `resolveChatResumeToken`/`setChatResumeToken` in
+     * `lib/db/sessions.ts`.
      *
      * A key is only ever meaningful to a backend that still exists.
      * Migration 0015 deletes the `"openfx"` key from every row for exactly
@@ -486,30 +485,38 @@ export const instanceSettings = pgTable("instance_settings", {
   tlsEnabled: boolean("tls_enabled").notNull().default(false),
   /** Parent domain for preview hostnames, e.g. "previews.example.com". */
   previewBaseDomain: text("preview_base_domain"),
-
   /**
-   * Bring-your-own Poolside provider config: a chat whose `backend` is
-   * `"poolside"` runs its turns through the `pool` CLI configured here
-   * instead of the Claude Code CLI. All three are null until an operator
-   * configures Poolside — there is no default provider, unlike
-   * `chats.backend`'s default of `"claude-code"`.
+   * The one credential the agent runs on, and which kind it is.
    *
-   * These replace the `openfx_*` columns dropped in migration 0015. Unlike
-   * OpenFX's endpoint — which was stored but inert, because that binary had
-   * no way to be told where to send provider traffic — every value here is
-   * actually forwarded to the process: this one as
-   * `POOLSIDE_STANDALONE_BASE_URL`.
+   * One, not two. `ANTHROPIC_API_KEY` outranks `CLAUDE_CODE_OAUTH_TOKEN` in
+   * the CLI's precedence and is always used in `-p` mode, which is how every
+   * turn runs — so an instance with both set would silently bill the API
+   * account while the operator believed their subscription token was in use.
+   * Storing one value with its kind makes that state unreachable rather than
+   * documented.
+   *
+   * `api_key` is API billing; `setup_token` is a one-year OAuth token from
+   * `claude setup-token` against a Claude subscription.
    */
-  poolsideBaseUrl: text("poolside_base_url"),
+  claudeCredentialKind: text("claude_credential_kind", {
+    enum: ["api_key", "setup_token"],
+  }),
+  /** Sealed with `lib/crypto/secret-box`, exactly as the GitHub token is. */
+  claudeCredentialSealed: text("claude_credential_sealed"),
   /**
-   * Sealed with `lib/crypto/secret-box`, never hashed — same rationale and
-   * mechanism as `githubTokens.sealedToken`: the original value is needed on
-   * every call, so there is nothing to compare a hash against. Forwarded to
-   * the `pool` process as `POOLSIDE_API_KEY`.
+   * When the credential was saved.
+   *
+   * A setup token expires after a year and nothing warns: turns simply start
+   * failing with a CLI error. Paco cannot renew it, so surfacing its age is
+   * the whole mitigation.
    */
-  poolsideApiKeySealed: text("poolside_api_key_sealed"),
-  /** Path to the `pool` binary on this instance, when it is not on `PATH`. */
-  poolsideBinaryPath: text("poolside_binary_path"),
+  claudeCredentialSetAt: timestamp("claude_credential_set_at"),
+  /** A gateway speaking the Anthropic Messages format. Null means Anthropic. */
+  claudeBaseUrl: text("claude_base_url"),
+  /** Let the CLI fetch the model list from that gateway. */
+  claudeModelDiscovery: boolean("claude_model_discovery")
+    .notNull()
+    .default(false),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

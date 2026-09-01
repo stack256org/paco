@@ -28,7 +28,13 @@
  * `ClaudeCodeOptions.env`, which is spread over this result — that is how
  * `PACO_APPROVAL_TOKEN` and `GH_TOKEN` reach the turns that need them
  * (`apps/web/lib/agent/run-step.ts`), and it keeps "this turn can read that
- * token" a decision someone made rather than an accident of inheritance.
+ * token" a decision someone made rather than an accident of inheritance —
+ * except for `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+ * `ANTHROPIC_BASE_URL`, and `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`,
+ * which this function refuses to pass through inheritance at all — see
+ * `CREDENTIAL_AND_GATEWAY_NAMES` below for why those four are excluded even
+ * though they match the `ANTHROPIC_`/`CLAUDE_` prefixes this file otherwise
+ * allows wholesale.
  */
 
 /**
@@ -149,6 +155,38 @@ function allowedPrefixesFor(
 }
 
 /**
+ * Names that decide which account bills a turn and which server the CLI
+ * talks to. These never pass through inheritance, even though every one of
+ * them matches `ANTHROPIC_` or `CLAUDE_` and would otherwise sail through
+ * the prefix rule above.
+ *
+ * Settings stores at most one Claude credential (`readClaudeCredential`) and
+ * at most one gateway (`readInstanceSettings`), and `run-step.ts` turns that
+ * into exactly the right `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` /
+ * `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` set,
+ * passed to `runClaudeCode` through `ClaudeCodeOptions.env` — the one
+ * allowlist-exempt route `run.ts` spreads over this function's result.
+ * `ANTHROPIC_API_KEY` outranks `CLAUDE_CODE_OAUTH_TOKEN` in the CLI's own
+ * precedence and is always used in `-p` mode, so if this function let an
+ * operator's own `ANTHROPIC_API_KEY` (set in their shell, `apps/web/.env`,
+ * or `/etc/paco/paco.env`) ride along with a Settings-configured OAuth
+ * token, the key would win and every turn would silently bill the API
+ * account while the UI reported a subscription token in use. The same
+ * applies to `ANTHROPIC_BASE_URL`: an inherited value would route every turn
+ * through a stale proxy Settings never chose. Excluding the names here,
+ * rather than trusting `run-step.ts` to override them, makes the
+ * Settings-configured state authoritative regardless of what else spreads
+ * `options.env` in the future — there is exactly one place these four names
+ * can come from.
+ */
+const CREDENTIAL_AND_GATEWAY_NAMES: ReadonlySet<string> = new Set([
+  "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+]);
+
+/**
  * Builds the CLI's environment from `source` (normally `process.env`),
  * keeping only what is named above.
  *
@@ -163,6 +201,9 @@ export function agentProcessEnv(
 
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) {
+      continue;
+    }
+    if (CREDENTIAL_AND_GATEWAY_NAMES.has(key)) {
       continue;
     }
     const allowed =

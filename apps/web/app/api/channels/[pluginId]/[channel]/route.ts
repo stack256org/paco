@@ -45,7 +45,7 @@ import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
  *    channel that says nothing gets — the secret is compared in constant
  *    time, after being unsealed with the same `lib/crypto/secret-box` every
  *    other stored secret in this codebase uses (`githubTokens.sealedToken`,
- *    `poolsideApiKeySealed`). A secret that fails to unseal (corrupted row, or
+ *    `plugins.ingressSecret`). A secret that fails to unseal (corrupted row, or
  *    sealed under a rotated APP_SECRET) is treated as a bad secret, not a
  *    500: from the caller's side these are indistinguishable, and the
  *    operator's fix is the same either way — re-enable the plugin to mint a

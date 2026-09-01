@@ -16,6 +16,10 @@ const fakeDb = {
       where: () => ({
         limit: async () => (stored ? [stored] : []),
       }),
+      // Some callers (and the brief's own assertion below) read the row
+      // straight off `from()` without a `where()`, since there is only ever
+      // one row to find.
+      limit: async () => (stored ? [stored] : []),
     }),
   }),
   insert: () => ({
@@ -30,6 +34,8 @@ const fakeDb = {
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
 const modulePromise = import("./instance-settings");
+const dbClientPromise = import("@/lib/db/client");
+const schemaPromise = import("@/lib/db/schema");
 
 describe("instance settings", () => {
   test("a fresh install reads as unconfigured", async () => {
@@ -57,94 +63,54 @@ describe("instance settings", () => {
     expect(settings.tlsEnabled).toBe(true);
     expect(settings.previewBaseDomain).toBe("previews.example.com");
   });
+});
 
-  test("the Poolside API key is sealed at rest and readable back", async () => {
+describe("claude credential", () => {
+  test("round-trips an api key through the seal", async () => {
     stored = null;
-    const { readInstanceSettings, savePoolsideSettings } = await modulePromise;
+    const { saveClaudeCredential, readClaudeCredential } = await modulePromise;
 
-    await savePoolsideSettings({
-      baseUrl: "https://pool.example.com",
-      apiKey: "sk-poolside-secret",
-      binaryPath: "/usr/local/bin/pool",
-    });
+    await saveClaudeCredential({ kind: "api_key", value: "sk-ant-test-123" });
 
-    // Same narrowing issue as the SMTP test above: `stored` is reassigned
-    // inside the fake db's `onConflictDoUpdate`, across an `await`.
-    const storedRow = stored as Row | null;
-    expect(storedRow?.poolsideApiKeySealed).toBeTruthy();
-    expect(String(storedRow?.poolsideApiKeySealed)).not.toContain(
-      "sk-poolside-secret",
-    );
+    const credential = await readClaudeCredential();
 
-    const settings = await readInstanceSettings();
-    expect(settings.poolside.baseUrl).toBe("https://pool.example.com");
-    expect(settings.poolside.apiKey).toBe("sk-poolside-secret");
-    expect(settings.poolside.binaryPath).toBe("/usr/local/bin/pool");
+    expect(credential?.kind).toBe("api_key");
+    expect(credential?.value).toBe("sk-ant-test-123");
   });
 
-  test("a null Poolside API key leaves the stored one alone", async () => {
+  test("saving one kind clears the other", async () => {
     stored = null;
-    const { readInstanceSettings, savePoolsideSettings } = await modulePromise;
+    const { saveClaudeCredential, readClaudeCredential } = await modulePromise;
 
-    await savePoolsideSettings({
-      baseUrl: "https://pool.example.com",
-      apiKey: "sk-poolside-secret",
-      binaryPath: "/usr/local/bin/pool",
-    });
-    await savePoolsideSettings({
-      baseUrl: "https://standalone.example.com",
-      apiKey: null,
-      binaryPath: "/usr/local/bin/pool",
-    });
+    // The precedence trap this design exists to make unreachable: with both
+    // set, ANTHROPIC_API_KEY wins in -p mode and silently bills the API
+    // account instead of the subscription the operator pasted a token for.
+    await saveClaudeCredential({ kind: "api_key", value: "sk-ant-test-123" });
+    await saveClaudeCredential({ kind: "setup_token", value: "oauth-abc" });
 
-    const settings = await readInstanceSettings();
-    expect(settings.poolside.baseUrl).toBe("https://standalone.example.com");
-    expect(settings.poolside.apiKey).toBe("sk-poolside-secret");
+    const credential = await readClaudeCredential();
+
+    expect(credential?.kind).toBe("setup_token");
+    expect(credential?.value).toBe("oauth-abc");
   });
 
-  test("a fresh install reads Poolside settings as unconfigured", async () => {
+  test("stores the credential sealed, never in the clear", async () => {
     stored = null;
-    const { readInstanceSettings } = await modulePromise;
+    const { saveClaudeCredential } = await modulePromise;
+    const { db } = await dbClientPromise;
+    const { instanceSettings } = await schemaPromise;
 
-    const settings = await readInstanceSettings();
-    expect(settings.poolside.baseUrl).toBeNull();
-    expect(settings.poolside.apiKey).toBeNull();
-    expect(settings.poolside.binaryPath).toBeNull();
+    await saveClaudeCredential({ kind: "api_key", value: "sk-ant-secret" });
+
+    const [row] = await db.select().from(instanceSettings).limit(1);
+
+    expect(row?.claudeCredentialSealed).not.toContain("sk-ant-secret");
   });
 
-  /**
-   * Migration 0015 drops the `openfx_*` columns rather than renaming them.
-   * This is the read side of that decision: even if an OpenFX-era row were
-   * somehow still around, none of its values may surface as Poolside
-   * configuration. A carried-over key would authenticate against nothing and
-   * fail on the first turn — worse than an empty field that asks for one.
-   */
-  test("an OpenFX-era row contributes nothing to Poolside settings", async () => {
-    const { readInstanceSettings, savePoolsideSettings } = await modulePromise;
-    const { seal } = await import("@/lib/crypto/secret-box");
+  test("returns null when nothing is configured", async () => {
+    stored = null;
+    const { readClaudeCredential } = await modulePromise;
 
-    stored = {
-      openfxEndpoint: "https://gateway.example.com",
-      openfxApiKeySealed: seal("sk-openfx-secret"),
-      openfxBinaryPath: "/usr/local/bin/openfx",
-    };
-
-    const settings = await readInstanceSettings();
-    expect(settings.poolside.baseUrl).toBeNull();
-    expect(settings.poolside.apiKey).toBeNull();
-    expect(settings.poolside.binaryPath).toBeNull();
-
-    // Nothing in the view even names the removed backend anymore.
-    expect(Object.keys(settings)).not.toContain("openfx");
-
-    // The operator re-enters it, and that is the only way it gets set.
-    await savePoolsideSettings({
-      baseUrl: null,
-      apiKey: "sk-poolside-secret",
-      binaryPath: null,
-    });
-    expect((await readInstanceSettings()).poolside.apiKey).toBe(
-      "sk-poolside-secret",
-    );
+    expect(await readClaudeCredential()).toBeNull();
   });
 });

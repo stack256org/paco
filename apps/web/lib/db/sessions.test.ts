@@ -260,14 +260,14 @@ describe("resolveChatResumeToken", () => {
       {
         resumeTokens: {
           "claude-code": "claude-session-1",
-          poolside: "pool-session-1",
+          "other-backend": "other-session-1",
         },
         claudeSessionId: "legacy-value-should-not-be-read",
       },
-      "poolside",
+      "other-backend",
     );
 
-    expect(token).toBe("pool-session-1");
+    expect(token).toBe("other-session-1");
   });
 
   test("returns undefined for a backend with no token yet — a fresh session, not a crash", async () => {
@@ -278,7 +278,7 @@ describe("resolveChatResumeToken", () => {
         resumeTokens: { "claude-code": "claude-session-1" },
         claudeSessionId: null,
       },
-      "poolside",
+      "other-backend",
     );
 
     expect(token).toBeUndefined();
@@ -291,9 +291,10 @@ describe("resolveChatResumeToken", () => {
       claudeSessionId: null,
     };
 
-    // The chat has run on claude-code, never on poolside: poolside must
-    // start a fresh session, not resume with claude-code's session id.
-    expect(resolveChatResumeToken(chat, "poolside")).toBeUndefined();
+    // The chat has run on claude-code, never on the other backend: the
+    // other backend must start a fresh session, not resume with
+    // claude-code's session id.
+    expect(resolveChatResumeToken(chat, "other-backend")).toBeUndefined();
     // Reading it back for claude-code still returns the original token.
     expect(resolveChatResumeToken(chat, "claude-code")).toBe(
       "claude-session-1",
@@ -309,7 +310,9 @@ describe("resolveChatResumeToken", () => {
       );
       // The legacy column is Claude Code's own value; it must never answer
       // for a different backend.
-      expect(resolveChatResumeToken(legacyRow, "poolside")).toBeUndefined();
+      expect(
+        resolveChatResumeToken(legacyRow, "other-backend"),
+      ).toBeUndefined();
     });
   });
 
@@ -336,7 +339,7 @@ describe("setChatResumeToken", () => {
   test("writes a resumeTokens merge, not the whole column, keyed by backend", async () => {
     const { setChatResumeToken } = await sessionsModulePromise;
 
-    await setChatResumeToken("chat-1", "poolside", "pool-session-1");
+    await setChatResumeToken("chat-1", "other-backend", "other-session-1");
 
     // A `sql` template fragment (a jsonb `||` merge), not a plain object:
     // asserting it exists and isn't a bare literal is what's testable
@@ -375,7 +378,9 @@ describe("migration 0015 — the OpenFX backend's stranded rows", () => {
     // the honest outcome for a chat whose agent no longer exists.
     const migratedRow = { resumeTokens: {}, claudeSessionId: null };
     expect(resolveChatResumeToken(migratedRow, "claude-code")).toBeUndefined();
-    expect(resolveChatResumeToken(migratedRow, "poolside")).toBeUndefined();
+    expect(
+      resolveChatResumeToken(migratedRow, "other-backend"),
+    ).toBeUndefined();
   });
 
   test("deletes the stale openfx resume key while leaving every other backend's token alone", async () => {
@@ -396,7 +401,7 @@ describe("migration 0015 — the OpenFX backend's stranded rows", () => {
     expect(
       resolveChatResumeToken(
         { resumeTokens: after, claudeSessionId: null },
-        "poolside",
+        "other-backend",
       ),
     ).toBeUndefined();
     expect(
@@ -417,5 +422,68 @@ describe("migration 0015 — the OpenFX backend's stranded rows", () => {
     );
     // A rename would have moved a dead vendor's key into the live column.
     expect(migrationSql).not.toContain("RENAME COLUMN");
+  });
+});
+
+/**
+ * Migration 0021 removes the Poolside backend from the product. These assert
+ * what it does to a row that was still using it — the decision itself, not
+ * just the SQL text: a stranded chat lands on `claude-code`, and its
+ * Poolside resume token is deleted rather than inherited.
+ *
+ * Read from the committed migration because that file *is* the behaviour;
+ * there is no application code path that performs this rewrite, and a later
+ * edit to either UPDATE statement would otherwise be silent.
+ */
+describe("migration 0021 — the Poolside backend's stranded rows", () => {
+  const migrationSql = readFileSync(
+    join(import.meta.dirname, "migrations", "0021_same_micromax.sql"),
+    "utf8",
+  );
+
+  test("moves a chat pinned to poolside onto claude-code", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    expect(migrationSql).toContain(
+      `UPDATE "chats"\nSET "backend" = 'claude-code'\nWHERE "backend" = 'poolside';`,
+    );
+
+    // And the row it produces resumes nothing on either backend, which is
+    // the honest outcome for a chat whose agent no longer exists.
+    const migratedRow = { resumeTokens: {}, claudeSessionId: null };
+    expect(resolveChatResumeToken(migratedRow, "claude-code")).toBeUndefined();
+    expect(
+      resolveChatResumeToken(migratedRow, "other-backend"),
+    ).toBeUndefined();
+  });
+
+  test("deletes the stale poolside resume key while leaving every other backend's token alone", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    expect(migrationSql).toContain(
+      `SET "resume_tokens" = "resume_tokens" - 'poolside'`,
+    );
+
+    // Simulate the jsonb `-` the migration performs, then read the result
+    // back through the helper the application actually uses.
+    const before: Record<string, string> = {
+      "claude-code": "claude-session-1",
+      poolside: "pool-session-1",
+    };
+    const { poolside: _dropped, ...after } = before;
+
+    expect(
+      resolveChatResumeToken(
+        { resumeTokens: after, claudeSessionId: null },
+        "other-backend",
+      ),
+    ).toBeUndefined();
+    expect(
+      resolveChatResumeToken(
+        { resumeTokens: after, claudeSessionId: null },
+        "claude-code",
+      ),
+    ).toBe("claude-session-1");
+    expect(Object.keys(after)).not.toContain("poolside");
   });
 });

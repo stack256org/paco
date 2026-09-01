@@ -1,4 +1,7 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 mock.module("server-only", () => ({}));
 
@@ -51,5 +54,68 @@ describe("resolveChatModelSelection", () => {
         label: "Model",
       }),
     ).toEqual({ id: "sonnet" });
+  });
+
+  test("rejects a gateway model id when no gateway is configured", () => {
+    const originalWarn = console.warn;
+    console.warn = () => {
+      // Silenced: this case warns on purpose.
+    };
+
+    try {
+      expect(
+        resolveChatModelSelection({
+          selectedModelId: "claude-gateway-model",
+          label: "Model",
+        }),
+      ).toEqual({ id: "opus" });
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  /*
+   * Half of Critical 2: a gateway model id the operator actually picked in
+   * the composer must not be rejected here and silently swapped for the
+   * default — `isKnownModelId`'s default (static-alias-only) check would
+   * otherwise treat every gateway id as unknown.
+   */
+  describe("with a gateway configured and discovered", () => {
+    let previousHome: string | undefined;
+    let tempHome: string;
+
+    beforeEach(() => {
+      previousHome = process.env.HOME;
+      tempHome = mkdtempSync(join(tmpdir(), "paco-model-selection-test-"));
+      process.env.HOME = tempHome;
+
+      const cacheDir = join(tempHome, ".claude", "cache");
+      mkdirSync(cacheDir, { recursive: true });
+      writeFileSync(
+        join(cacheDir, "gateway-models.json"),
+        JSON.stringify({
+          data: [{ id: "claude-gateway-model", display_name: "Gateway Model" }],
+        }),
+      );
+    });
+
+    afterEach(() => {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      rmSync(tempHome, { recursive: true, force: true });
+    });
+
+    test("accepts a model id the configured gateway actually offers", () => {
+      expect(
+        resolveChatModelSelection({
+          selectedModelId: "claude-gateway-model",
+          label: "Model",
+          claudeBaseUrl: "https://llm.example.com",
+        }),
+      ).toEqual({ id: "claude-gateway-model" });
+    });
   });
 });

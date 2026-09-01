@@ -9,11 +9,10 @@ const { ContextUsageIndicator } = await import("./context-usage-indicator");
  * The context dial is a button on some backends and a readout on others, and
  * the difference has to be legible.
  *
- * Claude Code can be asked to compact (`/compact`). Poolside cannot: it
- * compacts on its own and exposes no client-callable way in — verified
- * against `pool` 1.0.16, where `session/compact`, `session/summarize` and
- * `poolside/compact` all answer "Method not found" and `availableCommands`
- * is null. So the control has to disappear where it cannot work, instead of
+ * Claude Code can be asked to compact (`/compact`). A backend without a
+ * client-callable way to trigger it (`BackendCapabilities.compaction:
+ * false`) cannot, because it compacts on its own with no equivalent
+ * command. So the control has to disappear where it cannot work, instead of
  * rendering everywhere and failing on click.
  *
  * Scope note: the tooltip BODY is not asserted here and cannot be. Base UI

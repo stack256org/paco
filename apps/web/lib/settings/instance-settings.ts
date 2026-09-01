@@ -8,68 +8,36 @@ import { instanceSettings } from "@/lib/db/schema";
 /**
  * The instance's own configuration, as the product reads and writes it.
  *
- * One row, keyed by a constant, because there is exactly one instance. The
- * Poolside API key is the only value that is not plain: it is sealed,
- * because `pool` needs the original on every call and there is nothing to
- * compare a hash against.
+ * One row, keyed by a constant, because there is exactly one instance.
  */
 
 const SETTINGS_ROW_ID = true;
 
-/**
- * BYO Poolside provider config: a chat whose `backend` is `"poolside"` runs
- * its turns through the `pool` CLI configured here instead of the Claude
- * Code CLI.
- *
- * Every field is load-bearing — each one is handed to the spawned process,
- * so nothing here is stored-but-inert. `pool` reads
- * `POOLSIDE_STANDALONE_BASE_URL` and `POOLSIDE_API_KEY` from its
- * environment, and `binaryPath` is the executable spawned. `baseUrl` is
- * named for what it is: the base URL of the Poolside deployment to talk to.
- */
-export type PoolsideSettingsInput = {
-  /** `null` means Poolside's own default service; set it for a standalone deployment. */
-  baseUrl: string | null;
-  /** `null` means "leave whatever is stored alone" — see `savePoolsideSettings`. */
-  apiKey: string | null;
-  /** `null` means "find `pool` on `PATH`". */
-  binaryPath: string | null;
-};
+/** Which kind of Claude credential this instance is configured with. See `schema.ts`. */
+export type ClaudeCredentialKind = "api_key" | "setup_token";
 
-export type StoredPoolsideSettings = Omit<PoolsideSettingsInput, "apiKey"> & {
-  apiKey: string | null;
+/**
+ * The instance's Claude credential, decrypted.
+ *
+ * Never put this shape on `InstanceSettingsView` — that view crosses to the
+ * client, and this one carries the secret in the clear.
+ */
+export type ClaudeCredential = {
+  kind: ClaudeCredentialKind;
+  value: string;
+  setAt: Date;
 };
 
 export type InstanceSettingsView = {
   appDomain: string | null;
   tlsEnabled: boolean;
   previewBaseDomain: string | null;
-  poolside: StoredPoolsideSettings;
+  /** Which kind of credential is configured, never the value itself. */
+  claudeCredentialKind: ClaudeCredentialKind | null;
+  claudeCredentialSetAt: Date | null;
+  claudeBaseUrl: string | null;
+  claudeModelDiscovery: boolean;
 };
-
-/**
- * Unseal a stored secret, treating an unreadable one as absent.
- *
- * `APP_SECRET` changing makes every sealed value unreadable. Throwing here
- * would take down a chat's Poolside turns *and* the settings page that is
- * the only place to fix it, so an unreadable secret reads as "not set" and
- * the operator is asked for it again. `label` only decides the wording of
- * the warning; the mechanism is shared by every sealed field on this table.
- */
-function unsealSecret(sealed: string | null, label: string): string | null {
-  if (!sealed) {
-    return null;
-  }
-
-  try {
-    return open(sealed);
-  } catch {
-    console.warn(
-      `[settings] The stored ${label} could not be read. APP_SECRET has most likely changed; re-enter it in Settings.`,
-    );
-    return null;
-  }
-}
 
 export async function readInstanceSettings(): Promise<InstanceSettingsView> {
   const [row] = await db
@@ -82,14 +50,10 @@ export async function readInstanceSettings(): Promise<InstanceSettingsView> {
     appDomain: row?.appDomain ?? null,
     tlsEnabled: row?.tlsEnabled ?? false,
     previewBaseDomain: row?.previewBaseDomain ?? null,
-    poolside: {
-      baseUrl: row?.poolsideBaseUrl ?? null,
-      apiKey: unsealSecret(
-        row?.poolsideApiKeySealed ?? null,
-        "Poolside API key",
-      ),
-      binaryPath: row?.poolsideBinaryPath ?? null,
-    },
+    claudeCredentialKind: row?.claudeCredentialKind ?? null,
+    claudeCredentialSetAt: row?.claudeCredentialSetAt ?? null,
+    claudeBaseUrl: row?.claudeBaseUrl ?? null,
+    claudeModelDiscovery: row?.claudeModelDiscovery ?? false,
   };
 }
 
@@ -112,23 +76,69 @@ export async function saveAppDomain(input: {
 }
 
 /**
- * Store Poolside provider settings.
+ * The instance's Claude credential, ready to hand to the CLI.
  *
- * A `null` `apiKey` means the form was submitted without retyping it — the
- * stored value is never sent to the browser (see `getInstanceSettings`), so
- * an edit to the base URL or binary path would otherwise wipe the key every
- * time.
+ * Returns `null` when nothing is configured, and also when only half of the
+ * pair (kind, sealed value) is present — which should not happen through
+ * `saveClaudeCredential`, but a half-populated row is not a credential
+ * either way, so it is treated the same as "unconfigured" rather than
+ * thrown as an error.
  */
-export async function savePoolsideSettings(
-  input: PoolsideSettingsInput,
-): Promise<void> {
+export async function readClaudeCredential(): Promise<ClaudeCredential | null> {
+  const [row] = await db
+    .select()
+    .from(instanceSettings)
+    .where(eq(instanceSettings.id, SETTINGS_ROW_ID))
+    .limit(1);
+
+  if (
+    !row?.claudeCredentialKind ||
+    !row.claudeCredentialSealed ||
+    !row.claudeCredentialSetAt
+  ) {
+    return null;
+  }
+
+  return {
+    kind: row.claudeCredentialKind,
+    value: open(row.claudeCredentialSealed),
+    setAt: row.claudeCredentialSetAt,
+  };
+}
+
+/**
+ * Store (or replace) this instance's Claude credential.
+ *
+ * Writes kind, sealed value and timestamp together in one update, so the two
+ * kinds can never both be present at once — see the schema comment on
+ * `claudeCredentialKind` for why that matters.
+ */
+export async function saveClaudeCredential(input: {
+  kind: ClaudeCredentialKind;
+  value: string;
+}): Promise<void> {
   const values = {
-    poolsideBaseUrl: input.baseUrl,
-    poolsideBinaryPath: input.binaryPath,
+    claudeCredentialKind: input.kind,
+    claudeCredentialSealed: seal(input.value),
+    claudeCredentialSetAt: new Date(),
     updatedAt: new Date(),
-    ...(input.apiKey === null
-      ? {}
-      : { poolsideApiKeySealed: seal(input.apiKey) }),
+  };
+
+  await db
+    .insert(instanceSettings)
+    .values({ id: SETTINGS_ROW_ID, ...values })
+    .onConflictDoUpdate({ target: instanceSettings.id, set: values });
+}
+
+/** Save the gateway this instance points the Claude CLI at. Null `baseUrl` means Anthropic. */
+export async function saveClaudeGateway(input: {
+  baseUrl: string | null;
+  modelDiscovery: boolean;
+}): Promise<void> {
+  const values = {
+    claudeBaseUrl: input.baseUrl,
+    claudeModelDiscovery: input.modelDiscovery,
+    updatedAt: new Date(),
   };
 
   await db

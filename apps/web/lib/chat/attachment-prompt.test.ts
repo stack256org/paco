@@ -175,13 +175,13 @@ describe("renderAttachmentSection", () => {
 });
 
 /**
- * A staged image is only useful if the model can actually look at it, and on
- * Poolside it cannot: both `poolside/laguna-*` models answer "IMAGE-NOT-
- * VISIBLE" to an inline image block and fail `Read` on a PNG with "the
- * configured model does not support image inputs". Telling such a model to
- * `Read` the path is a confident-looking instruction that cannot work, and
- * the fallback for a failed write already establishes the rule: say what is
- * NOT available rather than implying it is.
+ * A staged image is only useful if the model can actually look at it, and a
+ * backend whose model cannot (`BackendCapabilities.images: false`) would
+ * fail `Read` on the staged path with something like "the configured model
+ * does not support image inputs". Telling such a model to `Read` the path is
+ * a confident-looking instruction that cannot work, and the fallback for a
+ * failed write already establishes the rule: say what is NOT available
+ * rather than implying it is.
  */
 describe("renderAttachmentSection, backend that cannot see images", () => {
   const image: PromptAttachment = {

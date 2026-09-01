@@ -99,8 +99,8 @@ export function ModelSelectorCompact({
    * as a working selection. The raw id is still shown rather than nothing —
    * "opus" tells you what is wrong, an empty button does not — but it is
    * shown as a warning, with the provider icon replaced (a Claude glyph
-   * beside "opus" on a Poolside chat is precisely the lie being fixed) and
-   * the tooltip saying so.
+   * beside "opus" on a chat running a different backend is precisely the
+   * lie being fixed) and the tooltip saying so.
    */
   const isUnavailableSelection = selectedOption === undefined;
   const displayText = selectedOption?.shortLabel ?? value;

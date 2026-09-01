@@ -8,6 +8,15 @@ interface ResolveChatModelSelectionParams {
   /** Reasoning effort, or null to let the model use its own default. */
   effort?: EffortSelection | undefined;
   label: string;
+  /**
+   * This instance's configured gateway, if any (`readInstanceSettings().
+   * claudeBaseUrl`). Widens the accepted ids to match the gateway's own
+   * catalog — without it, a gateway model id the operator actually picked
+   * in the composer would fail `isKnownModelId`'s default (static-alias-only)
+   * check and be silently replaced with `APP_DEFAULT_MODEL_ID`, exactly the
+   * behaviour Settings' gateway section promises does not happen.
+   */
+  claudeBaseUrl?: string | null;
 }
 
 /**
@@ -23,13 +32,14 @@ export function resolveChatModelSelection({
   selectedModelId,
   effort,
   label,
+  claudeBaseUrl = null,
 }: ResolveChatModelSelectionParams): AgentModelSelection {
   const requestedModelId = selectedModelId ?? APP_DEFAULT_MODEL_ID;
 
   // Checked against the catalog this build actually offers. The previous check
   // matched an `openai/gpt-…-pro` prefix, which no id can have any more, so an
   // unknown model passed straight through to the CLI.
-  if (!isKnownModelId(requestedModelId)) {
+  if (!isKnownModelId(requestedModelId, claudeBaseUrl)) {
     console.warn(
       `${label} "${requestedModelId}" is not a model this build offers. Falling back to the default.`,
     );

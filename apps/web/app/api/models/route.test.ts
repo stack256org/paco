@@ -1,11 +1,33 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 mock.module("server-only", () => ({}));
 
 /**
- * The model list is static: the Claude Code CLI resolves a tier alias to the
- * current model in that tier, and Poolside's ids come from its package
- * constant, so there is no catalog to fetch and no metadata to enrich.
+ * The model list is static when talking to Anthropic directly: the Claude
+ * Code CLI resolves a tier alias to the current model in that tier, so there
+ * is no catalog to fetch and no metadata to enrich. It switches to the CLI's
+ * own gateway discovery cache once a base URL is configured — see
+ * `lib/model-catalog.test.ts` for that behaviour in detail. This file only
+ * has to prove the route actually reads the configured base URL and wires it
+ * through, and that the fallback survives the trip.
  */
+
+let claudeBaseUrl: string | null = null;
+
+mock.module("@/lib/settings/instance-settings", () => ({
+  readInstanceSettings: () =>
+    Promise.resolve({
+      appDomain: null,
+      tlsEnabled: false,
+      previewBaseDomain: null,
+      claudeCredentialKind: null,
+      claudeCredentialSetAt: null,
+      claudeBaseUrl,
+      claudeModelDiscovery: false,
+    }),
+}));
 
 const routeModulePromise = import("./route");
 
@@ -35,23 +57,6 @@ describe("/api/models", () => {
     }
   });
 
-  /**
-   * The composer swaps its server-rendered options for this response, then
-   * filters them client-side against the chat's `capabilities.models`. If
-   * this route answered with one backend's models, switching a chat to the
-   * other would leave the picker with nothing to reveal.
-   */
-  test("also returns the models of the second backend, so a switched chat has something to pick", async () => {
-    const { POOLSIDE_MODEL_IDS } = await import("@paco/poolside-backend");
-
-    const body = await getModels();
-    const ids = body.models.map((model) => model.id);
-
-    for (const id of POOLSIDE_MODEL_IDS) {
-      expect(ids).toContain(id);
-    }
-  });
-
   test("includes context window and cost for each Claude tier", async () => {
     const body = await getModels();
     const tiers = body.models.filter((model) =>
@@ -64,5 +69,49 @@ describe("/api/models", () => {
       expect(model.cost?.input).toBeGreaterThan(0);
       expect(model.cost?.output).toBeGreaterThan(0);
     }
+  });
+
+  describe("with a gateway configured", () => {
+    let previousHome: string | undefined;
+    let previousBaseUrl: string | null;
+    let tempHome: string;
+
+    beforeEach(() => {
+      previousBaseUrl = claudeBaseUrl;
+      claudeBaseUrl = "https://llm.example.com";
+
+      // An isolated, empty $HOME: this instance's gateway has never been
+      // queried by the CLI, so no discovery cache exists yet. Not
+      // PACO_HOME — the cache path is keyed off the CLI's own $HOME, which
+      // model-catalog.ts's `gatewayModelCachePath` deliberately does not
+      // conflate with Paco's own data directory.
+      previousHome = process.env.HOME;
+      tempHome = mkdtempSync(join(tmpdir(), "paco-api-models-test-"));
+      process.env.HOME = tempHome;
+    });
+
+    afterEach(() => {
+      claudeBaseUrl = previousBaseUrl;
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      rmSync(tempHome, { recursive: true, force: true });
+    });
+
+    /**
+     * The property this task exists to close: a base URL saved in Settings
+     * must reach `listClaudeModels`, and its fallback must survive the trip
+     * through the route — an operator who has just configured a gateway, and
+     * whose CLI has not queried it yet, must still see a populated picker
+     * rather than an empty one.
+     */
+    test("still returns the tier aliases when the CLI hasn't cached a discovery response yet", async () => {
+      const body = await getModels();
+
+      const ids = body.models.map((model) => model.id);
+      expect(ids).toEqual(["opus", "sonnet", "haiku"]);
+    });
   });
 });

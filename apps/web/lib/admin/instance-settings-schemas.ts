@@ -60,30 +60,25 @@ export const domainSchema = z.object({
 });
 
 /**
- * The BYO Poolside provider form.
- *
- * `baseUrl`, not `endpoint`: the value is forwarded to the `pool` process as
- * `POOLSIDE_STANDALONE_BASE_URL`, so it is the base URL of a Poolside
- * deployment and it genuinely takes effect. Blank means "use Poolside's
- * default service", which is why `null` is accepted rather than required.
+ * The one credential the agent runs on. See the schema comment on
+ * `instanceSettings.claudeCredentialKind` for why only one kind is ever
+ * stored.
  */
-export const poolsideSchema = z.object({
+export const claudeCredentialSchema = z.object({
+  kind: z.enum(["api_key", "setup_token"]),
+  value: z.string().trim().min(1, "Enter the credential's value."),
+});
+
+const CLAUDE_BASE_URL_MESSAGE =
+  "Enter the full address, including the scheme — for example https://gateway.example.com.";
+
+export const claudeGatewaySchema = z.object({
   baseUrl: z
     .string()
+    .trim()
     .nullable()
-    .transform((value) => (value && value.trim() !== "" ? value.trim() : null))
-    .refine((value) => value === null || z.url().safeParse(value).success, {
-      message: "Enter a full URL, including the scheme.",
+    .refine((value) => value === null || isUsableAppDomain(value), {
+      message: CLAUDE_BASE_URL_MESSAGE,
     }),
-  binaryPath: z.string().trim().min(1).nullable(),
-  /**
-   * `""` and whitespace-only both mean "this field was left blank on
-   * submit" — the real key is never sent to the browser (see
-   * `getInstanceSettings`), so a form that isn't touching this field has
-   * nothing else it could submit for it.
-   */
-  apiKey: z
-    .string()
-    .nullable()
-    .transform((value) => (value && value.trim() !== "" ? value : null)),
+  modelDiscovery: z.boolean(),
 });
