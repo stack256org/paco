@@ -28,8 +28,8 @@ describe("listAvailableModels", () => {
   /**
    * `undefined` capabilities means "no backend in hand", and the safe answer
    * for an unknown backend is the DEFAULT backend's models — not every id
-   * this build knows. A caller that really wants every id asks
-   * `listAllModels` for it.
+   * this build knows. A caller that really wants every id calls
+   * `listClaudeModels(null)` directly.
    */
   test("with no backend given, offers the default backend's catalog", async () => {
     const { listAvailableModels } = await modulePromise;
@@ -74,16 +74,6 @@ describe("listAvailableModels", () => {
     );
 
     expect(models.map((model) => model.id)).toEqual(["sonnet"]);
-  });
-});
-
-describe("listAllModels", () => {
-  test("spans the catalog", async () => {
-    const { listAllModels } = await modulePromise;
-
-    const ids = listAllModels().map((model) => model.id);
-
-    expect(ids).toEqual(["opus", "sonnet", "haiku"]);
   });
 });
 

@@ -160,8 +160,9 @@ const ALL_MODELS: AvailableModel[] = CLAUDE_MODELS;
  * rather than every model this build knows, and that asymmetry is
  * deliberate. `undefined` capabilities means "no backend in hand", and the
  * safe answer for an unknown backend is the default one's models. A caller
- * that genuinely wants every id this build knows about asks for it by name:
- * `listAllModels`.
+ * that genuinely wants every id this build knows about, regardless of any
+ * backend's `capabilities`, calls `listClaudeModels(null)` directly — with
+ * no base URL that already returns exactly this same static catalog.
  *
  * Synchronous on purpose: nothing is fetched. It reads as an odd shape for a
  * "catalog", which is precisely why it should not pretend to be async.
@@ -174,17 +175,6 @@ export function listAvailableModels(
     return CLAUDE_MODELS;
   }
   return ALL_MODELS.filter((model) => accepted.includes(model.id));
-}
-
-/**
- * Every model this build knows about.
- *
- * For callers that must not be narrowed to one backend's `capabilities` —
- * any table that resolves a stored `modelId` back to a display name or price
- * regardless of which backend produced it.
- */
-export function listAllModels(): AvailableModel[] {
-  return ALL_MODELS;
 }
 
 /** Whether an id names a model this build actually offers, on any backend. */

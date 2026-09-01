@@ -160,8 +160,8 @@ describe("ModelEffortBackendControls", () => {
    * So another vendor's id showing as "other/model-a" rather than "Model A"
    * is proof the filter removed it.
    *
-   * This is the client half of the bug `listAllModels()` opened on the
-   * server: once the catalog spans vendors, handing every option to every
+   * This is the client half of the bug the server-side catalog opened:
+   * once the catalog spans vendors, handing every option to every
    * backend offers one vendor's model to a chat running a different one,
    * whose CLI rejects it. `capabilitiesForBackend` expands `models:
    * undefined` into an explicit Claude id set before it reaches this
