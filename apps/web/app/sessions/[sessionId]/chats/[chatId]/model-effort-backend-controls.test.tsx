@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BackendCapabilities } from "@paco/agent-backend";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ChatBackendSelection } from "@/components/backend-selector-compact";
 import type { ModelOption } from "@/lib/model-options";
 import { ModelEffortBackendControls } from "./model-effort-backend-controls";
 
@@ -51,10 +50,7 @@ const CLAUDE_CAPABILITIES: BackendCapabilities = {
  * Written out rather than read from `PoolsideBackend`, and deliberately so:
  * what is under test here is the SHAPE of the rule — effort off, models
  * present — not Poolside's current answer, and half these tests mutate the
- * object anyway to reach cases no real backend reports today. The place that
- * is pinned to the live capabilities is
- * `app/settings/models/poolside-provider-section.test.tsx`, which reads the
- * real object because the copy it checks is derived from it.
+ * object anyway to reach cases no real backend reports today.
  */
 const POOLSIDE_CAPABILITIES: BackendCapabilities = {
   id: "poolside",
@@ -72,20 +68,14 @@ const noop = () => {
   // no-op: only the rendered markup is asserted below
 };
 
-function render(
-  capabilities: BackendCapabilities,
-  backend: ChatBackendSelection = "claude-code",
-  modelId = "sonnet",
-) {
+function render(capabilities: BackendCapabilities, modelId = "sonnet") {
   return renderToStaticMarkup(
     <ModelEffortBackendControls
-      backend={backend}
       capabilities={capabilities}
       disabled={false}
       effort={null}
       modelId={modelId}
       modelOptions={MODEL_OPTIONS}
-      onBackendChange={noop}
       onEffortChange={noop}
       onModelChange={noop}
     />,
@@ -100,7 +90,7 @@ describe("ModelEffortBackendControls", () => {
   });
 
   test("hides the effort control when the backend reports effort: false", () => {
-    const html = render(POOLSIDE_CAPABILITIES, "poolside");
+    const html = render(POOLSIDE_CAPABILITIES);
 
     expect(html).not.toContain("Change how hard Paco thinks");
   });
@@ -117,7 +107,7 @@ describe("ModelEffortBackendControls", () => {
    * are its own `poolside/laguna-*` models.
    */
   test("keeps the model control for Poolside, which publishes its own models", () => {
-    const html = render(POOLSIDE_CAPABILITIES, "poolside");
+    const html = render(POOLSIDE_CAPABILITIES);
 
     expect(html).toContain("Change model");
   });
@@ -135,16 +125,16 @@ describe("ModelEffortBackendControls", () => {
   });
 
   test("hides the model control when the backend takes no model from the picker", () => {
-    const html = render({ ...POOLSIDE_CAPABILITIES, models: [] }, "poolside");
+    const html = render({ ...POOLSIDE_CAPABILITIES, models: [] });
 
     expect(html).not.toContain("Change model");
   });
 
   /**
-   * The anti-regression test for the whole file: the `backend` prop says
-   * `"claude-code"` while the capability object says otherwise, and the
-   * capability object has to win. Any reintroduced `backend === …` check
-   * fails here even though every other test in this file would still pass.
+   * The anti-regression test for the whole file: a backend can report
+   * `effort: true` even while carrying Poolside's id, and the capability
+   * object has to win. Any reintroduced `capabilities.id === …` check fails
+   * here even though every other test in this file would still pass.
    */
   test("follows the capability object, not the backend id, when they disagree", () => {
     const effortlessClaude = render({
@@ -153,10 +143,10 @@ describe("ModelEffortBackendControls", () => {
     });
     expect(effortlessClaude).not.toContain("Change how hard Paco thinks");
 
-    const capablePoolside = render(
-      { ...POOLSIDE_CAPABILITIES, effort: true },
-      "poolside",
-    );
+    const capablePoolside = render({
+      ...POOLSIDE_CAPABILITIES,
+      effort: true,
+    });
     expect(capablePoolside).toContain("Change how hard Paco thinks");
   });
 
@@ -182,9 +172,9 @@ describe("ModelEffortBackendControls", () => {
       models: ["sonnet", "haiku"],
     };
 
-    expect(render(claudeOnly, "claude-code", "sonnet")).toContain("Sonnet");
+    expect(render(claudeOnly, "sonnet")).toContain("Sonnet");
 
-    const html = render(claudeOnly, "claude-code", "poolside/laguna-s-2.1");
+    const html = render(claudeOnly, "poolside/laguna-s-2.1");
     expect(html).toContain("poolside/laguna-s-2.1");
     expect(html).not.toContain("Laguna S");
   });
@@ -200,7 +190,7 @@ describe("ModelEffortBackendControls", () => {
    * the tooltip names the problem.
    */
   test("marks a model the backend cannot run instead of passing it off as chosen", () => {
-    const html = render(POOLSIDE_CAPABILITIES, "poolside", "opus");
+    const html = render(POOLSIDE_CAPABILITIES, "opus");
 
     expect(html).toContain("opus");
     expect(html).toContain("text-warning");
@@ -208,11 +198,7 @@ describe("ModelEffortBackendControls", () => {
   });
 
   test("does not mark a model the backend does run", () => {
-    const html = render(
-      POOLSIDE_CAPABILITIES,
-      "poolside",
-      "poolside/laguna-s-2.1",
-    );
+    const html = render(POOLSIDE_CAPABILITIES, "poolside/laguna-s-2.1");
 
     expect(html).not.toContain("text-warning");
     expect(html).toContain("Change model (⌘⌥/)");
@@ -220,34 +206,8 @@ describe("ModelEffortBackendControls", () => {
 
   /** And the mirror: Poolside's own id survives its own list. */
   test("offers a Poolside model to a Poolside chat", () => {
-    const html = render(
-      POOLSIDE_CAPABILITIES,
-      "poolside",
-      "poolside/laguna-s-2.1",
-    );
+    const html = render(POOLSIDE_CAPABILITIES, "poolside/laguna-s-2.1");
 
     expect(html).toContain("Laguna S");
-  });
-
-  test("always shows the backend control regardless of capabilities", () => {
-    const claudeHtml = render(CLAUDE_CAPABILITIES);
-    const poolsideHtml = render(POOLSIDE_CAPABILITIES, "poolside");
-
-    for (const html of [claudeHtml, poolsideHtml]) {
-      expect(html).toContain("Change agent backend");
-    }
-  });
-
-  /**
-   * The selector offers exactly the `chats.backend` enum. Asserted from the
-   * composer because that is the only place it is rendered, and asserted on
-   * the trigger's own label so a chat that is already on Poolside shows
-   * Poolside rather than silently falling back to Claude Code.
-   */
-  test("names the chat's backend on the trigger", () => {
-    expect(render(POOLSIDE_CAPABILITIES, "poolside")).toContain(
-      "Backend: Poolside",
-    );
-    expect(render(CLAUDE_CAPABILITIES)).toContain("Backend: Claude Code");
   });
 });

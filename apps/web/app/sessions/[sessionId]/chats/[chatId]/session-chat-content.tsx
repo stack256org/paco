@@ -49,9 +49,7 @@ import {
 } from "@/components/assistant-file-link";
 import { FileSuggestionsDropdown } from "@/components/file-suggestions-dropdown";
 import { ImageAttachmentsPreview } from "@/components/image-attachments-preview";
-import { UnviewableImageNotice } from "./unviewable-image-notice";
 import { TextAttachmentsPreview } from "@/components/text-attachments-preview";
-import type { ChatBackendSelection } from "@/components/backend-selector-compact";
 import { useInlineQuestion } from "@/components/inline-question-input";
 import { SlashCommandDropdown } from "@/components/slash-command-dropdown";
 import { SnippetChip } from "@/components/snippet-chip";
@@ -395,7 +393,6 @@ export function SessionChatContent({
     unarchiveSession,
     updateChatModel,
     updateChatEffort,
-    updateChatBackend,
     updateSessionTitle,
     hasRuntimeSandboxState,
     hasPausedWorkspace,
@@ -1076,21 +1073,6 @@ export function SessionChatContent({
       }
     },
     [chatInfo.effort, updateChatEffort],
-  );
-
-  const handleBackendChange = useCallback(
-    async (backend: ChatBackendSelection) => {
-      if (backend === chatInfo.backend) return;
-      try {
-        setIsUpdatingModel(true);
-        await updateChatBackend(backend);
-      } catch (err) {
-        console.error("Failed to update agent backend:", err);
-      } finally {
-        setIsUpdatingModel(false);
-      }
-    },
-    [chatInfo.backend, updateChatBackend],
   );
 
   const selectedModelOption = useMemo(
@@ -3256,18 +3238,6 @@ export function SessionChatContent({
                                 className="p-0"
                               />
                             )}
-                            {/*
-                              Under the thumbnails, inside the same row, so it
-                              reads as a caption on the images it is about —
-                              and only when this chat's backend actually
-                              cannot see them (`capabilities.images`, the same
-                              capability-driven rule that hides the effort
-                              control). It renders nothing otherwise.
-                            */}
-                            <UnviewableImageNotice
-                              capabilities={chatCapabilities}
-                              imageCount={images.length}
-                            />
                           </div>
                         )}
 
@@ -3421,8 +3391,8 @@ export function SessionChatContent({
                             )}
                             {chatInfo.modelId && (
                               /*
-                               * Model, effort, and backend read as one
-                               * setting, so they sit on one line — see
+                               * Model and effort read as one setting, so
+                               * they sit on one line — see
                                * `ModelEffortBackendControls`'s own doc. This
                                * wrapper exists only to dim the row while a
                                * turn is in flight, and without a flex here
@@ -3439,10 +3409,6 @@ export function SessionChatContent({
                                * typing.
                                */
                               <ModelEffortBackendControls
-                                backend={
-                                  (chatInfo.backend ??
-                                    "claude-code") as ChatBackendSelection
-                                }
                                 capabilities={chatCapabilities}
                                 disabled={
                                   isChatInFlight ||
@@ -3452,9 +3418,6 @@ export function SessionChatContent({
                                 effort={chatInfo.effort ?? null}
                                 modelId={chatInfo.modelId}
                                 modelOptions={modelOptions}
-                                onBackendChange={(backend) => {
-                                  void handleBackendChange(backend);
-                                }}
                                 onEffortChange={(effort) => {
                                   void handleEffortChange(effort);
                                 }}

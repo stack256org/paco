@@ -1,8 +1,4 @@
 import type { BackendCapabilities } from "@paco/agent-backend";
-import {
-  type ChatBackendSelection,
-  BackendSelectorCompact,
-} from "@/components/backend-selector-compact";
 import { EffortSelectorCompact } from "@/components/effort-selector-compact";
 import { ModelSelectorCompact } from "@/components/model-selector-compact";
 import type { EffortSelection } from "@/lib/effort";
@@ -13,13 +9,12 @@ interface ModelEffortBackendControlsProps {
   modelId: string;
   modelOptions: ModelOption[];
   effort: EffortSelection;
-  backend: ChatBackendSelection;
   /**
    * What the chat's *current* backend actually supports — capability-driven
    * UI: the effort control below is hidden whenever `capabilities.effort` is
    * `false`, and the model control whenever `capabilities.models` leaves
-   * nothing to choose, rather than this component testing the `backend` prop
-   * against a literal id.
+   * nothing to choose, rather than this component testing the backend's id
+   * against a literal string.
    *
    * That distinction is what makes the row survive a backend swap. Under
    * OpenFX both controls happened to disappear together, so a
@@ -34,13 +29,12 @@ interface ModelEffortBackendControlsProps {
   disabled: boolean;
   onModelChange: (modelId: string) => void;
   onEffortChange: (effort: EffortSelection) => void;
-  onBackendChange: (backend: ChatBackendSelection) => void;
   onModelCloseAutoFocus?: () => void;
 }
 
 /**
- * The composer's "how this turn runs" row: model, reasoning effort, and
- * agent backend, one after another.
+ * The composer's "how this turn runs" row: model and reasoning effort, one
+ * after another.
  *
  * Extracted out of `session-chat-content.tsx` (already large — see
  * AGENTS.md's file-organization guidance) so the capability-driven hiding
@@ -51,12 +45,10 @@ export function ModelEffortBackendControls({
   modelId,
   modelOptions,
   effort,
-  backend,
   capabilities,
   disabled,
   onModelChange,
   onEffortChange,
-  onBackendChange,
   onModelCloseAutoFocus,
 }: ModelEffortBackendControlsProps) {
   /*
@@ -110,11 +102,6 @@ export function ModelEffortBackendControls({
           value={effort}
         />
       )}
-      <BackendSelectorCompact
-        disabled={disabled}
-        onChange={onBackendChange}
-        value={backend}
-      />
     </div>
   );
 }
