@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildPortBindings,
   buildContainerLabels,
   buildDockerExecArgs,
   buildNetworkingConfig,
@@ -115,5 +116,36 @@ describe("docker exec -e NAME", () => {
     ]);
 
     expect(stdout).toBe(TOKEN);
+  });
+});
+
+describe("buildPortBindings", () => {
+  test("binds published ports to loopback, never all interfaces", () => {
+    const bindings = buildPortBindings([5173]);
+
+    // The security property this whole function exists for. Docker's default
+    // when HostIp is omitted is 0.0.0.0, which would put a sandbox's dev
+    // server — running code the agent wrote — on every interface of the
+    // host, reachable with no password, with nginx and its auth_basic
+    // bypassed entirely.
+    expect(bindings["5173/tcp"]).toEqual([
+      { HostIp: "127.0.0.1", HostPort: "0" },
+    ]);
+  });
+
+  test("asks Docker for an ephemeral port", () => {
+    const bindings = buildPortBindings([5173]);
+
+    // "0" lets Docker pick, so concurrent sandboxes cannot collide.
+    expect(bindings["5173/tcp"]?.[0]?.HostPort).toBe("0");
+  });
+
+  test("binds every requested port", () => {
+    const bindings = buildPortBindings([5173, 8080]);
+
+    expect(Object.keys(bindings).sort()).toEqual(["5173/tcp", "8080/tcp"]);
+    for (const binding of Object.values(bindings)) {
+      expect(binding[0]?.HostIp).toBe("127.0.0.1");
+    }
   });
 });

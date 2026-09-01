@@ -767,6 +767,36 @@ Preview tab says so and links to Settings instead of a dead link.
 pointed at this host — because a chat's slug isn't known ahead of time; one
 record covers every chat that will ever exist.
 
+**On a platform that terminates TLS for you, register the wildcard there
+instead.** On Krova Cloud that is one command, once:
+
+```bash
+krova domains add "*.previews.example.com"
+```
+
+Krova provisions and renews the certificate at its edge, so leave TLS **off**
+in Settings and do not run `paco tls` for preview hostnames — the HTTP-01
+challenge would arrive at the edge, not here, for the reason §7 explains.
+Paco then generates plain `listen 80;` blocks and the edge does the rest;
+that is the shape `certDir: null` already produces
+(`apps/web/lib/preview/nginx-reload.ts`), so nothing needs configuring
+beyond the base domain.
+
+One thing to check the first time: **the edge must forward the original
+`Host` header.** Every generated block matches on
+`server_name <slug>.previews.example.com`, so an edge that rewrites `Host`
+sends the request to nginx's default server — you land on Paco itself
+instead of the preview. If that happens, it is the edge's forwarding
+configuration, not Paco's routing.
+
+**Why previews get their own hostname rather than a path under Paco's own
+domain.** A preview serves whatever the agent wrote. A separate hostname is a
+separate browser origin, so preview code cannot read Paco's storage, script
+its pages, or make credentialed requests to its API. Served at
+`paco.example.com/preview/<id>/` it would be same-origin, and the browser
+would attach the instance password to every `fetch("/api/…")` that page made.
+The wildcard costs one DNS record; the alternative costs the boundary.
+
 **How it's routed.** Unlike the Traefik deployment this replaced, which
 discovered sandbox containers dynamically through Docker labels, Paco itself
 now writes nginx configuration: one generated `server {}` block per active
@@ -775,6 +805,19 @@ preview, under `/etc/paco/nginx/paco-preview-<hostname>.conf`
 published the chat's dev server. Before every reload it snapshots every file
 it's about to touch, so a failed `nginx -t` restores exactly what was there
 before rather than leaving a half-written config.
+
+**Sandbox ports are published on loopback only.** A sandbox's dev server is
+bound to `127.0.0.1` on an ephemeral host port, so nginx — which holds the
+instance password — is the only way to reach it
+(`packages/sandbox/docker/sandbox.ts`, `buildPortBindings`). Docker publishes
+on `0.0.0.0` when told nothing, which would have put every chat's dev server
+on every interface with no password at all.
+
+> **Upgrading:** Docker cannot rebind a running container, so any sandbox
+> created before this change keeps its old binding until it is recreated.
+> Stop the affected chats' sandboxes once after upgrading, or run
+> `docker ps --filter name=paco-sandbox --format '{{.Names}}\t{{.Ports}}'`
+> and look for anything published on `0.0.0.0`.
 
 **Why that directory and not `/etc/nginx/conf.d`.** Paco runs as the
 unprivileged `paco` user, and `/etc/paco/nginx/` is a directory it owns. A
