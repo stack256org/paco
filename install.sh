@@ -546,9 +546,15 @@ else
   echo "sorted, this still needs doing, because it needs your Claude account:"
 fi
 echo
-echo "  sudo paco auth"
+echo "  Open the URL above, sign in with the instance password, and go to"
+echo "  Settings -> Models. Add a credential there: either an API key, or a"
+echo "  setup token from running 'claude setup-token' on your own machine"
+echo "  against a Claude subscription. Nothing else needs installing for it -"
+echo "  the credential is saved in the database, sealed with APP_SECRET, and"
+echo "  used from the next turn on with no restart."
 echo
-echo "Then open the URL above and create your account. Also worth knowing:"
+echo "Until a credential is saved, chats fail with a message pointing at"
+echo "Settings, not a raw CLI error. Also worth knowing:"
 echo "  - A domain can be set (or changed) later from Settings."
 echo "  - For TLS: if this host has its own public IP, run"
 echo "    'sudo paco tls <domain>' once the domain resolves here. If your"

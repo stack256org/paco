@@ -26,11 +26,29 @@ This gate exists only where nginx does — the `.deb` install. A development
 checkout (`pnpm web`) and any container run have no nginx and no password at
 all, so neither deployment path should ever be exposed to a network.
 
-`APP_SECRET` remains even though sessions are gone: it still derives the key
-that seals the stored GitHub token (`lib/crypto/secret-box.ts`), which is now
-the only thing it protects. Losing it orphans that token exactly as before,
-so it must still be backed up alongside the database. See
-`apps/web/.env.example` for the full env var list.
+`APP_SECRET` remains even though sessions are gone: it derives the key that
+seals two stored credentials now, not one — the GitHub token and the Claude
+credential below (`lib/crypto/secret-box.ts`). Losing it orphans both, though
+not identically: the GitHub token fails quietly (`getGithubToken()` catches
+the decryption error and returns `null`), while the Claude credential fails
+loudly (`readClaudeCredential()` lets it throw, so the next turn errors out
+instead of silently degrading). It must still be backed up alongside the
+database. See `apps/web/.env.example` for the full env var list.
+
+The agent itself runs on a **Claude credential** — an API key, or a value
+from `claude setup-token` — saved in Settings → Models
+(`instanceSettings.claudeCredentialKind`/`claudeCredentialSealed`,
+`apps/web/lib/settings/instance-settings.ts`), not a CLI login session.
+`runAgentTurn` (`apps/web/lib/agent/run-step.ts`) reads it fresh on every
+call and exports it into the `claude` child process's environment for that
+one turn (`packages/claude-code/child-env.ts`) — nothing lands under
+`/var/lib/paco`, and rotating the credential needs no restart. Settings →
+Models also accepts an optional **gateway** (`claudeBaseUrl`): a Base URL for
+a service speaking the Anthropic Messages format, with a `claudeModelDiscovery`
+option to fetch that gateway's model list instead of offering the fixed
+tier aliases. It supports **Claude models only** — Anthropic does not
+support routing Claude Code to non-Claude models through any gateway, so
+this is not an OpenRouter-style path to GPT or Gemini.
 
 Each chat's preview hostname is protected by that same instance password,
 nothing else: the generated `server {}` block (`apps/web/lib/preview/nginx-config.ts`)

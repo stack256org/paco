@@ -373,8 +373,9 @@ fi
 # Bundled Claude Code CLI — the old Docker image ran `npm install -g
 # @anthropic-ai/claude-code` at build time; a native install has to be just
 # as self-contained (no network, no npm, on the target host) or there is no
-# `claude` at all: every chat fails and `paco auth` has nothing to run. See
-# GAP 1 in .superpowers/sdd/2026-08-05-native-installation/gaps-report.md.
+# `claude` at all: every chat fails no matter what credential is saved in
+# Settings. See GAP 1 in
+# .superpowers/sdd/2026-08-05-native-installation/gaps-report.md.
 #
 # Installed with the just-downloaded Node's own bundled npm, into that same
 # Node's prefix, so `claude` ends up self-contained under

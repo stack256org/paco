@@ -44,16 +44,8 @@ Usage: paco <command>
   restart    systemctl restart paco. Re-reads /etc/paco/paco.env — run this
              after hand-editing that file (e.g. APP_URL, SMTP_*).
   status     Unit state, installed version, configured domain, whether the
-             bundled Claude Code CLI is present, and whether the paco user is
-             authenticated with it.
-  auth       Sign the paco user in to Claude Code (`claude auth login`), so
-             the credential is written under /var/lib/paco — the one thing
-             `dpkg` never touches on upgrade or `remove`. Requires root.
-             That CLI ships inside this package, so a missing one means a
-             broken install, not something to go fetch.
-
-             Needs no restart afterwards. Each turn spawns a fresh CLI
-             process that reads the credential off disk as it starts.
+             bundled Claude Code CLI is present, and whether a Claude
+             credential is configured in Settings.
   password   Set the password protecting this instance, asked for by the
              browser as user `paco`. Requires root.
 
@@ -121,47 +113,6 @@ cmd_logs() {
 cmd_restart() {
   require_root restart
   systemctl restart "$UNIT"
-}
-
-# --- auth ------------------------------------------------------------------
-#
-# Writes into /var/lib/paco — the directory `dpkg` never touches on upgrade
-# or `apt remove` — and needs no restart afterwards, because a turn spawns a
-# fresh CLI process that reads the credential off disk as it starts.
-
-require_paco_user() {
-  id "$PACO_USER" >/dev/null 2>&1 \
-    || fail "the '$PACO_USER' user does not exist — is paco installed? See install.sh."
-}
-
-auth_claude() {
-  require_root auth
-  require_paco_user
-  if ! su -s /bin/sh -l "$PACO_USER" -c 'command -v claude' >/dev/null 2>&1; then
-    fail "the 'claude' CLI is not on PATH for the '$PACO_USER' user. It ships bundled in the package (/usr/bin/claude) — this means the install is broken. Try 'sudo apt-get install --reinstall paco', then re-run 'paco auth'."
-  fi
-  echo "paco: running 'claude auth login' as $PACO_USER — the credential lands in /var/lib/paco/.claude and survives every future upgrade or 'apt remove'."
-  su -s /bin/sh -l "$PACO_USER" -c 'claude auth login'
-}
-
-cmd_auth() {
-  # Bare `paco auth` keeps the meaning it has always had, and the meaning
-  # docs/self-hosting.md §3 documents: sign in to Claude. `paco auth claude`
-  # is the same command spelled explicitly.
-  provider="${1:-claude}"
-  if [ $# -gt 0 ]; then
-    shift
-  fi
-
-  case "$provider" in
-    claude)
-      [ $# -eq 0 ] || fail "'paco auth claude' takes no arguments."
-      auth_claude
-      ;;
-    *)
-      fail "unknown auth provider: '$provider'. Use 'paco auth' or 'paco auth claude'."
-      ;;
-  esac
 }
 
 # --- tls ---------------------------------------------------------------------
@@ -347,11 +298,11 @@ configured_domain() {
 
 # Whether the bundled Claude Code CLI (/usr/bin/claude, see
 # packaging/claude-wrapper.sh) is actually on PATH for the paco user.
-# Checked separately from authentication below: a missing CLI means the
+# Checked separately from the credential below: a missing CLI means the
 # package itself is broken (postinst already warns about this at install
-# time — see packaging/debian/postinst) and no amount of 'paco auth' fixes
-# it, so the two must never be collapsed into one line that only ever says
-# "no" without saying which problem it is.
+# time — see packaging/debian/postinst) and no credential saved in Settings
+# fixes that, so the two must never be collapsed into one line that only
+# ever says "no" without saying which problem it is.
 claude_cli_present() {
   if [ "$(id -u)" != "0" ]; then
     echo "unknown (run as root to check)"
@@ -368,7 +319,13 @@ claude_cli_present() {
   fi
 }
 
-claude_auth_state() {
+# Whether a Claude credential (API key or setup token) has been saved in
+# Settings — instance_settings.claude_credential_sealed — queried the same
+# way configured_domain() reads the database: as the paco OS user, over the
+# Unix socket, via peer auth. There is no CLI login to check any more; the
+# credential lives in Postgres, sealed with APP_SECRET, and is exported into
+# the CLI's environment per turn.
+claude_credential_state() {
   if [ "$(id -u)" != "0" ]; then
     echo "unknown (run as root to check)"
     return 0
@@ -377,14 +334,18 @@ claude_auth_state() {
     echo "unknown (the $PACO_USER user does not exist)"
     return 0
   fi
-  if ! su -s /bin/sh -l "$PACO_USER" -c 'command -v claude' >/dev/null 2>&1; then
-    echo "unknown (CLI not present - see 'CLI:' above)"
-    return 0
-  fi
-  if su -s /bin/sh -l "$PACO_USER" -c 'claude auth status' >/dev/null 2>&1; then
-    echo "yes"
+
+  if kind_raw=$(su -s /bin/sh "$PACO_USER" -c \
+    "psql -U paco -d paco -tAc \"SELECT claude_credential_kind FROM instance_settings WHERE claude_credential_sealed IS NOT NULL LIMIT 1\"" \
+    2>/dev/null); then
+    kind="$(printf '%s' "$kind_raw" | tr -d '[:space:]')"
+    if [ -n "$kind" ]; then
+      echo "configured ($kind, saved in Settings)"
+    else
+      echo "not configured (add one in Settings -> Models)"
+    fi
   else
-    echo "no (run 'sudo paco auth')"
+    echo "unknown (could not query Postgres - is it running?)"
   fi
 }
 
@@ -423,7 +384,7 @@ cmd_status() {
   echo "Domain:    $(configured_domain)"
   echo "Password:  $(password_state)"
   echo "CLI:       $(claude_cli_present)"
-  echo "Claude:    $(claude_auth_state)"
+  echo "Credential: $(claude_credential_state)"
 }
 
 # --- password ----------------------------------------------------------------
@@ -529,7 +490,6 @@ case "$command" in
   logs) cmd_logs "$@" ;;
   restart) cmd_restart ;;
   status) cmd_status ;;
-  auth) cmd_auth "$@" ;;
   password) cmd_password "$@" ;;
   tls) cmd_tls "$@" ;;
   uninstall)

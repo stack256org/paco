@@ -38,9 +38,11 @@ curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 >   to describe — claim the instance → Platform → Mail → Done — no longer
 >   exists: accounts are gone, so `/` now goes straight past the instance
 >   password gate into the app, with nothing to configure first.)
-> - `APP_SECRET`, the database, and `/var/lib/paco/.claude` all survive
->   reinstall → `apt remove` → reinstall. `apt purge` removes exactly the two
->   things it says it will, and leaves the Postgres database alone (§10).
+> - `APP_SECRET`, the database, and the Claude credential saved in it all
+>   survive reinstall → `apt remove` → reinstall. `apt purge` removes exactly
+>   the two directories it says it will and leaves the Postgres database
+>   alone (§10) — though without the `APP_SECRET` it also deleted, the
+>   credential row left behind in that database is unusable (§6).
 > - A real domain with a real Let's Encrypt chain, served over HTTPS — via the
 >   platform's edge, with `paco tls` and **Request certificate** both correctly
 >   declining rather than running certbot (§8).
@@ -131,8 +133,9 @@ Almost nothing. Docker is installed and started, the `paco` user is put in the
 `docker` group, PostgreSQL and nginx are configured, a secret is generated and
 the service is running — all before the installer returns. What is left:
 
-- **`sudo paco auth`** — see §3. It needs your Claude account, so no installer
-  can do it for you, and nothing runs a chat until it is done.
+- **A Claude credential**, added in **Settings → Models** — see §3. It needs
+  your Claude account, so no installer can do it for you, and nothing runs a
+  chat until it is done.
 - **A domain**, set in **Settings → Admin → Domain** or with `--domain` at
   install time. Not for reaching Paco — it answers on whatever address the
   request came in on, so the IP the installer prints works straight away —
@@ -306,11 +309,11 @@ to `/etc/paco/paco.env` (`dockerode` honours it) and restarting `paco`.
 | Path | What's there |
 | --- | --- |
 | `/usr/lib/paco` | The app: `apps/web/server.js`, its migration scripts, and a real `node_modules` — plus a bundled Node runtime and the Claude Code CLI, both under `node/`, so nothing else needs installing on the host to run either one. |
-| `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `auth`, `tls`. See §3. |
+| `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `tls`, `password`. See §3. |
 | `/usr/lib/paco/paco-entrypoint.sh` | What `paco.service` runs: applies pending migrations, resolves a domain saved in Settings into `APP_URL`, then `exec`s the server so systemd signals the Node process rather than a wrapper. |
 | `/usr/bin/claude` | A thin wrapper `exec`ing `/usr/lib/paco/node/bin/claude`, so `claude` is on `PATH` without also putting the bundled Node/npm/npx on it. |
 | `/etc/paco/paco.env` | Configuration: `POSTGRES_URL`, `PGHOST`, `APP_SECRET`, `PACO_WORKSPACE_ROOT`, plus `APP_URL` if you or `install.sh --domain` add it. Mode `640`, owned `root:paco` — generated once by `postinst` and never regenerated. See §18. |
-| `/var/lib/paco` | The `paco` user's home, and all of its state: `workspaces/` (every session's git repository and chat worktrees) and `.claude/` (the Claude Code credential, written by `paco auth`). This directory is the entire reason the delivery model changed — see §3. |
+| `/var/lib/paco` | The `paco` user's home: `workspaces/` (every session's git repository and chat worktrees) and `.paco/` (installed plugins, §12; memory, §13). The Claude credential does not live here — it is saved in Settings, in Postgres — but this directory is still the reason the delivery model is a `.deb`: `dpkg` never touches it on upgrade, only `apt purge` does (§5). See §3. |
 | `/etc/nginx/sites-available/paco` (+ `sites-enabled/paco`) | The nginx site proxying to the app. Edited by `paco tls` when you add a domain (§8). |
 | `/lib/systemd/system/paco.service` | The systemd unit. `Requires=postgresql.service`; runs as `User=paco Group=paco`. |
 
@@ -320,28 +323,41 @@ paco's own to remove (see §5).
 
 ---
 
-## 3. `paco auth`, and why any of this is a `.deb` at all
+## 3. The Claude credential, and why any of this is a `.deb` at all
 
-The Claude Code CLI authenticates with a subscription, not an API key, so
-there is a credential to keep. Under the Docker Compose deployment this
-replaced, that credential lived on a named volume — durable in principle, but
-one more piece of state an operator had to know to back up separately, and
-exactly the kind of thing a `docker compose down -v` could take out by
-accident (see the old deployment's own warnings about that command). Under
-the native package it is a plain directory, `/var/lib/paco/.claude`, and
-`dpkg` never touches `/var/lib/paco` on an upgrade — only `apt purge` does
-(§5). **That's the whole reason the delivery model changed:** an `apt
-upgrade` should never be able to sign Claude out, and a directory `dpkg`
-already knows not to touch on upgrade is a simpler guarantee of that than a
-Docker volume an operator has to remember exists.
+The Claude Code CLI runs on an API key or a subscription-backed setup token —
+not an interactive login — and Paco stores exactly one of the two:
+**Settings → Models → Claude credential**, sealed with `APP_SECRET`
+(`apps/web/lib/crypto/secret-box.ts`) and saved in Postgres alongside every
+other instance setting. There is nothing to run as root and nothing under
+`/var/lib/paco` for it: a turn reads the credential out of the database and
+exports it into the `claude` process's environment for that one turn, so
+rotating it takes effect on the very next turn with no restart.
 
-```bash
-sudo paco auth
-```
+That is new. An earlier release signed the `paco` system user in to the CLI
+interactively, and the resulting credential landed at `/var/lib/paco/.claude`
+— a directory `dpkg` never touches on upgrade, only `apt purge` does (§5).
+That command, and that file, are both gone. What has not changed is why this
+product ships as a `.deb` in the first place:
+`/var/lib/paco` still holds every chat's workspace (§2, §10) and every
+installed plugin's state (§12), and the same guarantee the credential used to
+lean on now applies to those instead — an `apt upgrade` should never be able
+to destroy a running chat's git worktree, any more than it used to be able to
+sign Claude out. A directory `dpkg` already knows not to touch on upgrade is
+a simpler guarantee of that than the Docker volumes the Compose deployment
+this replaced needed an operator to remember existed.
 
-Runs `claude auth login` as the `paco` user, so the credential lands at
-`/var/lib/paco/.claude`. Do this before the first chat — without it, every
-turn fails with nothing to run.
+Add or replace the credential from **Settings → Models**: an API key (bills
+the Anthropic API directly), or a setup token from running `claude
+setup-token` on your own machine against a Claude subscription (bills the
+subscription, not the API). Paco stores exactly one of the two — never
+both — so there is no precedence to reason about. Do this before the first
+chat: without a credential, every turn fails with an error naming Settings,
+not a raw CLI error. Settings → Models also accepts an optional gateway: a
+Base URL for a service speaking the Anthropic Messages format, with an option
+to fetch its model list. Only Claude models are supported through it —
+Anthropic does not support routing Claude Code to non-Claude models through
+any gateway, so there is no way to point this at GPT or Gemini.
 
 ### The `paco` command
 
@@ -354,9 +370,7 @@ turn fails with nothing to run.
 | `paco upgrade` | `apt-get update && apt-get install --only-upgrade paco` |
 | `paco logs [-n N]` | Follow the unit's journal; extra args pass through |
 | `paco restart` | Re-reads `paco.env` — the only way to apply a hand-edited `APP_URL` |
-| `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, and whether `paco` is authenticated |
-| `paco auth` | Signs the `paco` user into Claude Code, so the credential lands in `/var/lib/paco/.claude` and survives every upgrade |
-| `paco auth claude` | The same command, spelled explicitly |
+| `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, and whether a Claude credential is configured in Settings |
 | `paco tls <domain>` | A certificate via certbot, DNS-checked first, nginx reloaded after. Optional — and skip it entirely if something in front of this host already terminates TLS (§8) |
 | `paco password` | Rotates the instance password; prompts twice (or reads stdin with `paco password --stdin`) |
 
@@ -462,8 +476,10 @@ script:
 ```text
 paco: purging — this destroys:
 paco:   /etc/paco (APP_SECRET and paco.env)
-paco:   /var/lib/paco (chat workspaces, Claude credentials, everything under it)
-paco: the Postgres database is NOT touched — see postrm if you also want it gone.
+paco:   /var/lib/paco (chat workspaces, installed plugins, everything under it)
+paco: the Postgres database is NOT touched, but the Claude credential and
+paco: the GitHub token stored in it are both sealed with the APP_SECRET this
+paco: just deleted, so they are unusable without a backup of paco.env.
 ```
 
 It also removes the nginx site files it installed, reloading nginx if the
@@ -520,16 +536,14 @@ purpose, not by skipping this section.
 
 ### The Claude credential
 
-Simplest is not to back it up — after a restore, `sudo paco auth` again. To
-keep it anyway, it's now a plain directory, not a Docker volume to unpack
-through a throwaway container:
-
-```bash
-sudo tar -C /var/lib/paco -czf paco-claude-$(date +%F).tar.gz .claude
-```
-
-Treat that archive as a credential: it authenticates as your Claude
-subscription.
+There is no separate file to archive for this — it lives in
+`instance_settings.claude_credential_sealed`, sealed with `APP_SECRET`, and
+comes back automatically with the Postgres dump above. It is only readable,
+though, if that dump is restored alongside the **same** `APP_SECRET` it was
+sealed under — see the warning right below, which now covers this credential
+exactly as it covers the GitHub token. Simplest fallback if you did not keep
+`APP_SECRET`: after a restore, open Settings → Models and paste the
+credential in again.
 
 ### `APP_SECRET` and the rest of `paco.env`
 
@@ -538,22 +552,45 @@ sudo cp /etc/paco/paco.env paco-env-$(date +%F).txt   # contains APP_SECRET — 
 ```
 
 **Read this before you rely on any of the above.** Paco has no
-application-level authentication and no accounts, so `APP_SECRET` now has
-exactly one job (`apps/web/lib/crypto/secret-box.ts`): it derives — via
-scrypt with a fixed salt — the AES-256-GCM key that encrypts the instance's
-one stored GitHub token. That makes it *more* important to back up than
-before, not less — there is no second purpose left to notice it broke.
-**A database restored under a different `APP_SECRET` loses that GitHub
-token permanently** — the ciphertext is authenticated, so decryption fails
+application-level authentication and no accounts, so `APP_SECRET`
+(`apps/web/lib/crypto/secret-box.ts`) has exactly two jobs now, both the
+same shape: it derives — via scrypt with a fixed salt — the AES-256-GCM key
+that seals the instance's one stored GitHub token, **and, as of this
+release, the one Claude credential saved in Settings → Models.** That makes
+it *more* important to back up than before, not less — losing it now costs
+you both the ability to push code and the ability to run a single turn, not
+one or the other.
+
+**A database restored under a different `APP_SECRET` loses both
+permanently** — the ciphertext is authenticated, so decryption fails
 outright instead of returning garbage, and there is no recovery path short
-of pasting a new personal access token into Settings → Connections. The
-failure is quiet: `getGithubToken()` catches the error, logs it, and returns
-`null`; Settings → Connections keeps showing the instance as connected,
-because that view reads the login and scopes columns and never decrypts
-anything — only pushes and pull requests behave as though nothing were
-connected. So: back up `paco.env`, specifically `APP_SECRET`, in a password
-manager or secrets store — not only as the file sitting on the machine
-you're backing up.
+of pasting a new value into the relevant Settings page. The two fail
+differently, though, so don't expect the same symptom: the GitHub token
+fails quietly — `getGithubToken()` catches the error, logs it, and returns
+`null`, while Settings → Connections keeps showing the instance as
+connected, because that view reads the login and scopes columns and never
+decrypts anything, so only pushes and pull requests behave as though nothing
+were connected. The Claude credential fails loudly — reading it throws, so
+the very next turn fails outright with a decryption error rather than the
+friendlier "add a credential in Settings" message an instance with no
+credential at all would show. Either way the fix is the same: paste the
+value into Settings again.
+
+This is also, concretely, what `apt purge` now does to your agent. The old
+CLI login under `/var/lib/paco` was never touched by `dpkg` on upgrade *or*
+remove, and `apt purge` deleting it was the one moment it went away. The
+Claude credential's durability story is the opposite: it lives in Postgres,
+which `apt purge` does not touch — but `apt purge` does delete
+`/etc/paco`, and `APP_SECRET` with it, and without that secret the
+credential row left behind in the database is exactly as unusable as if it
+had been deleted outright. If you plan to `apt purge` and reinstall, back up
+`paco.env` first or budget for re-entering the credential in Settings
+afterward — there is no in-between.
+
+So: back up `paco.env`, specifically `APP_SECRET`, in a password manager or
+secrets store — not only as the file sitting on the machine you're backing
+up. It is the only thing standing between an `apt purge` and having to
+reconnect GitHub and re-paste your Claude credential from scratch.
 
 ### Restore
 
@@ -569,13 +606,14 @@ sudo systemctl stop paco
 sudo cp paco-env-2026-01-01.txt /etc/paco/paco.env
 sudo chown root:paco /etc/paco/paco.env && sudo chmod 640 /etc/paco/paco.env
 
-# 3. Workspaces and the Claude credential, at the same absolute path.
+# 3. Workspaces, at the same absolute path.
 sudo tar -C /var/lib/paco -xzf paco-workspaces-2026-01-01.tar.gz
-sudo tar -C /var/lib/paco -xzf paco-claude-2026-01-01.tar.gz   # if you kept it
 sudo chown -R paco:paco /var/lib/paco
 
-# 4. Recreate the database and load the dump. dropdb/createdb need to run as
-#    the postgres OS user — the paco role owns the database but was never
+# 4. Recreate the database and load the dump — this is what brings the
+#    Claude credential back too, decryptable because step 2 already put the
+#    matching APP_SECRET in place. dropdb/createdb need to run as the
+#    postgres OS user — the paco role owns the database but was never
 #    granted CREATEDB (see postinst); pg_restore itself can run as paco.
 sudo -u postgres dropdb --if-exists paco
 sudo -u postgres createdb -O paco paco
@@ -585,8 +623,9 @@ sudo -u paco pg_restore -h /var/run/postgresql -d paco --no-owner \
 # 5. Start the app. Migrations run here, bringing an older dump up to date.
 sudo systemctl start paco
 
-# 6. Re-authenticate the agent if you didn't restore the credential.
-sudo paco auth
+# 6. If you did not restore the original APP_SECRET in step 2, the restored
+#    Claude credential is undecryptable: open Settings -> Models and paste
+#    it in again.
 ```
 
 The workspace path must land at the identical absolute path it had before:
@@ -1596,10 +1635,23 @@ avoids the download entirely.
 
 ### Chats fail immediately, or the agent never starts
 
-```bash
-sudo paco auth
-sudo su -s /bin/sh -l paco -c "claude auth status"   # should print a logged-in account
+If the failure names Settings rather than a raw CLI error, there is no
+credential configured yet (or the one saved cannot be decrypted — see the
+`APP_SECRET` warning in §6). Fix it from the browser:
+
+```text
+Settings -> Models -> Claude credential -> paste an API key or setup token -> Save
 ```
+
+`paco status` also reports this without opening a browser:
+
+```bash
+sudo paco status   # look at the "Credential:" row
+```
+
+If the CLI itself is missing (`paco status`'s `CLI:` row says so), that is a
+broken install, not a missing credential — see `apt-get install --reinstall
+paco` in §1.
 
 ### Chats fail trying to reach the Docker socket
 

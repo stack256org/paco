@@ -30,8 +30,10 @@ case "$1" in
   purge)
     echo "paco: purging — this destroys:" >&2
     echo "paco:   $PACO_ETC (APP_SECRET and paco.env)" >&2
-    echo "paco:   $PACO_HOME (chat workspaces, Claude credentials, everything under it)" >&2
-    echo "paco: the Postgres database is NOT touched — see postrm if you also want it gone." >&2
+    echo "paco:   $PACO_HOME (chat workspaces, installed plugins, everything under it)" >&2
+    echo "paco: the Postgres database is NOT touched, but the Claude credential and" >&2
+    echo "paco: the GitHub token stored in it are both sealed with the APP_SECRET this" >&2
+    echo "paco: just deleted, so they are unusable without a backup of paco.env." >&2
 
     if [ -d /run/systemd/system ]; then
       systemctl disable paco.service >/dev/null 2>&1 || true

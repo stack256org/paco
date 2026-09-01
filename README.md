@@ -110,13 +110,11 @@ afterwards:
   and the same command as every other package on the host.
 
 When it finishes there is exactly **one** thing left, and only because it needs
-your Claude account:
-
-```bash
-sudo paco auth
-```
-
-Then open the URL it printed and create your account.
+your Claude account: open the URL it printed, go to **Settings → Models**, and
+add a Claude credential — an API key, or a setup token from running
+`claude setup-token` on your own machine against a Claude subscription. There
+is no account to create; the instance password is the only thing between you
+and the app.
 
 **What it needs:** a Linux host running systemd, root access, ports 80 and
 443 free — nginx owns both, and there's no flag to move them — and, if Docker
@@ -185,9 +183,9 @@ flow, because there are no accounts.
 
 A few things still need doing:
 
-- **`sudo paco auth`** signs the service into Claude Code. The one step the
+- **A Claude credential**, added in **Settings → Models**. The one step the
   installer cannot do for you, because it needs your account — and every turn
-  fails with nothing to run until it is done.
+  fails with an error naming Settings, not a raw CLI error, until it is done.
 - **The first chat is slower than the rest.** It pulls
   `ghcr.io/stack256org/paco-sandbox`, the image your app is built inside, which
   is a few gigabytes and happens once. Nothing to do — but

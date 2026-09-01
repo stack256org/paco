@@ -3,7 +3,7 @@
 ## Running an instance
 
 - **[Self-hosting](self-hosting.md)** — installing and upgrading the native
-  package, the file layout, `paco auth` and the Claude credential, what
+  package, the file layout, the Claude credential saved in Settings, what
   `apt remove` keeps versus what `apt purge` destroys, backup and restore
   (start with the `APP_SECRET` warning), who may sign in and who becomes the
   administrator, DNS/TLS/previews, disk usage and cleanup, one section each
