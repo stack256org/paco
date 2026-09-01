@@ -902,17 +902,24 @@ host:
 - **The host port is ephemeral.** Paco asks Docker for `HostPort: "0"`, so
   each container gets whatever's free — that's what lets several sandboxes
   run at once. Find them with `docker ps --filter label=paco.sandbox=true`.
+- **Bound to loopback, not to every interface.** Paco publishes with
+  `HostIp: "127.0.0.1"` (`packages/sandbox/docker/sandbox.ts`,
+  `buildPortBindings`), so a sandbox's dev server is reachable only from the
+  host itself. Docker binds `0.0.0.0` when told nothing, which would put
+  whatever the agent started on every interface with no password and with
+  nginx — the only thing holding the instance password — bypassed entirely.
 - **Not proxied through Paco, and not the preview-hostname path above.** A
   raw port URL (`http://localhost:<ephemeral-port>`) is handed to your
-  browser as-is. Nothing about reaching a container this way is
-  authenticated, and a chat's private/public setting has no effect on it —
-  that setting only governs the nginx-routed hostname.
-- **On a public machine, these bind all interfaces by default.** Whatever an
-  agent starts on 3000, 5173, 4321, or 8000 inside a sandbox becomes
-  reachable from outside on the mapped port unless a firewall says
-  otherwise — regardless of whether a preview domain is configured, and
-  regardless of that chat's visibility setting. Check `docker ps` and your
-  firewall rules on any instance with a public IP.
+  browser as-is, and reaching a container that way is not authenticated. On
+  a single-operator instance that is unremarkable, because loopback means
+  "someone already on this machine". It does mean any other process or user
+  on the host can reach a running sandbox without the instance password.
+- **Upgrading from before this changed:** Docker cannot rebind a running
+  container, so a sandbox created earlier keeps its old all-interfaces
+  binding until it is recreated. Find them with
+  `docker ps --filter name=paco-sandbox --format '{{.Names}}\t{{.Ports}}'`
+  and look for anything published on `0.0.0.0`; stopping those chats'
+  sandboxes once is enough.
 
 ---
 
