@@ -424,3 +424,66 @@ describe("migration 0015 — the OpenFX backend's stranded rows", () => {
     expect(migrationSql).not.toContain("RENAME COLUMN");
   });
 });
+
+/**
+ * Migration 0021 removes the Poolside backend from the product. These assert
+ * what it does to a row that was still using it — the decision itself, not
+ * just the SQL text: a stranded chat lands on `claude-code`, and its
+ * Poolside resume token is deleted rather than inherited.
+ *
+ * Read from the committed migration because that file *is* the behaviour;
+ * there is no application code path that performs this rewrite, and a later
+ * edit to either UPDATE statement would otherwise be silent.
+ */
+describe("migration 0021 — the Poolside backend's stranded rows", () => {
+  const migrationSql = readFileSync(
+    join(import.meta.dirname, "migrations", "0021_same_micromax.sql"),
+    "utf8",
+  );
+
+  test("moves a chat pinned to poolside onto claude-code", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    expect(migrationSql).toContain(
+      `UPDATE "chats"\nSET "backend" = 'claude-code'\nWHERE "backend" = 'poolside';`,
+    );
+
+    // And the row it produces resumes nothing on either backend, which is
+    // the honest outcome for a chat whose agent no longer exists.
+    const migratedRow = { resumeTokens: {}, claudeSessionId: null };
+    expect(resolveChatResumeToken(migratedRow, "claude-code")).toBeUndefined();
+    expect(
+      resolveChatResumeToken(migratedRow, "other-backend"),
+    ).toBeUndefined();
+  });
+
+  test("deletes the stale poolside resume key while leaving every other backend's token alone", async () => {
+    const { resolveChatResumeToken } = await sessionsModulePromise;
+
+    expect(migrationSql).toContain(
+      `SET "resume_tokens" = "resume_tokens" - 'poolside'`,
+    );
+
+    // Simulate the jsonb `-` the migration performs, then read the result
+    // back through the helper the application actually uses.
+    const before: Record<string, string> = {
+      "claude-code": "claude-session-1",
+      poolside: "pool-session-1",
+    };
+    const { poolside: _dropped, ...after } = before;
+
+    expect(
+      resolveChatResumeToken(
+        { resumeTokens: after, claudeSessionId: null },
+        "other-backend",
+      ),
+    ).toBeUndefined();
+    expect(
+      resolveChatResumeToken(
+        { resumeTokens: after, claudeSessionId: null },
+        "claude-code",
+      ),
+    ).toBe("claude-session-1");
+    expect(Object.keys(after)).not.toContain("poolside");
+  });
+});

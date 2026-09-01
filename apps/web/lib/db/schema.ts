@@ -208,8 +208,8 @@ export const chats = pgTable(
      * single live choice.
      *
      * `"openfx"` and `"poolside"` were earlier backends, removed in
-     * migrations 0015 and the one that follows it. Both migrations rewrite
-     * any row still carrying the removed value back to `"claude-code"`.
+     * migrations 0015 and 0021 respectively. Both migrations rewrite any row
+     * still carrying the removed value back to `"claude-code"`.
      */
     backend: text("backend", { enum: ["claude-code"] })
       .notNull()

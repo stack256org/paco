@@ -33,6 +33,9 @@ import { normalizeBackendId } from "./backend-factory";
 export function capabilitiesForBackend(
   backend: string | null | undefined,
 ): BackendCapabilities {
+  // Kept only for the console.warn side effect on a retired backend id; the
+  // resolved value itself is discarded — capabilities always come from
+  // ClaudeCodeBackend.
   normalizeBackendId(backend);
   const capabilities = new ClaudeCodeBackend().capabilities();
   return withResolvedModels(capabilities);

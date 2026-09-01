@@ -95,6 +95,8 @@ export function normalizeBackendId(
 export async function resolveBackend(
   chat: BackendSelectionInput,
 ): Promise<AgentBackend> {
+  // Kept only for the console.warn side effect on a retired backend id; the
+  // resolved value itself is discarded — every chat runs on ClaudeCodeBackend.
   normalizeBackendId(chat.backend);
 
   return new ClaudeCodeBackend();

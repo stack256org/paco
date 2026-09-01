@@ -138,9 +138,11 @@ describe("normalizeBackendId", () => {
 
 describe("CHAT_BACKEND_IDS / isKnownBackendId", () => {
   /**
-   * The PATCH route validates a backend switch against `isKnownBackendId`
-   * rather than a set of its own. This is the test that keeps that honest:
-   * one list, and the two functions built on it answer the same way.
+   * `CHAT_BACKEND_IDS` is a union of one today, but it is retained as the
+   * seam a future second backend slots into — `isKnownBackendId` and
+   * `normalizeBackendId` are both built on it. This is the test that keeps
+   * that honest: one list, and the two functions built on it answer the
+   * same way.
    */
   test("every id in the list is known, and nothing else is", async () => {
     const { CHAT_BACKEND_IDS, isKnownBackendId, normalizeBackendId } =
