@@ -15,6 +15,7 @@ import { readUIMessageStream, type UIMessage, type UIMessageChunk } from "ai";
 import {
   type ClaudeCredential,
   readClaudeCredential,
+  readInstanceSettings,
 } from "@/lib/settings/instance-settings";
 import { type BackendSelectionInput, resolveBackend } from "./backend-factory";
 import { buildAppendSystemPrompt } from "./system-prompt";
@@ -146,6 +147,33 @@ export function claudeCredentialEnv(
 }
 
 /**
+ * The gateway this instance points the Claude CLI at, as environment
+ * variables.
+ *
+ * `baseUrl` null means talking to Anthropic directly, so nothing is set —
+ * that is also the fallback the picker's static catalog assumes
+ * (`lib/model-catalog.ts`). `modelDiscovery` is exported only alongside a
+ * base URL: the CLI skips discovery entirely when the base URL is unset or
+ * is `api.anthropic.com`, so setting the flag by itself would put something
+ * in the process environment that does nothing — a lie about what this
+ * instance is actually doing.
+ */
+export function claudeGatewayEnv(gateway: {
+  baseUrl: string | null;
+  modelDiscovery: boolean;
+}): Record<string, string> {
+  if (gateway.baseUrl === null) {
+    return {};
+  }
+  return {
+    ANTHROPIC_BASE_URL: gateway.baseUrl,
+    ...(gateway.modelDiscovery
+      ? { CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1" }
+      : {}),
+  };
+}
+
+/**
  * Run one agent turn against the sandbox workspace.
  *
  * Each chunk is written out as it arrives and simultaneously fed to
@@ -211,6 +239,10 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     );
   }
 
+  // The gateway is optional, so unlike the credential above this never
+  // blocks the turn — a null `claudeBaseUrl` just means Anthropic direct.
+  const { claudeBaseUrl, claudeModelDiscovery } = await readInstanceSettings();
+
   const appendSystemPrompt = buildAppendSystemPrompt({
     environmentDetails: options.sandbox.environmentDetails,
     currentBranch: options.sandbox.currentBranch,
@@ -252,6 +284,10 @@ export async function runAgentTurn<UI extends UIMessage>(params: {
     env: {
       ...githubTokenEnv(params.githubToken),
       ...claudeCredentialEnv(claudeCredential),
+      ...claudeGatewayEnv({
+        baseUrl: claudeBaseUrl,
+        modelDiscovery: claudeModelDiscovery,
+      }),
       // Read by the PreToolUse hook, which runs as its own process and has
       // no other way to know where Paco is or who it is acting for.
       ...(params.approval && params.chatId

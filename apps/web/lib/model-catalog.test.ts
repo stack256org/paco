@@ -1,4 +1,7 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BackendCapabilities } from "@paco/agent-backend";
 
 mock.module("server-only", () => ({}));
@@ -90,5 +93,98 @@ describe("isKnownModelId", () => {
 
     expect(isKnownModelId("opus")).toBe(true);
     expect(isKnownModelId("not-a-model")).toBe(false);
+  });
+});
+
+describe("listClaudeModels", () => {
+  let previousPacoHome: string | undefined;
+  let tempHome: string;
+
+  beforeEach(() => {
+    previousPacoHome = process.env.PACO_HOME;
+    tempHome = mkdtempSync(join(tmpdir(), "paco-model-catalog-test-"));
+    process.env.PACO_HOME = tempHome;
+  });
+
+  afterEach(() => {
+    if (previousPacoHome === undefined) {
+      delete process.env.PACO_HOME;
+    } else {
+      process.env.PACO_HOME = previousPacoHome;
+    }
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  test("returns the static tier aliases when no base URL is configured", async () => {
+    const { listClaudeModels } = await modulePromise;
+
+    expect(listClaudeModels(null).map((model) => model.id)).toEqual([
+      "opus",
+      "sonnet",
+      "haiku",
+    ]);
+  });
+
+  /**
+   * A gateway an operator just configured has not been queried by the CLI
+   * yet, so its cache file doesn't exist. This must not empty the picker.
+   */
+  test("falls back to the tier aliases when a base URL is set but the cache is absent", async () => {
+    const { listClaudeModels } = await modulePromise;
+
+    const models = listClaudeModels("https://llm.example.com");
+
+    expect(models.map((model) => model.id)).toEqual([
+      "opus",
+      "sonnet",
+      "haiku",
+    ]);
+  });
+
+  test("falls back to the tier aliases when the cache file is unreadable garbage", async () => {
+    const { listClaudeModels } = await modulePromise;
+
+    const cacheDir = join(tempHome, ".claude", "cache");
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(join(cacheDir, "gateway-models.json"), "not json");
+
+    const models = listClaudeModels("https://llm.example.com");
+
+    expect(models.map((model) => model.id)).toEqual([
+      "opus",
+      "sonnet",
+      "haiku",
+    ]);
+  });
+
+  test("reads the CLI's discovery cache when a base URL is set", async () => {
+    const { listClaudeModels } = await modulePromise;
+
+    const cacheDir = join(tempHome, ".claude", "cache");
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(
+      join(cacheDir, "gateway-models.json"),
+      JSON.stringify({
+        data: [
+          { id: "claude-gateway-a", display_name: "Gateway Model A" },
+          { id: "claude-gateway-b", display_name: "Gateway Model B" },
+        ],
+      }),
+    );
+
+    const models = listClaudeModels("https://llm.example.com");
+
+    expect(models).toEqual([
+      {
+        id: "claude-gateway-a",
+        name: "Gateway Model A",
+        modelType: "language",
+      },
+      {
+        id: "claude-gateway-b",
+        name: "Gateway Model B",
+        modelType: "language",
+      },
+    ]);
   });
 });

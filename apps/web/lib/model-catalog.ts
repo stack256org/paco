@@ -1,5 +1,8 @@
 import "server-only";
 
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { BackendCapabilities } from "@paco/agent-backend";
 import type { AvailableModel } from "./models";
 
@@ -57,6 +60,82 @@ const CLAUDE_MODELS: AvailableModel[] = [
 export const CLAUDE_MODEL_IDS: readonly string[] = CLAUDE_MODELS.map(
   (model) => model.id,
 );
+
+interface GatewayModelCacheEntry {
+  id: string;
+  display_name?: string;
+}
+
+/**
+ * Where the CLI caches a gateway's model list, after the `/v1/models`
+ * discovery request it runs itself
+ * (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, set in
+ * `lib/agent/run-step.ts`'s `claudeGatewayEnv`).
+ *
+ * `PACO_HOME` is the same env var `lib/memory/paths.ts` resolves for Paco's
+ * own data dir — the packaged install sets it to the `paco` service
+ * account's home directory, which is also `$HOME` for the spawned CLI
+ * process. So this is genuinely the same `~/.claude` the CLI itself writes
+ * to, not a second guess at its location.
+ */
+function gatewayModelCachePath(): string {
+  return join(
+    process.env.PACO_HOME ?? homedir(),
+    ".claude",
+    "cache",
+    "gateway-models.json",
+  );
+}
+
+/**
+ * Parse the CLI's discovery cache into this app's model shape.
+ *
+ * Returns `null` — never an empty array — for anything short of a file that
+ * parses into the documented `{"data": [...]}` shape, so the caller has one
+ * place to decide "fall back to the static aliases" instead of two (a
+ * missing file, and a file present but unreadable or malformed).
+ */
+function readGatewayModelCache(): AvailableModel[] | null {
+  let raw: string;
+  try {
+    raw = readFileSync(gatewayModelCachePath(), "utf-8");
+  } catch {
+    // Absent, or unreadable (permissions, not-yet-created directory) — the
+    // gateway simply hasn't been queried yet.
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { data?: unknown };
+    if (!Array.isArray(parsed.data)) {
+      return null;
+    }
+    return (parsed.data as GatewayModelCacheEntry[]).map((entry) => ({
+      id: entry.id,
+      name: entry.display_name ?? entry.id,
+      modelType: "language",
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The models to offer when talking to Claude, reflecting this instance's
+ * own gateway configuration.
+ *
+ * `baseUrl` null means Anthropic direct, so this returns the static tier
+ * aliases above unchanged. A configured base URL switches to the CLI's own
+ * discovery cache, falling back to the aliases when that cache is absent or
+ * unreadable — a gateway an operator just configured, and that the CLI has
+ * not queried yet, must not leave the picker with nothing to choose.
+ */
+export function listClaudeModels(baseUrl: string | null): AvailableModel[] {
+  if (baseUrl === null) {
+    return CLAUDE_MODELS;
+  }
+  return readGatewayModelCache() ?? CLAUDE_MODELS;
+}
 
 /**
  * Every model this build knows about.

@@ -21,8 +21,20 @@ let claudeCredential: {
   value: string;
 } | null = { kind: "api_key", value: "test-anthropic-key" };
 
+/**
+ * The instance's gateway configuration, mutable per test for the same reason
+ * as `claudeCredential` above. Defaults to "no gateway" — Anthropic direct —
+ * so every test that doesn't care about the gateway sees the same
+ * unconfigured state `readInstanceSettings()` returns on a fresh instance.
+ */
+let claudeGatewaySettings: {
+  claudeBaseUrl: string | null;
+  claudeModelDiscovery: boolean;
+} = { claudeBaseUrl: null, claudeModelDiscovery: false };
+
 mock.module("@/lib/settings/instance-settings", () => ({
   readClaudeCredential: () => Promise.resolve(claudeCredential),
+  readInstanceSettings: () => Promise.resolve(claudeGatewaySettings),
 }));
 
 /**
@@ -341,6 +353,44 @@ describe("runAgentTurn", () => {
     expect(env.PACO_APPROVAL_URL).toBe("https://example.test/approve");
     expect(env.PACO_APPROVAL_TOKEN).toBe("approval-token-xyz");
     expect(env.PACO_APPROVAL_CHAT_ID).toBe("chat-123");
+    // No gateway configured in this fixture (the default from
+    // `claudeGatewaySettings`), so nothing gateway-related reaches the turn.
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined();
+  });
+
+  test("forwards the configured gateway into the turn's environment", async () => {
+    const { runAgentTurn } = await modulePromise;
+
+    const backend = createSpyBackend();
+    const previousGatewaySettings = claudeGatewaySettings;
+    claudeGatewaySettings = {
+      claudeBaseUrl: "https://llm.example.com",
+      claudeModelDiscovery: true,
+    };
+
+    try {
+      await runAgentTurn<UIMessage>({
+        prompt: "hi",
+        options: makeOptions(),
+        messageId: "assistant-42",
+        originalMessages: [],
+        backend,
+        onChunk: async () => {
+          // no-op
+        },
+      });
+
+      const backendOptions = backend.lastCtx?.backendOptions as Record<
+        string,
+        unknown
+      >;
+      const env = backendOptions.env as Record<string, string>;
+      expect(env.ANTHROPIC_BASE_URL).toBe("https://llm.example.com");
+      expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1");
+    } finally {
+      claudeGatewaySettings = previousGatewaySettings;
+    }
   });
 
   test("a backend that names model ids is not handed the picker's Claude tier alias", async () => {
@@ -494,10 +544,12 @@ describe("runAgentTurn", () => {
       },
     });
 
-    // `startTurn` and the `onSteer` registration both happen synchronously
-    // inside `runAgentTurn`, before its first `await` — so this is already
-    // set by the time the call above returns a promise. Awaiting a resolved
-    // promise first keeps the assertion robust even if that ever changes.
+    // `startTurn` and the `onSteer` registration happen synchronously inside
+    // `runAgentTurn`, after its two pre-run reads (`readClaudeCredential`,
+    // `readInstanceSettings`) resolve — each a microtask tick even though
+    // both promises are already resolved here. Flushing the same number of
+    // ticks is what makes this assertion robust rather than timing-dependent.
+    await Promise.resolve();
     await Promise.resolve();
     expect(registeredSteer).toBeDefined();
 
@@ -593,5 +645,44 @@ describe("claudeCredentialEnv", () => {
     const { claudeCredentialEnv } = await modulePromise;
 
     expect(claudeCredentialEnv(null)).toEqual({});
+  });
+});
+
+describe("claudeGatewayEnv", () => {
+  test("exports nothing when no base URL is set", async () => {
+    const { claudeGatewayEnv } = await modulePromise;
+
+    expect(claudeGatewayEnv({ baseUrl: null, modelDiscovery: false })).toEqual(
+      {},
+    );
+  });
+
+  test("exports the base URL when one is set", async () => {
+    const { claudeGatewayEnv } = await modulePromise;
+
+    const env = claudeGatewayEnv({
+      baseUrl: "https://llm.example.com",
+      modelDiscovery: false,
+    });
+
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://llm.example.com");
+  });
+
+  test("enables discovery only alongside a base URL", async () => {
+    const { claudeGatewayEnv } = await modulePromise;
+
+    // The CLI ignores discovery when the base URL is unset or points at
+    // api.anthropic.com, so setting it alone would be a lie in the process
+    // environment rather than a working feature.
+    expect(claudeGatewayEnv({ baseUrl: null, modelDiscovery: true })).toEqual(
+      {},
+    );
+
+    const env = claudeGatewayEnv({
+      baseUrl: "https://llm.example.com",
+      modelDiscovery: true,
+    });
+
+    expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1");
   });
 });
