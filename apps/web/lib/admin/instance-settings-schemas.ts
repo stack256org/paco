@@ -58,3 +58,27 @@ export const domainSchema = z.object({
     )
     .nullable(),
 });
+
+/**
+ * The one credential the agent runs on. See the schema comment on
+ * `instanceSettings.claudeCredentialKind` for why only one kind is ever
+ * stored.
+ */
+export const claudeCredentialSchema = z.object({
+  kind: z.enum(["api_key", "setup_token"]),
+  value: z.string().trim().min(1, "Enter the credential's value."),
+});
+
+const CLAUDE_BASE_URL_MESSAGE =
+  "Enter the full address, including the scheme — for example https://gateway.example.com.";
+
+export const claudeGatewaySchema = z.object({
+  baseUrl: z
+    .string()
+    .trim()
+    .nullable()
+    .refine((value) => value === null || isUsableAppDomain(value), {
+      message: CLAUDE_BASE_URL_MESSAGE,
+    }),
+  modelDiscovery: z.boolean(),
+});

@@ -485,6 +485,38 @@ export const instanceSettings = pgTable("instance_settings", {
   tlsEnabled: boolean("tls_enabled").notNull().default(false),
   /** Parent domain for preview hostnames, e.g. "previews.example.com". */
   previewBaseDomain: text("preview_base_domain"),
+  /**
+   * The one credential the agent runs on, and which kind it is.
+   *
+   * One, not two. `ANTHROPIC_API_KEY` outranks `CLAUDE_CODE_OAUTH_TOKEN` in
+   * the CLI's precedence and is always used in `-p` mode, which is how every
+   * turn runs — so an instance with both set would silently bill the API
+   * account while the operator believed their subscription token was in use.
+   * Storing one value with its kind makes that state unreachable rather than
+   * documented.
+   *
+   * `api_key` is API billing; `setup_token` is a one-year OAuth token from
+   * `claude setup-token` against a Claude subscription.
+   */
+  claudeCredentialKind: text("claude_credential_kind", {
+    enum: ["api_key", "setup_token"],
+  }),
+  /** Sealed with `lib/crypto/secret-box`, exactly as the GitHub token is. */
+  claudeCredentialSealed: text("claude_credential_sealed"),
+  /**
+   * When the credential was saved.
+   *
+   * A setup token expires after a year and nothing warns: turns simply start
+   * failing with a CLI error. Paco cannot renew it, so surfacing its age is
+   * the whole mitigation.
+   */
+  claudeCredentialSetAt: timestamp("claude_credential_set_at"),
+  /** A gateway speaking the Anthropic Messages format. Null means Anthropic. */
+  claudeBaseUrl: text("claude_base_url"),
+  /** Let the CLI fetch the model list from that gateway. */
+  claudeModelDiscovery: boolean("claude_model_discovery")
+    .notNull()
+    .default(false),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
