@@ -32,7 +32,6 @@ type SandboxStateRecord = { type: "docker"; sandboxName: string } | null;
 
 type TestSession = {
   id: string;
-  userId: string;
   status: "running" | "archived";
   title: string;
   branch: string | null;
@@ -144,7 +143,6 @@ const { resolveChatSandboxRuntime } = await import("./chat-sandbox-runtime");
 
 function resolveRuntime() {
   return resolveChatSandboxRuntime({
-    userId: "u1",
     sessionId: "s1",
     chatId: "c1",
   });
@@ -163,7 +161,6 @@ async function copyForThrownSetupFailure(): Promise<string> {
 beforeEach(() => {
   sessionRecord = {
     id: "s1",
-    userId: "u1",
     status: "running",
     title: "Session",
     branch: "main",

@@ -1,7 +1,6 @@
 "use client";
 
 import { AlertTriangle, Loader2, ShieldAlert } from "lucide-react";
-import Link from "next/link";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -14,29 +13,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useSession } from "@/hooks/use-session";
 import { revokeAllGitHubTokens } from "@/lib/admin/actions";
 import { CertificateSection } from "./certificate-section";
 import { DomainSection } from "./domain-section";
-import { SmtpSection } from "./smtp-section";
 import { StorageSection } from "./storage-section";
-
-function NotFoundState() {
-  return (
-    <div className="flex flex-col items-center justify-center py-24 text-center">
-      <p className="text-4xl font-bold">404</p>
-      <p className="mt-2 max-w-sm text-sm text-base-content/60">
-        This page could not be found. If you were looking for your own settings,
-        they are back this way.
-      </p>
-      {/* A bare 404 inside the settings shell left no way out but the browser's
-          back button — the sidebar is hidden at this width. */}
-      <Button asChild className="mt-4" size="sm" variant="outline">
-        <Link href="/settings/profile">Back to Settings</Link>
-      </Button>
-    </div>
-  );
-}
 
 function AdminPageContent() {
   const [revokeTarget, setRevokeTarget] = useState<"github" | null>(null);
@@ -77,8 +57,6 @@ function AdminPageContent() {
       <DomainSection />
 
       <CertificateSection />
-
-      <SmtpSection />
 
       <StorageSection />
 
@@ -169,15 +147,5 @@ function AdminPageContent() {
 }
 
 export default function AdminPage() {
-  const { isAdmin, loading } = useSession();
-
-  if (loading) {
-    return null;
-  }
-
-  if (!isAdmin) {
-    return <NotFoundState />;
-  }
-
   return <AdminPageContent />;
 }

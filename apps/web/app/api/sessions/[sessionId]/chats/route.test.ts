@@ -1,19 +1,9 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type OwnedSessionResult =
   | {
       ok: true;
-      sessionRecord: { id: string };
+      sessionRecord: { id: string; userId: string };
     }
   | {
       ok: false;
@@ -32,15 +22,9 @@ type ChatRecord = {
   modelId: string;
 };
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
 let ownedSessionResult: OwnedSessionResult = {
   ok: true,
-  sessionRecord: { id: "session-1" },
-};
-let currentSession: {
-  user: { id: string; email?: string; username?: string };
-} | null = {
-  user: { id: "user-1" },
+  sessionRecord: { id: "session-1", userId: "user-1" },
 };
 
 let chatSummaries: ChatSummary[] = [{ id: "chat-1", title: "Chat 1" }];
@@ -52,7 +36,7 @@ let createdChat: ChatRecord = {
   modelId: "model-default",
 };
 
-const getSummaryCalls: Array<{ sessionId: string; userId: string }> = [];
+const getSummaryCalls: string[] = [];
 const createChatCalls: Array<{
   id: string;
   sessionId: string;
@@ -61,7 +45,6 @@ const createChatCalls: Array<{
 }> = [];
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSession: async () => ownedSessionResult,
 }));
 
@@ -69,13 +52,9 @@ mock.module("nanoid", () => ({
   nanoid: () => "generated-chat-id",
 }));
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentSession,
-}));
-
 mock.module("@/lib/db/sessions", () => ({
-  getChatSummariesBySessionId: async (sessionId: string, userId: string) => {
-    getSummaryCalls.push({ sessionId, userId });
+  getChatSummariesBySessionId: async (sessionId: string) => {
+    getSummaryCalls.push(sessionId);
     return chatSummaries;
   },
   getChatById: async () => existingChat,
@@ -120,12 +99,10 @@ function createJsonRequest(body: unknown): Request {
 
 describe("/api/sessions/[sessionId]/chats", () => {
   beforeEach(() => {
-    authResult = { ok: true, userId: "user-1" };
     ownedSessionResult = {
       ok: true,
-      sessionRecord: { id: "session-1" },
+      sessionRecord: { id: "session-1", userId: "user-1" },
     };
-    currentSession = { user: { id: "user-1" } };
     chatSummaries = [{ id: "chat-1", title: "Chat 1" }];
     existingChat = null;
     createdChat = {
@@ -138,34 +115,12 @@ describe("/api/sessions/[sessionId]/chats", () => {
     createChatCalls.length = 0;
   });
 
-  test("GET returns auth error from session guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { GET } = await routeModulePromise;
-
-    const response = await GET(
-      new Request("http://localhost/api/sessions/session-1/chats"),
-      createContext(),
-    );
-
-    expect(response.status).toBe(401);
-    expect(getSummaryCalls).toHaveLength(0);
-  });
-
-  test("GET returns ownership error from session guard", async () => {
+  test("GET returns not-found error from session guard", async () => {
     ownedSessionResult = {
       ok: false,
       response: Response.json(
-        {
-          error:
-            "This isn't yours to open. Check you're signed in to the right account.",
-        },
-        { status: 403 },
+        { error: "We couldn't find that session. It may have been deleted." },
+        { status: 404 },
       ),
     };
     const { GET } = await routeModulePromise;
@@ -175,7 +130,7 @@ describe("/api/sessions/[sessionId]/chats", () => {
       createContext(),
     );
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
     expect(getSummaryCalls).toHaveLength(0);
   });
 
@@ -194,9 +149,7 @@ describe("/api/sessions/[sessionId]/chats", () => {
     expect(response.status).toBe(200);
     expect(body.chats).toEqual(chatSummaries);
     expect(body.defaultModelId).toBe("model-default");
-    expect(getSummaryCalls).toEqual([
-      { sessionId: "session-1", userId: "user-1" },
-    ]);
+    expect(getSummaryCalls).toEqual(["session-1"]);
   });
 
   test("POST returns 400 when provided chat id is invalid", async () => {

@@ -41,36 +41,3 @@ export function previewHostname(
 
   return `${previewSlug(chatId)}.${trimmed}`;
 }
-
-/**
- * The inverse of `previewHostname`: recover a chat's slug from a full host,
- * given the configured base domain — or `null` when the host does not
- * actually belong to that domain.
- *
- * This is the check `/api/preview-auth` (`route.ts`) and its `/grant`
- * companion both need before trusting anything derived from an incoming
- * `Host`/`X-Forwarded-Host` value. Taking just the leading label
- * (`host.split(".")[0]`) — what the route used to do — accepts *any* host
- * with at least one dot: a request claiming to be
- * `<real-slug>.attacker.example` would extract the same slug as the
- * legitimate `<real-slug>.<configured-base-domain>`, without the base
- * domain ever being consulted. Requiring the full `.<baseDomain>` suffix is
- * what makes the extracted label trustworthy enough to look up.
- */
-export function previewSlugFromHost(
-  host: string,
-  baseDomain: string | null,
-): string | null {
-  const trimmedBase = baseDomain?.trim();
-  if (!trimmedBase) {
-    return null;
-  }
-
-  const suffix = `.${trimmedBase}`;
-  if (!host.endsWith(suffix)) {
-    return null;
-  }
-
-  const label = host.slice(0, -suffix.length);
-  return label.length > 0 ? label : null;
-}

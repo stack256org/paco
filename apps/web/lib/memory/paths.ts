@@ -54,12 +54,24 @@ export function projectMemoryDir(sessionWorkspaceRepoDir: string): string {
   return path.join(sessionWorkspaceRepoDir, ".paco", "memory");
 }
 
-/** User-scope memory directory: in Paco's data dir, keyed by user id. */
-export function userMemoryDir(userId: string): string {
-  return path.join(dataDir(), "memory", "users", userId);
-}
-
-/** Org-scope memory directory: in Paco's data dir, keyed by org id. */
-export function orgMemoryDir(organizationId: string): string {
-  return path.join(dataDir(), "memory", "orgs", organizationId);
+/**
+ * Instance-scope memory directory: in Paco's data dir, shared by the whole
+ * instance rather than keyed by any id.
+ *
+ * This used to be two scopes — user (keyed by user id) and organisation
+ * (keyed by org id) — before Phase C removed application-level identity.
+ * With exactly one tenant left, "this user's memory" and "this org's
+ * memory" were already the same set of facts, so they collapse into one
+ * directory rather than staying two ids that always resolve to the same
+ * instance.
+ *
+ * Nothing migrates the old directories. An instance upgrading from an
+ * earlier version starts with an empty `memory/instance`, and whatever it
+ * had under `memory/users/<userId>` and `memory/orgs/<orgId>` is left on
+ * disk, untouched and unread — merging two users' memories into one is a
+ * decision this code cannot make correctly, so it declines to guess rather
+ * than pick a wrong answer silently.
+ */
+export function instanceMemoryDir(): string {
+  return path.join(dataDir(), "memory", "instance");
 }

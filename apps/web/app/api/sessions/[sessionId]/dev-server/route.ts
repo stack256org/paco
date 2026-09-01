@@ -7,10 +7,7 @@ import {
 } from "@/lib/sandbox/runtime-files";
 import { stopProcessGroup } from "@/lib/sandbox/process-control";
 import { connectSandbox } from "@paco/sandbox";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionWithSandboxGuard,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionWithSandboxGuard } from "@/app/api/sessions/_lib/session-context";
 import { DEFAULT_SANDBOX_PORTS } from "@/lib/sandbox/config";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 import {
@@ -1139,11 +1136,9 @@ async function resolveDevServerTarget(
 
 async function connectDevServerSandboxForSession(
   sessionId: string,
-  userId: string,
   chatId: string | null,
 ) {
   const sessionContext = await requireOwnedSessionWithSandboxGuard({
-    userId,
     sessionId,
     sandboxGuard: isSandboxActive,
     sandboxErrorMessage: WORKSPACE_ASLEEP_DEV_SERVER,
@@ -1186,18 +1181,12 @@ async function connectDevServerSandboxForSession(
  * check is the port, not a pid file, so a server nobody told Paco about counts.
  */
 export async function GET(request: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
   const searchParams = new URL(request.url).searchParams;
 
   try {
     const sandboxResult = await connectDevServerSandboxForSession(
       sessionId,
-      authResult.userId,
       searchParams.get("chatId"),
     );
     if (!sandboxResult.ok) {
@@ -1248,17 +1237,11 @@ export async function GET(request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
 
   try {
     const sandboxResult = await connectDevServerSandboxForSession(
       sessionId,
-      authResult.userId,
       new URL(request.url).searchParams.get("chatId"),
     );
     if (!sandboxResult.ok) {
@@ -1393,17 +1376,11 @@ export async function POST(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(request: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
 
   try {
     const sandboxResult = await connectDevServerSandboxForSession(
       sessionId,
-      authResult.userId,
       new URL(request.url).searchParams.get("chatId"),
     );
     if (!sandboxResult.ok) {

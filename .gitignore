@@ -45,3 +45,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # open-agents dev server artifacts
 .open-agents-dev-server-state.json
 .open-agents-dev-server-*.pid
+
+# Subagent-driven-development scratch: ledgers, briefs, review packages.
+# Per-run working notes, never part of the source tree.
+.superpowers/
+
+# Locally built packages — build-deb.sh writes these to the repo root.
+*.deb

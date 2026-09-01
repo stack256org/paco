@@ -18,7 +18,7 @@ import { canTransition, nextForPlanRoot, nextOnReviewerVerdict } from "./state";
  * matches `running` — and the board renders no action for `review`).
  *
  * `blocked → todo` is the same human unblock for a task that never started:
- * a proposal (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is BORN
+ * a proposal (`lib/memory/reflect.ts`) is BORN
  * `blocked` with no chat, so there is no turn to resume — releasing it into
  * the backlog is what unblocking it means (`unblockTaskAction` then starts
  * it, and a start that fails leaves it in `todo`, where the board offers

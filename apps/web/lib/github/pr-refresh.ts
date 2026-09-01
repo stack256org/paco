@@ -110,7 +110,6 @@ async function refreshOne(
  * on a machine that is also running a coding agent.
  */
 export async function refreshPullRequests(params: {
-  userId: string;
   sessions: RefreshableSession[];
   now?: number;
 }): Promise<PullRequestRefresh[]> {
@@ -121,7 +120,7 @@ export async function refreshPullRequests(params: {
     return [];
   }
 
-  const token = await getGithubToken(params.userId);
+  const token = await getGithubToken();
   if (!token) {
     return [];
   }

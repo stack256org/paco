@@ -9,7 +9,6 @@ import {
   type WorkspaceReclaimResult,
 } from "@/lib/reaping/reclaim";
 import type { StorageReport } from "@/lib/reaping/types";
-import { requireAdmin } from "./require-admin";
 
 /**
  * What the admin page is allowed to ask for.
@@ -31,15 +30,12 @@ const reclaimWorkspaceSchema = z.object({
 });
 
 export async function getStorageReport(): Promise<StorageReport> {
-  await requireAdmin();
   return buildStorageReport();
 }
 
 export async function reclaimContainerGroup(
   group: unknown,
 ): Promise<ContainerReclaimResult & { ok: boolean; error?: string }> {
-  await requireAdmin();
-
   const parsed = containerGroupSchema.safeParse(group);
   if (!parsed.success) {
     return {
@@ -58,8 +54,6 @@ export async function reclaimContainerGroup(
 export async function reclaimWorkspaceDirectory(
   input: unknown,
 ): Promise<WorkspaceReclaimResult> {
-  await requireAdmin();
-
   const parsed = reclaimWorkspaceSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false, error: "That isn't a workspace Paco can remove." };

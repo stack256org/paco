@@ -1,21 +1,11 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 mock.module("server-only", () => ({}));
 
 /**
  * The model list is static: the Claude Code CLI resolves a tier alias to the
  * current model in that tier, and Poolside's ids come from its package
- * constant, so there is no catalog to fetch and no metadata to enrich. These
- * tests cover what the route still decides — which models a given session is
- * allowed to see.
+ * constant, so there is no catalog to fetch and no metadata to enrich.
  */
-
-let currentSession: {
-  user: { id: string; email?: string; username?: string };
-} | null = null;
-
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentSession,
-}));
 
 const routeModulePromise = import("./route");
 
@@ -35,16 +25,6 @@ async function getModels(): Promise<ModelsResponse> {
 }
 
 describe("/api/models", () => {
-  beforeEach(() => {
-    currentSession = {
-      user: {
-        id: "user-1",
-        email: "user@example.com",
-        username: "user",
-      },
-    };
-  });
-
   test("returns the Claude model tiers", async () => {
     const body = await getModels();
 
@@ -84,14 +64,5 @@ describe("/api/models", () => {
       expect(model.cost?.input).toBeGreaterThan(0);
       expect(model.cost?.output).toBeGreaterThan(0);
     }
-  });
-
-  test("serves the list without a session", async () => {
-    // Static model names with no per-user data, so it is not gated on auth.
-    currentSession = null;
-
-    const body = await getModels();
-
-    expect(body.models.map((model) => model.id)).toContain("opus");
   });
 });

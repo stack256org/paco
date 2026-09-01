@@ -1,6 +1,5 @@
 import { connectSandbox, type SandboxState } from "@paco/sandbox";
 import {
-  requireAuthenticatedUser,
   requireOwnedSession,
   type SessionRecord,
 } from "@/app/api/sessions/_lib/session-context";
@@ -29,13 +28,8 @@ import {
   getSessionSandboxName,
   hasResumableSandboxState,
 } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
-import {
-  BAD_REQUEST,
-  GITHUB_NOT_CONNECTED,
-  SIGNED_OUT,
-} from "@/lib/error-copy";
+import { BAD_REQUEST, GITHUB_NOT_CONNECTED } from "@/lib/error-copy";
 
 interface CreateSandboxRequest {
   repoUrl?: string;
@@ -82,14 +76,8 @@ export async function POST(req: Request) {
     return Response.json({ error: BAD_REQUEST }, { status: 400 });
   }
 
-  // Get session for auth
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["sandbox-create", session.user.id]),
+    key: rateLimitKey(["sandbox-create"]),
     limit: 20,
     windowMs: 60_000,
   });
@@ -97,12 +85,9 @@ export async function POST(req: Request) {
     return limited;
   }
 
-  // Validate session ownership before minting any short-lived setup tokens.
+  // Validate the session exists before minting any short-lived setup tokens.
   let sessionRecord: SessionRecord | undefined;
-  const sessionContext = await requireOwnedSession({
-    userId: session.user.id,
-    sessionId,
-  });
+  const sessionContext = await requireOwnedSession({ sessionId });
   if (!sessionContext.ok) {
     return sessionContext.response;
   }
@@ -136,7 +121,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const token = await getGithubToken(session.user.id);
+    const token = await getGithubToken();
     if (!token) {
       return Response.json({ error: GITHUB_NOT_CONNECTED }, { status: 400 });
     }
@@ -150,9 +135,9 @@ export async function POST(req: Request) {
 
   let sandbox: Awaited<ReturnType<typeof connectSandbox>>;
   try {
-    const identity = await getGitIdentity(session.user.id);
+    const identity = await getGitIdentity();
     const gitUser = {
-      name: session.user.name?.trim() || identity.name,
+      name: identity.name,
       email: identity.email,
     };
 
@@ -232,13 +217,8 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const limited = await checkRateLimit({
-    key: rateLimitKey(["sandbox-delete", authResult.userId]),
+    key: rateLimitKey(["sandbox-delete"]),
     limit: 10,
     windowMs: 60_000,
   });
@@ -265,7 +245,6 @@ export async function DELETE(req: Request) {
   const { sessionId } = body as { sessionId: string };
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {

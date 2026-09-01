@@ -1,7 +1,4 @@
-import {
-  requireAuthenticatedUser,
-  requireOwnedSession,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSession } from "@/app/api/sessions/_lib/session-context";
 import type { DiffResponse } from "../route";
 
 type RouteContext = {
@@ -15,15 +12,9 @@ export type CachedDiffResponse = {
 };
 
 export async function GET(_req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {

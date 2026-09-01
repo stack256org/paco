@@ -40,9 +40,6 @@ async function registerReflectionJob(): Promise<void> {
     async (jobs: Array<{ data: object }>) => {
       for (const _job of jobs) {
         const organization = await getOrganization();
-        if (!organization) {
-          continue;
-        }
         await reflectOnRecentSessions({ organizationId: organization.id });
       }
     },

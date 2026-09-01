@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 mock.module("server-only", () => ({}));
 
-let sessionRecord: { userId: string } | null = null;
+let sessionRecord: { id: string } | null = null;
 let chats: Array<{ id: string }> = [];
-let userRecord: { name: string | null; username: string | null } | null = null;
 let githubProfile: { login: string } | null = null;
 
 const originalAppUrl = process.env.APP_URL;
@@ -29,23 +28,12 @@ mock.module("@/lib/db/github-tokens", () => ({
   getGithubConnection: async () => githubProfile,
 }));
 
-mock.module("@/lib/db/client", () => ({
-  db: {
-    query: {
-      users: {
-        findFirst: async () => userRecord,
-      },
-    },
-  },
-}));
-
 const prContentModulePromise = import("./pr-content");
 
 describe("pr-content", () => {
   beforeEach(() => {
     sessionRecord = null;
     chats = [];
-    userRecord = null;
     githubProfile = null;
     restoreEnv();
   });
@@ -57,9 +45,8 @@ describe("pr-content", () => {
   test("resolvePullRequestContextSection returns a single-line footer with chat link and attribution", async () => {
     const { resolvePullRequestContextSection } = await prContentModulePromise;
 
-    sessionRecord = { userId: "user-1" };
+    sessionRecord = { id: "session-1" };
     chats = [{ id: "chat-2" }, { id: "chat-1" }];
-    userRecord = { name: "Nico Albanese", username: "nico" };
     githubProfile = { login: "nicoalbanese10" };
 
     const section = await resolvePullRequestContextSection({
@@ -68,21 +55,20 @@ describe("pr-content", () => {
     });
 
     expect(section).toBe(
-      "[Chat](https://paco.local/sessions/session-1/chats/chat-2) - Built with guidance from [Nico Albanese](https://github.com/nicoalbanese10)",
+      "[Chat](https://paco.local/sessions/session-1/chats/chat-2) - Built with guidance from [nicoalbanese10](https://github.com/nicoalbanese10)",
     );
   });
 
-  test("resolvePullRequestContextSection falls back to plain-text attribution when no GitHub account exists", async () => {
+  test("resolvePullRequestContextSection omits attribution when no GitHub account is connected", async () => {
     const { resolvePullRequestContextSection } = await prContentModulePromise;
 
-    sessionRecord = { userId: "user-1" };
-    userRecord = { name: null, username: "nico" };
+    sessionRecord = { id: "session-1" };
 
     const section = await resolvePullRequestContextSection({
       sessionId: "session-1",
     });
 
-    expect(section).toBe("Built with guidance from nico");
+    expect(section).toBe("");
   });
 
   test("resolvePullRequestAppBaseUrl prefers an explicit base url over the configured one", async () => {

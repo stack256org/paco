@@ -1,8 +1,5 @@
 import { generateText } from "@/lib/claude/generate";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSession,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSession } from "@/app/api/sessions/_lib/session-context";
 import type { CheckRun } from "@/lib/github/queries/pr";
 import { getGithubToken } from "@/lib/db/github-tokens";
 import { gh, ghJson } from "@/lib/github/gh";
@@ -186,14 +183,8 @@ async function compactLog(rawLog: string): Promise<string> {
  *   { prompt: string, snippets: { filename: string, content: string }[] }
  */
 export async function POST(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {
@@ -201,7 +192,7 @@ export async function POST(req: Request, context: RouteContext) {
   }
 
   const limited = await checkRateLimit({
-    key: rateLimitKey(["fix-checks", authResult.userId, sessionId]),
+    key: rateLimitKey(["fix-checks", sessionId]),
     limit: 5,
     windowMs: 60_000,
   });
@@ -244,7 +235,7 @@ export async function POST(req: Request, context: RouteContext) {
   const allAnnotations: Record<string, CheckAnnotation[]> = {};
 
   if (runsWithIds.length > 0) {
-    const token = await getGithubToken(authResult.userId);
+    const token = await getGithubToken();
     if (!token) {
       return Response.json(
         formatFixResponse(checkRuns, compactedLogs, allAnnotations),

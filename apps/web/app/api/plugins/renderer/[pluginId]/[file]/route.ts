@@ -1,9 +1,7 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import { getPlugin } from "@/lib/db/plugins";
-import { SIGNED_OUT } from "@/lib/error-copy";
 import { pluginDir } from "@/lib/plugins/install";
-import { getServerSession } from "@/lib/session/get-server-session";
 
 /**
  * Serves an enabled plugin's `renderers/<file>.html` — the ONE place
@@ -18,10 +16,6 @@ import { getServerSession } from "@/lib/session/get-server-session";
  *
  * Everything below happens in a fixed order for a reason:
  *
- * 0. A signed-in session is required, same as every other app route — the
- *    served HTML isn't user-specific, but there is no reason to serve it to
- *    an unauthenticated caller, and skipping this would let anyone who
- *    guesses an enabled plugin id + filename fetch it directly.
  * 1. Both path segments are validated against a strict allowlist BEFORE
  *    any `fs`/db call touches them. Neither pattern permits `/`, so a
  *    traversal payload like `..%2f..%2fetc%2fpasswd` (which Next.js
@@ -158,11 +152,6 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ pluginId: string; file: string }> },
 ) {
-  const session = await getServerSession();
-  if (!session?.user) {
-    return Response.json({ error: SIGNED_OUT }, { status: 401 });
-  }
-
   const { pluginId, file } = await params;
 
   // Step 1: allowlist both segments before any fs or db call sees them.

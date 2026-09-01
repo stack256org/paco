@@ -428,7 +428,7 @@ export async function runEvalScenario(
       });
     }
 
-    const preferences = await getUserPreferences(session.userId);
+    const preferences = await getUserPreferences();
     const chat = await createChat({
       id: nanoid(),
       sessionId,
@@ -441,7 +441,6 @@ export async function runEvalScenario(
     const outcome = await submitChatMessage({
       chatId: chat.id,
       sessionId,
-      userId: session.userId,
       messages: [
         {
           id: userMessageId,
@@ -450,7 +449,6 @@ export async function runEvalScenario(
         },
       ],
       requestUrl: "internal://evals/run",
-      authSession: null,
       sessionStatus: session.status,
       activeStreamId: chat.activeStreamId ?? null,
       maxSteps: scenario.maxTurns,

@@ -130,18 +130,6 @@ describe("startReflectionJob", () => {
 
     expect(reflectCalls).toEqual([{ organizationId: "org-1" }]);
   });
-
-  test("the worker no-ops when there is no organization yet", async () => {
-    organization = null;
-    const { startReflectionJob } = await import(
-      `./reflection-job?case=${Math.random()}`
-    );
-
-    await startReflectionJob();
-    await workHandler?.([{ data: {} }]);
-
-    expect(reflectSpy).not.toHaveBeenCalled();
-  });
 });
 
 /**

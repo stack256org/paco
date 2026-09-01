@@ -30,8 +30,8 @@ import { UnblockTaskDialog } from "./unblock-task-dialog";
  * A client component fetching its own data, same shape as
  * `AgentsPageContent` (`app/settings/agents/agents-page-content.tsx`): every
  * mutation refreshes this same in-memory list without a full page reload,
- * and every action still re-checks org membership and the state machine
- * server-side regardless of what this component assumes.
+ * and every action still re-checks the state machine server-side regardless
+ * of what this component assumes.
  */
 export function TaskBoard() {
   const [tasks, setTasks] = useState<TaskBoardItem[] | null>(null);

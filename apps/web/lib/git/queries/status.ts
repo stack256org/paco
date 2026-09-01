@@ -5,13 +5,7 @@ import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById } from "@/lib/db/sessions";
 import { isSafeBranchName } from "@/lib/git/helpers";
 import { isSandboxActive } from "@/lib/sandbox/utils";
-import { getServerSession } from "@/lib/session/get-server-session";
-import {
-  NOT_YOURS,
-  SESSION_NOT_FOUND,
-  SIGNED_OUT,
-  WORKSPACE_NOT_STARTED,
-} from "@/lib/error-copy";
+import { SESSION_NOT_FOUND, WORKSPACE_NOT_STARTED } from "@/lib/error-copy";
 
 // ---- types ----
 
@@ -83,21 +77,10 @@ function parseRemoteRef(output: string): string | null {
   return match[1];
 }
 
-async function requireAuth() {
-  const session = await getServerSession();
-  if (!session?.user) {
-    throw new Error(SIGNED_OUT);
-  }
-  return session;
-}
-
-async function requireOwnedSession(userId: string, sessionId: string) {
+async function requireSession(sessionId: string) {
   const sessionRecord = await getSessionById(sessionId);
   if (!sessionRecord) {
     throw new Error(SESSION_NOT_FOUND);
-  }
-  if (sessionRecord.userId !== userId) {
-    throw new Error(NOT_YOURS);
   }
   return sessionRecord;
 }
@@ -111,8 +94,7 @@ export async function getGitStatus(params: {
 }): Promise<SessionGitStatus | null> {
   const { sessionId } = params;
 
-  const session = await requireAuth();
-  const sessionRecord = await requireOwnedSession(session.user.id, sessionId);
+  const sessionRecord = await requireSession(sessionId);
 
   if (!isSandboxActive(sessionRecord.sandboxState)) {
     throw new Error(WORKSPACE_NOT_STARTED);

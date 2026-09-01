@@ -1,22 +1,13 @@
 import { getChatMessages, getChatsBySessionId } from "@/lib/db/sessions";
 
-export function generateBranchName(
-  username: string,
-  name?: string | null,
-): string {
-  let initials = "nb";
-  if (name) {
-    initials =
-      name
-        .split(" ")
-        .map((part) => part[0]?.toLowerCase() ?? "")
-        .join("")
-        .slice(0, 2) || "nb";
-  } else if (username) {
-    initials = username.slice(0, 2).toLowerCase();
-  }
+/**
+ * A fresh, unclaimed branch name. Used to be prefixed with initials derived
+ * from whoever was signed in; there is no signed-in identity left to derive
+ * that from, so every generated branch shares the same `nb/` prefix now.
+ */
+export function generateBranchName(): string {
   const randomSuffix = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-  return `${initials}/${randomSuffix}`;
+  return `nb/${randomSuffix}`;
 }
 
 /**

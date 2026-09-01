@@ -1,8 +1,5 @@
 import { z } from "zod";
-import {
-  requireAuthenticatedUser,
-  requireOwnedChatById,
-} from "@/app/api/chat/_lib/chat-context";
+import { requireOwnedChatById } from "@/app/api/chat/_lib/chat-context";
 import {
   type ApprovalRequest,
   listPendingApprovals,
@@ -14,9 +11,7 @@ import { BAD_REQUEST } from "@/lib/error-copy";
  * What this chat's agent is waiting for permission to do, and the answer.
  *
  * Separate from the internal endpoint the hook blocks on: this one is called
- * by the browser and is authenticated as the user who owns the chat. Ownership
- * matters more than usual here — answering is what lets a shell command run on
- * the host.
+ * by the browser. Answering is what lets a shell command run on the host.
  */
 
 type RouteContext = {
@@ -33,13 +28,8 @@ const decisionSchema = z.object({
 });
 
 export async function GET(_request: Request, context: RouteContext) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const { chatId } = await context.params;
-  const chat = await requireOwnedChatById({ userId: auth.userId, chatId });
+  const chat = await requireOwnedChatById({ chatId });
   if (!chat.ok) {
     return chat.response;
   }
@@ -50,13 +40,8 @@ export async function GET(_request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const { chatId } = await context.params;
-  const chat = await requireOwnedChatById({ userId: auth.userId, chatId });
+  const chat = await requireOwnedChatById({ chatId });
   if (!chat.ok) {
     return chat.response;
   }

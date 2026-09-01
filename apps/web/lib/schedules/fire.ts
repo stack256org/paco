@@ -84,7 +84,6 @@ export async function fireSchedule(
     goal: schedule.goal,
     assignedAgent: schedule.assignedAgent,
     origin: "schedule",
-    createdBy: schedule.createdBy,
   });
 
   await stampScheduleFired(schedule.organizationId, schedule.id, new Date());

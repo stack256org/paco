@@ -1,9 +1,6 @@
 import { posix } from "node:path";
 import { connectSandbox, type Sandbox, type SandboxState } from "@paco/sandbox";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionWithSandboxGuard,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionWithSandboxGuard } from "@/app/api/sessions/_lib/session-context";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { updateSession } from "@/lib/db/sessions";
 import { buildHibernatedLifecycleUpdate } from "@/lib/sandbox/lifecycle";
@@ -158,9 +155,8 @@ interface RequireWorkspaceFileAccessParams {
 }
 
 /**
- * Resolve everything a workspace file request needs: the caller is
- * authenticated, the session is theirs, its sandbox is live, and the chat's
- * working directory is known.
+ * Resolve everything a workspace file request needs: the session exists, its
+ * sandbox is live, and the chat's working directory is known.
  *
  * A sandbox that has gone away is reported as a 409 and the session is marked
  * hibernated, which is the same contract the rest of the sandbox-backed routes
@@ -171,18 +167,12 @@ export async function requireWorkspaceFileAccess(
 ): Promise<WorkspaceFileAccessResult> {
   const { sessionId, chatId, validateRequest } = params;
 
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return { ok: false, response: authResult.response };
-  }
-
   const validationResponse = validateRequest?.();
   if (validationResponse) {
     return { ok: false, response: validationResponse };
   }
 
   const sessionContext = await requireOwnedSessionWithSandboxGuard({
-    userId: authResult.userId,
     sessionId,
     sandboxGuard: hasRuntimeSandboxState,
     sandboxErrorMessage: WORKSPACE_NOT_STARTED,

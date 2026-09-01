@@ -9,13 +9,17 @@ import { HealthNotice, UnavailableNotice } from "./health-notice";
 import { SPEND_WINDOW_OPTIONS, useSpendReport } from "./use-spend-report";
 
 /**
- * Per-member spend over a selectable window.
+ * This instance's spend over a selectable window.
  *
  * Reuses the same cost arithmetic as the profile and usage pages
  * (`estimateModelUsageCost`) rather than a second formula. Tokens spent on a
  * model with no published price never fold into the total silently — they
- * are called out and marked on the member that spent them, because a token
- * with no price is unpriced, not free.
+ * are called out instead, because a token with no price is unpriced, not
+ * free.
+ *
+ * Used to break this down per member, joined against `users`. Phase C
+ * removed application-level identity — the instance has exactly one tenant,
+ * so there is nothing left to break a total down by.
  */
 export function SpendCard({
   spend: initialSpend,
@@ -91,46 +95,9 @@ function SpendBody({
         </div>
       </div>
 
-      {spend.perMember.length === 0 ? (
+      {spend.totalTokens === 0 ? (
         <p className="text-sm text-base-content/60">No usage in this window.</p>
-      ) : (
-        <div className="max-w-full overflow-x-auto rounded-box border border-base-content/10">
-          <table className="table table-sm">
-            <thead>
-              <tr>
-                <th>Member</th>
-                <th className="text-right">Tokens</th>
-                <th className="text-right">Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {spend.perMember.map((member) => (
-                <tr key={member.userId}>
-                  <td>{member.username}</td>
-                  <td className="text-right">
-                    {formatTokens(member.inputTokens + member.outputTokens)}
-                  </td>
-                  <td className="text-right">
-                    <span className="inline-flex items-center gap-2">
-                      {formatUsd(member.costUsd)}
-                      {member.unpricedTokens > 0 ? (
-                        <div
-                          className="tooltip"
-                          data-tip={`${formatTokens(member.unpricedTokens)} tokens on an unpriced model`}
-                        >
-                          <span className="badge badge-soft badge-warning badge-sm">
-                            unpriced
-                          </span>
-                        </div>
-                      ) : null}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

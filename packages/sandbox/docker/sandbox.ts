@@ -67,6 +67,41 @@ export function buildContainerLabels(
  * network, untouched. Most sandboxes — anything with no preview configured —
  * have no reason to join Traefik's network at all.
  */
+/**
+ * Where a sandbox's published ports are reachable from.
+ *
+ * **Loopback, always.** A sandbox runs code the agent wrote, and its dev
+ * server is whatever that code started — commonly one that will happily read
+ * files outside the project root (Vite's `/@fs/`), serve source maps, or
+ * expose a `.env` sitting in the served tree.
+ *
+ * Docker binds `0.0.0.0` when `HostIp` is omitted, which would publish every
+ * one of those on every interface of the host, with no password, and with
+ * nginx — the only thing holding the instance password — bypassed entirely.
+ * `HostIp` is therefore not optional here and not a preference; it is the
+ * boundary.
+ *
+ * Nothing is lost by it: the only consumer of a published preview port is the
+ * `proxy_pass http://127.0.0.1:<port>` that `lib/preview/nginx-config.ts`
+ * generates, and nginx runs on the host. The application never connects to
+ * these ports itself.
+ *
+ * `HostPort: "0"` asks Docker for an ephemeral port, so concurrent sandboxes
+ * cannot collide.
+ */
+export function buildPortBindings(
+  ports: readonly number[],
+): Record<string, Array<{ HostIp: string; HostPort: string }>> {
+  const portBindings: Record<
+    string,
+    Array<{ HostIp: string; HostPort: string }>
+  > = {};
+  for (const port of ports) {
+    portBindings[`${port}/tcp`] = [{ HostIp: "127.0.0.1", HostPort: "0" }];
+  }
+  return portBindings;
+}
+
 export function buildNetworkingConfig(
   network: string | undefined,
 ): Docker.ContainerCreateOptions["NetworkingConfig"] | undefined {
@@ -545,13 +580,11 @@ export class DockerSandbox implements Sandbox {
     }
 
     const exposedPorts: Record<string, Record<string, never>> = {};
-    const portBindings: Record<string, Array<{ HostPort: string }>> = {};
     for (const port of ports) {
       exposedPorts[`${port}/tcp`] = {};
-      // HostPort "0" asks Docker for an ephemeral port, which avoids collisions
-      // when several sandboxes run concurrently on one machine.
-      portBindings[`${port}/tcp`] = [{ HostPort: "0" }];
     }
+    // Loopback-only, deliberately — see `buildPortBindings`.
+    const portBindings = buildPortBindings(ports);
 
     const container = await docker.createContainer({
       name: containerName,

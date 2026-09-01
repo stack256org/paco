@@ -24,7 +24,6 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     reviewerRejections: 0,
     origin: "user",
     resultSummary: null,
-    createdBy: null,
     createdAt: new Date("2026-08-25T00:00:00Z"),
     updatedAt: new Date("2026-08-25T00:00:00Z"),
     ...overrides,
@@ -85,8 +84,7 @@ mock.module("@/lib/db/tasks", () => ({
 
 // ── `@/lib/db/sessions` ──────────────────────────────────────────
 
-let sessionRow: { userId: string; status: string } | undefined = {
-  userId: "user-1",
+let sessionRow: { status: string } | undefined = {
   status: "running",
 };
 
@@ -167,7 +165,7 @@ beforeEach(() => {
   taskTreeNode = makeNode();
   parentTask = undefined;
   transitionRunningError = undefined;
-  sessionRow = { userId: "user-1", status: "running" };
+  sessionRow = { status: "running" };
   submitOutcome = { kind: "streaming", runId: "run-1", stream: null };
   submitImpl = async () => submitOutcome;
 
@@ -366,7 +364,6 @@ describe("startTask", () => {
     >;
     expect(input.chatId).toBe("new-chat-id");
     expect(input.sessionId).toBe("session-1");
-    expect(input.userId).toBe("user-1");
     expect(input.sessionStatus).toBe("running");
     expect(input.activeStreamId).toBeNull();
     expect(input.maxSteps).toBe(TASK_DEFAULT_MAX_TURNS);

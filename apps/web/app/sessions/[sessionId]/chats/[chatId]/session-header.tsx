@@ -1,7 +1,7 @@
 "use client";
 
 import { ExternalLink } from "lucide-react";
-import { AppAccountMenu } from "@/components/app-account-menu";
+import { SettingsLink } from "@/components/settings-link";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { useSessionsShell } from "@/app/sessions/sessions-shell-context";
 import { useGitPanel } from "./git-panel-context";
@@ -22,7 +22,6 @@ export function SessionHeader() {
     archivedCount,
     sessionsLoading,
     activeSessionId,
-    currentUser,
     openNewSessionDialog,
     onSessionSelect,
     onSessionPrefetch,
@@ -82,12 +81,12 @@ export function SessionHeader() {
           </div>
         </div>
 
-        {/* Right side: the deployed-preview link, then the account menu */}
+        {/* Right side: the deployed-preview link, then Settings */}
         <div className="flex items-center gap-1">
           {/* Portal target for chat-level header actions */}
           <div ref={headerActionsRef} className="flex items-center" />
 
-          <AppAccountMenu user={currentUser} />
+          <SettingsLink />
         </div>
       </div>
     </header>

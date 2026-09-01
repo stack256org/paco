@@ -1,9 +1,6 @@
 import { createUIMessageStreamResponse, type InferUIMessageChunk } from "ai";
 import { getRun } from "workflow/api";
-import {
-  requireAuthenticatedUser,
-  requireOwnedChatById,
-} from "@/app/api/chat/_lib/chat-context";
+import { requireOwnedChatById } from "@/app/api/chat/_lib/chat-context";
 import type { WebAgentUIMessage } from "@/app/types";
 import { updateChatActiveStreamId } from "@/lib/db/sessions";
 import { createCancelableReadableStream } from "@/lib/chat/create-cancelable-readable-stream";
@@ -43,11 +40,6 @@ function parseStartIndex(request: Request): ParseStartIndexResult {
 }
 
 export async function GET(request: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser("text");
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const parsedStartIndex = parseStartIndex(request);
   if (!parsedStartIndex.ok) {
     return parsedStartIndex.response;
@@ -56,7 +48,6 @@ export async function GET(request: Request, context: RouteContext) {
   const { chatId } = await context.params;
 
   const chatContext = await requireOwnedChatById({
-    userId: authResult.userId,
     chatId,
     format: "text",
   });

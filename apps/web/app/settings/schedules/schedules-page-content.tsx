@@ -2,7 +2,6 @@
 
 import { AlertTriangle, Plus } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSession } from "@/hooks/use-session";
 import { toast } from "@/lib/toast";
 import {
   createScheduleAction,
@@ -21,21 +20,9 @@ import { ScheduleRow as ScheduleRowView } from "./schedule-row";
  *
  * A client component fetching its own data — same shape as
  * `AgentsPageContent` — so every mutation updates this in-memory list
- * without a full page reload. Visible to every org member
- * (`page.tsx` gates on membership, not admin), but write controls
- * (New/Edit/Run now/Delete/the enabled toggle) only render for an admin —
- * `useSession().isAdmin` decides that here, purely for what to show; every
- * action re-checks admin itself server-side (`requireOrgAdmin` in
- * `./actions.ts`), the same defense-in-depth the agents page's docstring
- * describes.
- *
- * The session hook is the only source for that flag. `./actions.ts` briefly
- * also exported a `canManageSchedulesAction` returning the same boolean;
- * nothing here ever called it, and an uncalled `"use server"` export is a
- * POST-able endpoint earning nothing, so it is gone.
+ * without a full page reload.
  */
 export function SchedulesPageContent() {
-  const { isAdmin } = useSession();
   const [schedules, setSchedules] = useState<ScheduleRow[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -151,7 +138,7 @@ export function SchedulesPageContent() {
       : createScheduleAction(input);
   }
 
-  const columnCount = isAdmin ? 6 : 5;
+  const columnCount = 6;
 
   return (
     <>
@@ -163,16 +150,10 @@ export function SchedulesPageContent() {
             nightly and open a fix PR if it&apos;s red&rdquo; as a config row.
           </p>
         </div>
-        {isAdmin ? (
-          <button
-            className="btn btn-sm"
-            onClick={openCreateDialog}
-            type="button"
-          >
-            <Plus aria-hidden="true" className="size-4" />
-            New schedule
-          </button>
-        ) : null}
+        <button className="btn btn-sm" onClick={openCreateDialog} type="button">
+          <Plus aria-hidden="true" className="size-4" />
+          New schedule
+        </button>
       </div>
 
       {loadError ? (
@@ -197,11 +178,9 @@ export function SchedulesPageContent() {
                 <th>Agent</th>
                 <th>Last fired</th>
                 <th>Enabled</th>
-                {isAdmin ? (
-                  <th className="text-right">
-                    <span className="sr-only">Actions</span>
-                  </th>
-                ) : null}
+                <th className="text-right">
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -227,7 +206,7 @@ export function SchedulesPageContent() {
               ) : null}
               {schedules?.map((schedule) => (
                 <ScheduleRowView
-                  canManage={isAdmin}
+                  canManage
                   deleting={deletingId === schedule.id}
                   key={schedule.id}
                   onDelete={() => void handleDelete(schedule)}
@@ -246,15 +225,13 @@ export function SchedulesPageContent() {
         </div>
       )}
 
-      {isAdmin ? (
-        <ScheduleEditorDialog
-          onOpenChange={setDialogOpen}
-          onSave={handleSave}
-          onSaved={() => void loadSchedules()}
-          open={dialogOpen}
-          schedule={editingSchedule}
-        />
-      ) : null}
+      <ScheduleEditorDialog
+        onOpenChange={setDialogOpen}
+        onSave={handleSave}
+        onSaved={() => void loadSchedules()}
+        open={dialogOpen}
+        schedule={editingSchedule}
+      />
     </>
   );
 }

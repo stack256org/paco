@@ -510,11 +510,6 @@ export function useSessionChats(
       claudeSessionId: null,
       resumeTokens: {},
       lastAssistantMessageAt: null,
-      // A new chat's preview starts private regardless of where it came
-      // from — see the column comment in schema.ts. A fork must not inherit
-      // "public" from its source; that decision belongs to this chat's
-      // owner, made again for this chat.
-      previewVisibility: "private",
       // Mirrors the DB's generated column (schema.ts) so the optimistic row
       // matches what the server will actually return.
       previewSlug: previewSlug(optimisticId),
@@ -616,11 +611,6 @@ export function useSessionChats(
       claudeSessionId: null,
       resumeTokens: {},
       lastAssistantMessageAt: null,
-      // A new chat's preview starts private regardless of where it came
-      // from — see the column comment in schema.ts. A fork must not inherit
-      // "public" from its source; that decision belongs to this chat's
-      // owner, made again for this chat.
-      previewVisibility: "private",
       // Mirrors the DB's generated column (schema.ts) so the optimistic row
       // matches what the server will actually return.
       previewSlug: previewSlug(optimisticId),

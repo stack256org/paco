@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { getSessionsWithUnreadByUserId } from "@/lib/db/sessions";
-import { getServerSession } from "@/lib/session/get-server-session";
+import { getSessionsWithUnread } from "@/lib/db/sessions";
 import { SessionsIndexShell } from "./sessions-index-shell";
 
 export const metadata: Metadata = {
@@ -21,12 +20,7 @@ export const metadata: Metadata = {
  * The empty state is then only shown when it is actually true.
  */
 export default async function SessionsPage() {
-  const session = await getServerSession();
-  if (!session?.user) {
-    redirect("/");
-  }
-
-  const sessions = await getSessionsWithUnreadByUserId(session.user.id, {
+  const sessions = await getSessionsWithUnread({
     status: "active",
   });
 

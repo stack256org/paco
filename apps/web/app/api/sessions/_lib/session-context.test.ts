@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-type AuthSession = { user: { id: string } } | null;
-
 type SessionRecord = {
   id: string;
-  userId: string;
   sandboxState: { type: "docker" } | null;
 };
 
@@ -14,10 +11,8 @@ type ChatRecord = {
   activeStreamId: string | null;
 };
 
-let authSession: AuthSession = { user: { id: "user-1" } };
 let sessionRecord: SessionRecord | null = {
   id: "session-1",
-  userId: "user-1",
   sandboxState: { type: "docker" },
 };
 let chatRecord: ChatRecord | null = {
@@ -25,10 +20,6 @@ let chatRecord: ChatRecord | null = {
   sessionId: "session-1",
   activeStreamId: null,
 };
-
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => authSession,
-}));
 
 mock.module("@/lib/db/sessions", () => ({
   getSessionById: async () => sessionRecord,
@@ -46,10 +37,8 @@ async function getErrorMessage(
 
 describe("session context guards", () => {
   beforeEach(() => {
-    authSession = { user: { id: "user-1" } };
     sessionRecord = {
       id: "session-1",
-      userId: "user-1",
       sandboxState: { type: "docker" },
     };
     chatRecord = {
@@ -59,35 +48,11 @@ describe("session context guards", () => {
     };
   });
 
-  test("requireAuthenticatedUser returns 401 when unauthenticated", async () => {
-    authSession = null;
-    const { requireAuthenticatedUser } = await sessionContextModulePromise;
-
-    const result = await requireAuthenticatedUser();
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.response.status).toBe(401);
-      expect(await getErrorMessage(result.response)).toBe(
-        "You've been signed out. Sign in again to continue.",
-      );
-    }
-  });
-
-  test("requireAuthenticatedUser returns user id when authenticated", async () => {
-    const { requireAuthenticatedUser } = await sessionContextModulePromise;
-
-    const result = await requireAuthenticatedUser();
-
-    expect(result).toEqual({ ok: true, userId: "user-1" });
-  });
-
   test("requireOwnedSession returns 404 when session is missing", async () => {
     sessionRecord = null;
     const { requireOwnedSession } = await sessionContextModulePromise;
 
     const result = await requireOwnedSession({
-      userId: "user-1",
       sessionId: "session-1",
     });
 
@@ -100,57 +65,10 @@ describe("session context guards", () => {
     }
   });
 
-  test("requireOwnedSession returns 403 when user does not own session", async () => {
-    sessionRecord = {
-      id: "session-1",
-      userId: "other-user",
-      sandboxState: { type: "docker" },
-    };
+  test("requireOwnedSession returns the session when it exists", async () => {
     const { requireOwnedSession } = await sessionContextModulePromise;
 
     const result = await requireOwnedSession({
-      userId: "user-1",
-      sessionId: "session-1",
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.response.status).toBe(403);
-      expect(await getErrorMessage(result.response)).toBe(
-        "This isn't yours to open. Check you're signed in to the right account.",
-      );
-    }
-  });
-
-  test("requireOwnedSession allows custom forbidden message", async () => {
-    sessionRecord = {
-      id: "session-1",
-      userId: "other-user",
-      sandboxState: { type: "docker" },
-    };
-    const { requireOwnedSession } = await sessionContextModulePromise;
-
-    const result = await requireOwnedSession({
-      userId: "user-1",
-      sessionId: "session-1",
-      forbiddenMessage:
-        "This isn't yours to open. Check you're signed in to the right account.",
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.response.status).toBe(403);
-      expect(await getErrorMessage(result.response)).toBe(
-        "This isn't yours to open. Check you're signed in to the right account.",
-      );
-    }
-  });
-
-  test("requireOwnedSession returns session when owned", async () => {
-    const { requireOwnedSession } = await sessionContextModulePromise;
-
-    const result = await requireOwnedSession({
-      userId: "user-1",
       sessionId: "session-1",
     });
 
@@ -160,13 +78,12 @@ describe("session context guards", () => {
     }
   });
 
-  test("requireOwnedSessionWithSandboxGuard forwards ownership errors", async () => {
+  test("requireOwnedSessionWithSandboxGuard forwards not-found errors", async () => {
     sessionRecord = null;
     const { requireOwnedSessionWithSandboxGuard } =
       await sessionContextModulePromise;
 
     const result = await requireOwnedSessionWithSandboxGuard({
-      userId: "user-1",
       sessionId: "session-1",
       sandboxGuard: () => true,
     });
@@ -185,7 +102,6 @@ describe("session context guards", () => {
       await sessionContextModulePromise;
 
     const result = await requireOwnedSessionWithSandboxGuard({
-      userId: "user-1",
       sessionId: "session-1",
       sandboxGuard: () => false,
     });
@@ -204,7 +120,6 @@ describe("session context guards", () => {
     const { requireOwnedSessionChat } = await sessionContextModulePromise;
 
     const result = await requireOwnedSessionChat({
-      userId: "user-1",
       sessionId: "session-1",
       chatId: "chat-1",
     });
@@ -227,7 +142,6 @@ describe("session context guards", () => {
     const { requireOwnedSessionChat } = await sessionContextModulePromise;
 
     const result = await requireOwnedSessionChat({
-      userId: "user-1",
       sessionId: "session-1",
       chatId: "chat-1",
     });
@@ -241,34 +155,10 @@ describe("session context guards", () => {
     }
   });
 
-  test("requireOwnedSessionChat returns 403 when user does not own session", async () => {
-    sessionRecord = {
-      id: "session-1",
-      userId: "other-user",
-      sandboxState: { type: "docker" },
-    };
+  test("requireOwnedSessionChat returns session and chat when both exist", async () => {
     const { requireOwnedSessionChat } = await sessionContextModulePromise;
 
     const result = await requireOwnedSessionChat({
-      userId: "user-1",
-      sessionId: "session-1",
-      chatId: "chat-1",
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.response.status).toBe(403);
-      expect(await getErrorMessage(result.response)).toBe(
-        "This isn't yours to open. Check you're signed in to the right account.",
-      );
-    }
-  });
-
-  test("requireOwnedSessionChat returns session and chat when owned", async () => {
-    const { requireOwnedSessionChat } = await sessionContextModulePromise;
-
-    const result = await requireOwnedSessionChat({
-      userId: "user-1",
       sessionId: "session-1",
       chatId: "chat-1",
     });

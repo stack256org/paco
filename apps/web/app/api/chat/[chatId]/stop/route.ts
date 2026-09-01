@@ -1,8 +1,5 @@
 import { getRun } from "workflow/api";
-import {
-  requireAuthenticatedUser,
-  requireOwnedChatById,
-} from "@/app/api/chat/_lib/chat-context";
+import { requireOwnedChatById } from "@/app/api/chat/_lib/chat-context";
 import type { WebAgentUIMessage } from "@/app/types";
 import {
   compareAndSetChatActiveStreamId,
@@ -15,15 +12,9 @@ type RouteContext = {
 };
 
 export async function POST(request: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { chatId } = await context.params;
 
   const chatContext = await requireOwnedChatById({
-    userId: authResult.userId,
     chatId,
   });
   if (!chatContext.ok) {

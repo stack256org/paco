@@ -1,4 +1,3 @@
-import { requireAuthenticatedUser } from "@/app/api/chat/_lib/chat-context";
 import { getGithubToken } from "@/lib/db/github-tokens";
 import { GhError, ghJson, isGhMissing } from "@/lib/github/gh";
 
@@ -66,12 +65,7 @@ function toSummary(entry: RepoListEntry): GithubRepoSummary | null {
 }
 
 export async function GET(request: Request) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
-  const token = await getGithubToken(auth.userId);
+  const token = await getGithubToken();
   if (!token) {
     return Response.json(
       { error: "Connect GitHub in Settings first.", repos: [] },

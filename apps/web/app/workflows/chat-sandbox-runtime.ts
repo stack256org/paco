@@ -144,14 +144,10 @@ function unfinishedSetupError(
  */
 async function getReadySessionSandbox(params: {
   sessionId: string;
-  userId: string;
 }): Promise<{ session: SessionRecord; didSetupWorkspace: boolean }> {
   let session = await getSessionById(params.sessionId);
   if (!session) {
     throw new Error("Session not found");
-  }
-  if (session.userId !== params.userId) {
-    throw new Error("Unauthorized");
   }
   if (session.status === "archived") {
     throw archivedError();
@@ -221,7 +217,6 @@ async function getReadySessionSandbox(params: {
 }
 
 export async function resolveChatSandboxRuntime(params: {
-  userId: string;
   sessionId: string;
   chatId: string;
 }): Promise<ResolvedChatSandboxRuntime> {
@@ -229,7 +224,6 @@ export async function resolveChatSandboxRuntime(params: {
 
   const { session, didSetupWorkspace } = await getReadySessionSandbox({
     sessionId: params.sessionId,
-    userId: params.userId,
   });
   const sandboxState = session.sandboxState;
   if (!sandboxState) {

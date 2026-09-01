@@ -1,47 +1,34 @@
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { usageEvents, users } from "@/lib/db/schema";
+import { usageEvents } from "@/lib/db/schema";
 import { listAvailableModels } from "@/lib/model-catalog";
 import { estimateModelUsageCost, type AvailableModelCost } from "@/lib/models";
 
 /**
- * What each member's usage has cost, over some trailing window.
+ * What this instance's usage has cost, over some trailing window.
  *
  * Reuses the same cost arithmetic the usage page and the profile page's
  * spend estimate already use (`estimateModelUsageCost` in `lib/models.ts`,
  * fed the published per-million-token rates from
  * `lib/model-catalog.ts#listAvailableModels`) rather than deriving a second
  * one — two places computing money differently is worse than either.
+ *
+ * This used to break totals down per member, joined against `users`. Phase C
+ * removed application-level identity (and `usageEvents.userId` along with
+ * it) — the instance has exactly one tenant, so a per-member breakdown had
+ * nothing left to distinguish; the health page now shows one instance-wide
+ * total instead.
  */
-export type SpendPerMember = {
-  userId: string;
-  username: string;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  costUsd: number;
-  /**
-   * Tokens this member used against a model with no known price. Counted in
-   * `inputTokens`/`outputTokens` above, but never folded into `costUsd` — an
-   * unpriced token contributes zero to the total because there is nothing to
-   * charge it at, not because it was free.
-   */
-  unpricedTokens: number;
-};
-
 export type SpendReport = {
   windowDays: number;
   totalCostUsd: number;
   totalTokens: number;
-  /** Sum of every member's `unpricedTokens` — see that field for why this exists. */
+  /** Tokens spent against a model with no known price — see `SpendEventRow`. */
   unpricedTokens: number;
-  perMember: SpendPerMember[];
 };
 
-/** One usage row, already joined to the user it belongs to. */
+/** One usage row. */
 export type SpendEventRow = {
-  userId: string;
-  username: string;
   modelId: string | null;
   inputTokens: number;
   cachedInputTokens: number;
@@ -55,7 +42,7 @@ export type ModelPriceLookup = (
 ) => AvailableModelCost | undefined;
 
 /**
- * Aggregates raw usage rows into a per-member spend report.
+ * Aggregates raw usage rows into a spend report.
  *
  * Pure over its inputs — including `now`, so the window boundary is
  * testable without the clock actually moving — which is what lets this run
@@ -70,7 +57,6 @@ export function aggregateSpend(
   const windowStart = new Date(now);
   windowStart.setDate(windowStart.getDate() - windowDays);
 
-  const perMember = new Map<string, SpendPerMember>();
   let totalTokens = 0;
   let totalCostUsd = 0;
   let unpricedTokens = 0;
@@ -83,27 +69,11 @@ export function aggregateSpend(
     const tokens = event.inputTokens + event.outputTokens;
     const cost = estimateModelUsageCost(event, priceFor(event.modelId));
 
-    const member = perMember.get(event.userId) ?? {
-      userId: event.userId,
-      username: event.username,
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      outputTokens: 0,
-      costUsd: 0,
-      unpricedTokens: 0,
-    };
-
-    member.inputTokens += event.inputTokens;
-    member.cachedInputTokens += event.cachedInputTokens;
-    member.outputTokens += event.outputTokens;
     if (cost === undefined) {
-      member.unpricedTokens += tokens;
       unpricedTokens += tokens;
     } else {
-      member.costUsd += cost;
       totalCostUsd += cost;
     }
-    perMember.set(event.userId, member);
 
     totalTokens += tokens;
   }
@@ -113,17 +83,12 @@ export function aggregateSpend(
     totalCostUsd,
     totalTokens,
     unpricedTokens,
-    // Highest spender first — the one ranking a health page actually wants;
-    // ties broken by id so the order is still deterministic.
-    perMember: [...perMember.values()].sort(
-      (a, b) => b.costUsd - a.costUsd || a.userId.localeCompare(b.userId),
-    ),
   };
 }
 
 /**
- * Reads every usage event in the last `windowDays` days, joined to the user
- * it belongs to, and aggregates it into a spend report.
+ * Reads every usage event in the last `windowDays` days and aggregates it
+ * into a spend report.
  *
  * The SQL filter on `created_at` is an optimization, not the only place the
  * window is enforced — `aggregateSpend` re-checks it against `now`, which is
@@ -136,8 +101,6 @@ export async function readSpend(windowDays: number): Promise<SpendReport> {
 
   const rows = await db
     .select({
-      userId: usageEvents.userId,
-      username: users.username,
       modelId: usageEvents.modelId,
       inputTokens: usageEvents.inputTokens,
       cachedInputTokens: usageEvents.cachedInputTokens,
@@ -145,7 +108,6 @@ export async function readSpend(windowDays: number): Promise<SpendReport> {
       createdAt: usageEvents.createdAt,
     })
     .from(usageEvents)
-    .innerJoin(users, eq(usageEvents.userId, users.id))
     .where(sql`${usageEvents.createdAt} >= ${since.toISOString()}`);
 
   const priceById = new Map(

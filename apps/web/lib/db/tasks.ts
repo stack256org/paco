@@ -96,16 +96,14 @@ export type CreateTaskInput = {
   parentTaskId?: string | null;
   assignedAgent?: string | null;
   origin?: TaskOrigin;
-  createdBy?: string | null;
   /**
    * The status the task is created in. Defaults to `"todo"`, the normal
    * case. `"blocked"` is for a task that needs a human before any executor
-   * should touch it from the moment it exists — e.g. an org memory
-   * promotion proposal filed by a non-admin (`lib/memory/promote.ts`) —
-   * without faking a `todo -> running -> blocked` status history that never
-   * happened. No other value is legal: this is task *creation*, not a
-   * transition, so `canTransition` (`lib/tasks/state.ts`) does not apply
-   * here and this is validated on its own.
+   * should touch it from the moment it exists — without faking a `todo ->
+   * running -> blocked` status history that never happened. No other value
+   * is legal: this is task *creation*, not a transition, so `canTransition`
+   * (`lib/tasks/state.ts`) does not apply here and this is validated on its
+   * own.
    */
   initialStatus?: "todo" | "blocked";
 };
@@ -131,7 +129,6 @@ export async function createTask(input: CreateTaskInput): Promise<Task> {
       status: initialStatus,
       assignedAgent: input.assignedAgent ?? null,
       origin: input.origin ?? "user",
-      createdBy: input.createdBy ?? null,
     })
     .returning();
   if (!row) {
@@ -209,7 +206,7 @@ export async function listTasks(
  * Extra columns a status transition may set alongside the new status.
  *
  * `sessionId` is here for one case: a proposal task
- * (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is created `blocked`
+ * (`lib/memory/reflect.ts`) is created `blocked`
  * with no session at all, and the human who unblocks it is the first person
  * to say which repository the work belongs in. That choice arrives with the
  * `blocked -> todo` transition and is written in the same guarded update

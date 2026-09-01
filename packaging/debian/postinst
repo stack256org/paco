@@ -2,9 +2,9 @@
 # postinst runs on every install AND every upgrade — every step below has to
 # be a no-op the second time it runs, or an `apt upgrade` would silently
 # redo something that must only ever happen once (regenerating APP_SECRET
-# chief among them: it signs sessions and derives the key that encrypts
-# every stored GitHub token, so regenerating it on upgrade would silently
-# and permanently orphan every one of them).
+# chief among them: it derives the key that encrypts every stored GitHub
+# token, so regenerating it on upgrade would silently and permanently
+# orphan every one of them).
 set -e
 
 PACO_ETC=/etc/paco
@@ -14,6 +14,10 @@ PACO_USER=paco
 PACO_GROUP=paco
 NGINX_SITE=/etc/nginx/sites-available/paco
 NGINX_ENABLED=/etc/nginx/sites-enabled/paco
+# The instance password, as an nginx htpasswd file. Under /etc/nginx and not
+# /etc/paco because $PACO_ETC is 0750 root:paco and nginx's workers are
+# www-data, which cannot traverse into it.
+NGINX_HTPASSWD=/etc/nginx/paco.htpasswd
 # Where Paco itself writes generated preview-routing server blocks
 # (apps/web/lib/preview/nginx-reload.ts) — a directory it owns outright,
 # rather than loosening permissions on /etc/nginx/conf.d, which stays
@@ -55,12 +59,72 @@ install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_HOME"
 install -d -m 0750 -o "$PACO_USER" -g "$PACO_GROUP" "$PACO_NGINX_DIR"
 
 # -----------------------------------------------------------------------------
+# 2b. The instance password. This file has to exist before the site in step 5
+# is enabled: an `auth_basic_user_file` pointing at a missing path does NOT
+# fail `nginx -t` — the file is only opened per request — so the failure would
+# surface as a 500 on every visit rather than a password prompt.
+#
+# Generated once and never regenerated, the same rule as APP_SECRET in step 3:
+# an upgrade must not silently change the operator's password. Guarded on the
+# file being non-empty, not merely existing: `htpasswd -c` creates the file
+# before it writes to it, so a failure partway through (below) would leave a
+# zero-byte file that `[ -f ]` reports as "already generated" forever after —
+# nginx then denies every request, permanently, with no install-time signal
+# and no recovery short of deleting the file by hand. A healthy file is never
+# empty, so `-s` costs nothing on the ordinary idempotent-upgrade path.
+#
+# `apt-get install paco` on its own is a supported entry point, so this cannot
+# be left to install.sh. install.sh only ever refines what is written here.
+if [ ! -s "$NGINX_HTPASSWD" ]; then
+  # Alphanumeric only: this gets read off a terminal and typed into a browser
+  # prompt by hand, so base64's +/= are a transcription hazard for no gain.
+  generated_password=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | cut -c1-24)
+
+  # A pipeline's exit status in POSIX sh is that of its LAST command, and
+  # dash has no `pipefail`: if `openssl rand` fails (missing binary, broken
+  # entropy source), `tr` and `cut` both still succeed on empty input and
+  # this pipeline exits 0 regardless — `set -e` never fires. Check the
+  # result directly instead of trusting $?. Do not simplify this away:
+  # without it, a failed `openssl rand` silently hashes the empty string
+  # and ships an instance "protected" by a password of nothing.
+  if [ -z "$generated_password" ] || [ "${#generated_password}" -ne 24 ]; then
+    echo "paco: ERROR — failed to generate the instance password (openssl produced no usable output). Aborting rather than writing an empty or short password hash." >&2
+    exit 1
+  fi
+
+  umask 027
+  # -i keeps the password out of argv, where `ps` would show it to every user
+  # on this machine; -B is bcrypt, which is what nginx reads.
+  printf '%s' "$generated_password" \
+    | htpasswd -i -B -c "$NGINX_HTPASSWD" paco >/dev/null 2>&1
+  chown root:www-data "$NGINX_HTPASSWD" 2>/dev/null || true
+  chmod 640 "$NGINX_HTPASSWD"
+
+  # Root-only, and deliberately plaintext: install.sh prints it in the closing
+  # summary and `paco status` reports that the instance is still on a
+  # generated password. `paco password` deletes it once a real one is set.
+  printf '%s\n' "$generated_password" > "$PACO_ETC/initial-password"
+  chown root:root "$PACO_ETC/initial-password"
+  chmod 600 "$PACO_ETC/initial-password"
+
+  # `apt-get install paco` with no install.sh is a supported entry point, and
+  # on that path this is the ONLY place an operator is ever told a password
+  # exists at all — apt's own output says nothing about it. Without this, the
+  # first sign an operator gets is a browser auth prompt they cannot answer:
+  # a lockout, not an inconvenience.
+  echo "paco: this instance is protected by a generated password. Read it with:"
+  echo "        sudo cat /etc/paco/initial-password"
+  echo "paco: change it any time with:"
+  echo "        sudo paco password"
+fi
+
+# -----------------------------------------------------------------------------
 # 3. APP_SECRET and paco.env — generated once, ever. This is the step in
 # this whole script that must never run twice: regenerating APP_SECRET
-# invalidates every session and makes every already-stored GitHub token
-# permanently undecryptable (AES-256-GCM with a key derived from it — not a
-# hash, so there is no "re-derive and compare", only "decrypt with the
-# wrong key and fail"). Guarded on the file not existing, nothing else.
+# makes every already-stored GitHub token permanently undecryptable
+# (AES-256-GCM with a key derived from it — not a hash, so there is no
+# "re-derive and compare", only "decrypt with the wrong key and fail").
+# Guarded on the file not existing, nothing else.
 if [ ! -f "$PACO_ENV" ]; then
   APP_SECRET=$(openssl rand -base64 32)
   umask 077
@@ -82,10 +146,23 @@ if [ ! -f "$PACO_ENV" ]; then
   # Debian-family host.
   cat > "$PACO_ENV" <<EOF
 # Generated once by paco's postinst — see the comment there before editing
-# APP_SECRET by hand. Regenerating it invalidates every session and makes
-# every already-stored GitHub token permanently undecryptable.
+# APP_SECRET by hand. Regenerating it makes every already-stored GitHub
+# token permanently undecryptable.
 NODE_ENV=production
 PORT=3000
+# The app has no authentication of its own — the instance password lives
+# entirely in nginx's auth_basic (see the site block below and
+# docs/agents' Authentication note). Next's standalone server defaults to
+# binding 0.0.0.0 when HOSTNAME is unset, which would let anyone on the
+# network reach the app on :3000 directly, bypassing nginx and the
+# password it holds. Binding loopback forces every request through
+# nginx. This file is written once and never rewritten (see the guard
+# above), so it is the one place a fresh install gets this from; an
+# already-installed instance is repaired by packaging/paco.service
+# instead, which dpkg replaces on every upgrade. An operator who
+# deliberately wants the app reachable off-loopback must change this
+# knowingly.
+HOSTNAME=127.0.0.1
 POSTGRES_URL=postgres:///paco
 PGHOST=/var/run/postgresql
 APP_SECRET=$APP_SECRET
@@ -122,12 +199,22 @@ fi
 # localhost — no domain baked in, matching APP_URL being unset by default
 # (Settings, or localhost, decide that at runtime).
 cat > "$NGINX_SITE" <<'EOF'
-# Installed by paco's postinst. Edit freely — this file is never
-# regenerated once it exists, only re-tested and reloaded on upgrade.
+# Installed by paco's postinst, and REWRITTEN by it on every upgrade.
+# Do not edit: your changes will be overwritten. This is deliberate — the
+# auth_basic directives below are the only thing protecting this instance,
+# so an upgrade has to be able to repair them. Put local customisation in
+# a separate server block or an include, not here.
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+
+    # The instance password. Written by postinst on first install and rotated
+    # with `paco password`; nginx re-reads it per request, so a change needs
+    # no reload. This is the only thing standing between the public internet
+    # and this instance — Paco itself has no sign-in.
+    auth_basic "Paco";
+    auth_basic_user_file /etc/nginx/paco.htpasswd;
 
     location / {
         proxy_pass http://127.0.0.1:3000;

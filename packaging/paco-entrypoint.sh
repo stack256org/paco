@@ -29,23 +29,41 @@ echo "paco: applying migrations"
 "$NODE" "$WEB/lib/db/migrate.ts"
 "$NODE" "$WEB/scripts/workflow-bootstrap.ts"
 
-# The public origin has to be known before the server starts: better-auth
-# builds its set of trusted callback hosts once, at module load. An operator
-# who saves a domain in Settings writes it to the database and restarts, and
-# this is what turns that row back into configuration — without it, saving a
-# domain does nothing and the restart the UI asks for accomplishes nothing.
+# The public origin has to be known before the server starts, because it is
+# what every generated link is built from — pull-request URLs among them. An
+# operator who saves a domain in Settings writes it to the database and
+# restarts, and this is what turns that row back into configuration; without
+# it, saving a domain does nothing and the restart the UI asks for
+# accomplishes nothing.
 #
 # Runs after the migrations, because on a fresh install the table it reads
-# does not exist until they have. An explicitly-set APP_URL always wins, so
-# an operator who prefers to manage it as environment can, and this never
-# overrides them.
-if [ -z "$APP_URL" ]; then
-  if APP_URL_FROM_DB="$(
-    psql "$POSTGRES_URL" -tAc \
-      "SELECT app_domain FROM instance_settings WHERE app_domain IS NOT NULL LIMIT 1" \
-      2>/dev/null
-  )"; then
-    APP_URL_FROM_DB="$(printf '%s' "$APP_URL_FROM_DB" | tr -d '[:space:]')"
+# does not exist until they have. An explicitly-set APP_URL still wins, so an
+# operator who prefers to manage it as environment can — but the saved domain
+# is read either way, so a pinned value that DISAGREES with Settings can be
+# reported rather than silently beating it.
+#
+# That disagreement is easy to arrive at without noticing: `install.sh`
+# writes `APP_URL=http://<domain>` into /etc/paco/paco.env when a domain is
+# given at install time, and it stays there. Someone who later fixes the
+# scheme in Settings — to https:// on a platform whose edge terminates TLS,
+# say — sees the UI accept it and nothing change, with no clue why.
+if APP_URL_FROM_DB="$(
+  psql "$POSTGRES_URL" -tAc \
+    "SELECT app_domain FROM instance_settings WHERE app_domain IS NOT NULL LIMIT 1" \
+    2>/dev/null
+)"; then
+  APP_URL_FROM_DB="$(printf '%s' "$APP_URL_FROM_DB" | tr -d '[:space:]')"
+
+  if [ -n "$APP_URL" ]; then
+    # Pinned in the environment. Honour it, but say so when Settings holds
+    # something else, naming the file to edit — the UI cannot know it is
+    # being overridden, so this log line is the only place the conflict can
+    # surface.
+    if [ -n "$APP_URL_FROM_DB" ] && [ "$APP_URL_FROM_DB" != "$APP_URL" ]; then
+      echo "paco: serving on $APP_URL (pinned in /etc/paco/paco.env), NOT the '$APP_URL_FROM_DB' saved in Settings." >&2
+      echo "paco: to let Settings decide, remove the APP_URL line from /etc/paco/paco.env and restart." >&2
+    fi
+  else
     # A value that reached the column by hand could still be unusable, and
     # lib/app-url.ts throws on one — which would render a config-problem page
     # on every route including the settings page needed to correct it.
@@ -59,9 +77,9 @@ if [ -z "$APP_URL" ]; then
         echo "paco: ignoring the saved domain '$APP_URL_FROM_DB' — it needs a http:// or https:// scheme" >&2
         ;;
     esac
-  else
-    echo "paco: could not read the saved domain; serving on the default" >&2
   fi
+elif [ -z "$APP_URL" ]; then
+  echo "paco: could not read the saved domain; serving on the default" >&2
 fi
 
 echo "paco: starting server"

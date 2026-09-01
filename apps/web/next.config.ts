@@ -84,9 +84,9 @@ const nextConfig: NextConfig = {
   },
   // No `images.remotePatterns`: the only entry was
   // `avatars.githubusercontent.com`, allowed when signing in meant signing in
-  // with GitHub and the session carried that account's avatar. Sign-in is by
-  // magic link, no avatar URL is ever stored, and nothing renders a remote
-  // image.
+  // with GitHub and the session carried that account's avatar. There is no
+  // sign-in of any kind now, no avatar URL is ever stored, and nothing
+  // renders a remote image.
   experimental: {
     optimizePackageImports: ["lucide-react"],
     // TypeScript 7 dropped the compiler API Next.js links against, so type

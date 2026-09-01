@@ -22,8 +22,6 @@ function priceFor(modelId: string | null): AvailableModelCost | undefined {
 
 function event(overrides: Partial<SpendEventRow>): SpendEventRow {
   return {
-    userId: "user-1",
-    username: "user-one",
     modelId: "priced-model",
     inputTokens: 0,
     cachedInputTokens: 0,
@@ -34,7 +32,7 @@ function event(overrides: Partial<SpendEventRow>): SpendEventRow {
 }
 
 describe("aggregateSpend", () => {
-  test("an instance with no events returns zeros and an empty list", async () => {
+  test("an instance with no events returns zeros", async () => {
     const { aggregateSpend } = await spendModule;
     const report = aggregateSpend([], 30, NOW, priceFor);
 
@@ -43,46 +41,21 @@ describe("aggregateSpend", () => {
       totalCostUsd: 0,
       totalTokens: 0,
       unpricedTokens: 0,
-      perMember: [],
     });
   });
 
-  test("events from several users aggregate per user", async () => {
+  test("events aggregate into one instance-wide total", async () => {
     const { aggregateSpend } = await spendModule;
     const events: SpendEventRow[] = [
-      event({
-        userId: "user-1",
-        username: "user-one",
-        inputTokens: 1_000_000,
-        outputTokens: 0,
-      }),
-      event({
-        userId: "user-1",
-        username: "user-one",
-        inputTokens: 0,
-        outputTokens: 1_000_000,
-      }),
-      event({
-        userId: "user-2",
-        username: "user-two",
-        inputTokens: 2_000_000,
-        outputTokens: 0,
-      }),
+      event({ inputTokens: 1_000_000, outputTokens: 0 }),
+      event({ inputTokens: 0, outputTokens: 1_000_000 }),
+      event({ inputTokens: 2_000_000, outputTokens: 0 }),
     ];
 
     const report = aggregateSpend(events, 30, NOW, priceFor);
 
     expect(report.totalTokens).toBe(4_000_000);
     expect(report.totalCostUsd).toBeCloseTo(3 + 15 + 6, 5);
-    expect(report.perMember).toHaveLength(2);
-
-    const userOne = report.perMember.find((m) => m.userId === "user-1");
-    const userTwo = report.perMember.find((m) => m.userId === "user-2");
-    expect(userOne?.inputTokens).toBe(1_000_000);
-    expect(userOne?.outputTokens).toBe(1_000_000);
-    expect(userOne?.costUsd).toBeCloseTo(3 + 15, 5);
-    expect(userTwo?.inputTokens).toBe(2_000_000);
-    expect(userTwo?.costUsd).toBeCloseTo(6, 5);
   });
 
   test("events outside the window are excluded", async () => {
@@ -104,7 +77,6 @@ describe("aggregateSpend", () => {
     );
 
     expect(report.totalTokens).toBe(1_000_000);
-    expect(report.perMember).toHaveLength(1);
   });
 
   test("an event whose model has no known price contributes tokens but zero cost, and is reported unpriced", async () => {
@@ -120,8 +92,6 @@ describe("aggregateSpend", () => {
     expect(report.totalTokens).toBe(1_000_000);
     expect(report.totalCostUsd).toBe(0);
     expect(report.unpricedTokens).toBe(1_000_000);
-    expect(report.perMember[0]?.costUsd).toBe(0);
-    expect(report.perMember[0]?.unpricedTokens).toBe(1_000_000);
   });
 
   test("a null model id is unpriced rather than throwing", async () => {

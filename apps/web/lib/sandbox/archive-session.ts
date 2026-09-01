@@ -77,7 +77,7 @@ async function refreshArchiveGitState(
       updates.branch = branch;
     }
 
-    const token = await getGithubToken(currentSession.userId);
+    const token = await getGithubToken();
     if (!token) {
       return updates;
     }

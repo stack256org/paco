@@ -79,7 +79,19 @@ const LOCAL_PREVIEW_HINT =
 /** The record an operator actually has to create, in the shape a DNS panel asks for. */
 const PREVIEW_DNS_EXAMPLE = "*.previews.example.com.   A   203.0.113.10";
 
-/** A single liveness check, bounded so a hanging socket can't stall the poll. */
+/**
+ * A single liveness check, bounded so a hanging socket can't stall the poll.
+ *
+ * This only cares whether the server answers a request at all, so the
+ * endpoint it hits is incidental — `/api/settings/preferences` was picked
+ * because it takes no arguments, touches one small table, and returns 200
+ * on a fresh install with no rows in it. Do not read anything into the
+ * choice of route, but do not delete that route without pointing this at
+ * another one: it used to hit the email-delivery route under the auth
+ * surface that this phase removed entirely, and this probe silently
+ * returned `false` forever until someone noticed the restart flow never
+ * left "restarting".
+ */
 async function pingServerAlive(): Promise<boolean> {
   const controller = new AbortController();
   const timeoutId = setTimeout(
@@ -87,7 +99,7 @@ async function pingServerAlive(): Promise<boolean> {
     RESTART_POLL_REQUEST_TIMEOUT_MS,
   );
   try {
-    const response = await fetch("/api/auth/email-delivery", {
+    const response = await fetch("/api/settings/preferences", {
       cache: "no-store",
       signal: controller.signal,
     });
@@ -105,18 +117,17 @@ async function pingServerAlive(): Promise<boolean> {
  * Certificates are not requested here — see `CertificateSection`. This section
  * used to claim it fetched them, which nothing in the product ever did.
  *
- * Saving here only ever writes to storage. better-auth reads its trusted-host
- * list once at process start, and `paco-entrypoint.sh` re-reads the saved
- * domain on boot — so a saved address is not a live one until the process
- * restarts. The section says "saved", never "applied" or "live", until that
- * restart happens, and it is the one place that offers to do it.
+ * Saving here only ever writes to storage. The process reads its allowed-host
+ * list once at start, and `paco-entrypoint.sh` re-reads the saved domain on
+ * boot — so a saved address is not a live one until the process restarts.
+ * The section says "saved", never "applied" or "live", until that restart
+ * happens, and it is the one place that offers to do it.
  */
 /**
  * `onSaved`, when given, is called after every successful save with whether a
- * domain is now set — the same shape `SmtpSection` uses, and for the same
- * reason: the onboarding step that embeds this needs to know, and re-reading
- * the settings from the server just to learn what this component already knows
- * would race the write that caused it.
+ * domain is now set, so a caller that needs to know can react immediately —
+ * re-reading the settings from the server just to learn what this component
+ * already knows would race the write that caused it.
  */
 export function DomainSection({
   onSaved,
@@ -396,8 +407,8 @@ export function DomainSection({
             />
             <p className="text-base-content/60 text-xs">
               The full origin people use to reach Paco, including{" "}
-              <code>https://</code>. This is what invitation and sign-in links
-              are built from.
+              <code>https://</code>. This is what pull-request links are built
+              from.
             </p>
 
             <label className="label" htmlFor="preview-base-domain">

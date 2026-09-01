@@ -87,7 +87,6 @@ mock.module("@/lib/db/roster", () => ({ getRoster: getRosterSpy }));
 
 let sessionResult: unknown = {
   id: "session-1",
-  userId: "user-1",
   status: "running",
   branch: "main",
   sandboxState: { type: "docker", sandboxName: "session_1" },
@@ -117,7 +116,6 @@ let submitChatMessageOutcome: unknown = {
 type SubmitChatMessageCall = {
   chatId: string;
   sessionId: string;
-  userId: string;
   messages: { parts: { type: string; text: string }[] }[];
   requestUrl: string;
   authSession: unknown;
@@ -192,10 +190,12 @@ const sandboxExecSpy = mock(() =>
 const connectSandboxSpy = mock(() => Promise.resolve({ exec: sandboxExecSpy }));
 
 // The approval hook's endpoint and shared secret. Mocked so the assertions
-// below name exact values rather than re-deriving `appUrl()`'s port and a
-// freshly-minted random token.
+// below name exact values rather than re-deriving `appLoopbackUrl()`'s port
+// and a freshly-minted random token. This must stay independent of
+// `APP_URL`/`appUrl()` — the loopback callback bypasses the public origin
+// entirely (see `appLoopbackUrl`'s doc in `lib/app-url.ts`).
 mock.module("@/lib/app-url", () => ({
-  appUrl: () => new URL("http://localhost:3066"),
+  appLoopbackUrl: () => "http://127.0.0.1:3066",
 }));
 mock.module("@/lib/agent/approvals/token", () => ({
   approvalToken: () => "reviewer-approval-secret",
@@ -257,7 +257,6 @@ beforeEach(() => {
   rosterResult = { reviewer: { prompt: "You are a reviewer agent." } };
   sessionResult = {
     id: "session-1",
-    userId: "user-1",
     status: "running",
     branch: "main",
     sandboxState: { type: "docker", sandboxName: "session_1" },
@@ -338,7 +337,6 @@ describe("runReviewerGate", () => {
     const call = submitChatMessageSpy.mock.calls[0]?.[0];
     expect(call?.chatId).toBe("chat-1");
     expect(call?.sessionId).toBe("session-1");
-    expect(call?.userId).toBe("user-1");
     expect(call?.sessionStatus).toBe("running");
     expect(call?.activeStreamId).toBeNull();
     expect(call?.maxSteps).toBe(TASK_DEFAULT_MAX_TURNS_FIXTURE);
@@ -652,7 +650,6 @@ describe("kickExecutorFixTurn", () => {
       kickExecutorFixTurn({
         sessionId: "session-1",
         chatId: "chat-1",
-        userId: "user-1",
         problems: ["missing tests"],
       }),
     ).resolves.toBeUndefined();
@@ -669,7 +666,6 @@ describe("kickExecutorFixTurn", () => {
         kickExecutorFixTurn({
           sessionId: "session-1",
           chatId: "chat-1",
-          userId: "user-1",
           problems: [],
         }),
       ).rejects.toThrow(kind);
@@ -683,7 +679,6 @@ describe("kickExecutorFixTurn", () => {
       kickExecutorFixTurn({
         sessionId: "session-missing",
         chatId: "chat-1",
-        userId: "user-1",
         problems: [],
       }),
     ).rejects.toThrow('Session "session-missing" not found');
@@ -696,7 +691,6 @@ describe("kickExecutorFixTurn", () => {
       kickExecutorFixTurn({
         sessionId: "session-1",
         chatId: "chat-missing",
-        userId: "user-1",
         problems: [],
       }),
     ).rejects.toThrow('Chat "chat-missing" not found');

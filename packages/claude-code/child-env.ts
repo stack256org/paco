@@ -3,8 +3,8 @@
  *
  * `run.ts` used to spawn the CLI with `{...process.env, ...options.env}`.
  * That handed the agent Paco's entire server environment — `APP_SECRET`
- * (which signs sessions and derives the key that encrypts stored GitHub
- * tokens), `POSTGRES_URL`, `SMTP_PASSWORD`, `PACO_APPROVAL_TOKEN` — and the
+ * (which derives the key that encrypts the stored GitHub token),
+ * `POSTGRES_URL`, `SMTP_PASSWORD`, `PACO_APPROVAL_TOKEN` — and the
  * agent has a `Bash` tool, so every one of those was one `env` away from
  * being read, printed into a transcript, or exfiltrated by anything the
  * agent was persuaded to run. Anything the CLI spawns in turn (an MCP stdio

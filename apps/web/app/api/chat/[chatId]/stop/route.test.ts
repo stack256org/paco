@@ -2,10 +2,6 @@ import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
 // ── Mutable state ──────────────────────────────────────────────────
 
-let currentAuthSession: { user: { id: string } } | null = {
-  user: { id: "user-1" },
-};
-
 let chatRecord: {
   sessionId: string;
   activeStreamId: string | null;
@@ -51,10 +47,6 @@ mock.module("workflow/api", () => ({
   }),
 }));
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentAuthSession,
-}));
-
 mock.module("@/lib/db/sessions", () => ({
   getChatById: async () => chatRecord,
   getSessionById: async () => sessionRecord,
@@ -89,7 +81,6 @@ const routeContext = {
 // ── Tests ──────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  currentAuthSession = { user: { id: "user-1" } };
   sessionRecord = { id: "session-1", userId: "user-1" };
   chatRecord = {
     sessionId: "session-1",
@@ -100,28 +91,12 @@ beforeEach(() => {
 });
 
 describe("POST /api/chat/[chatId]/stop", () => {
-  test("returns 401 when not authenticated", async () => {
-    currentAuthSession = null;
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(createStopRequest(), routeContext);
-    expect(response.status).toBe(401);
-  });
-
   test("returns 404 when chat not found", async () => {
     chatRecord = null;
     const { POST } = await routeModulePromise;
 
     const response = await POST(createStopRequest(), routeContext);
     expect(response.status).toBe(404);
-  });
-
-  test("returns 403 when session not owned by user", async () => {
-    sessionRecord = { id: "session-1", userId: "user-2" };
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(createStopRequest(), routeContext);
-    expect(response.status).toBe(403);
   });
 
   test("returns success immediately when no active stream", async () => {

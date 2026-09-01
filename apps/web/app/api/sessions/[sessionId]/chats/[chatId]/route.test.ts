@@ -6,16 +6,6 @@ import { POOLSIDE_DEFAULT_MODEL } from "@paco/poolside-backend";
 // server component and has nothing to do with what is being tested here.
 mock.module("server-only", () => ({}));
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type OwnedSessionChatResult =
   | {
       ok: true;
@@ -45,7 +35,6 @@ type ChatRecord = {
   backend?: string;
 };
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
 /** A resumable sandbox, which is what `canOperateOnSandbox` looks for. */
 const RUNNING_SANDBOX = {
   type: "docker",
@@ -61,11 +50,6 @@ let ownedSessionChatResult: OwnedSessionChatResult = {
     modelId: "model-1",
     activeStreamId: null,
   },
-};
-let currentSession: {
-  user: { id: string; email?: string; username?: string };
-} | null = {
-  user: { id: "user-1" },
 };
 let chatMessages: ChatMessageRecord[] = [
   {
@@ -119,7 +103,6 @@ mock.module("@paco/sandbox", () => ({
 const deleteChatCalls: string[] = [];
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSessionChat: async () => ownedSessionChatResult,
 }));
 
@@ -150,10 +133,6 @@ mock.module("@/lib/db/user-preferences", () => ({
   }),
 }));
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentSession,
-}));
-
 const routeModulePromise = import("./route");
 
 function createContext(sessionId = "session-1", chatId = "chat-1") {
@@ -176,7 +155,6 @@ function createPatchRequest(body: unknown): Request {
 
 describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
   beforeEach(() => {
-    authResult = { ok: true, userId: "user-1" };
     ownedSessionChatResult = {
       ok: true,
       sessionRecord: { id: "session-1", sandboxState: RUNNING_SANDBOX },
@@ -189,7 +167,6 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     };
     sandboxCommands.length = 0;
     worktreeRemovalResult = { stderr: "", stdout: "", success: true };
-    currentSession = { user: { id: "user-1" } };
     chatMessages = [
       {
         id: "message-1",
@@ -205,21 +182,6 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     chatsInSession = [{ id: "chat-1" }, { id: "chat-2" }];
     updateChatCalls.length = 0;
     deleteChatCalls.length = 0;
-  });
-
-  test("GET returns auth error from guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { GET } = await routeModulePromise;
-
-    const response = await GET(createGetRequest(), createContext());
-
-    expect(response.status).toBe(401);
   });
 
   test("GET returns the latest chat snapshot", async () => {
@@ -268,26 +230,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]", () => {
     expect(body.messages).toEqual(chatMessages.map((message) => message.parts));
   });
 
-  test("PATCH returns auth error from guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { PATCH } = await routeModulePromise;
-
-    const response = await PATCH(
-      createPatchRequest({ title: "x" }),
-      createContext(),
-    );
-
-    expect(response.status).toBe(401);
-    expect(updateChatCalls).toHaveLength(0);
-  });
-
-  test("PATCH returns ownership error from guard", async () => {
+  test("PATCH returns not-found error from guard", async () => {
     ownedSessionChatResult = {
       ok: false,
       response: Response.json(

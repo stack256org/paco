@@ -1,7 +1,6 @@
 "use server";
 
 import type { PluginHostState } from "@paco/plugin-host";
-import { requireAdmin } from "@/lib/admin/require-admin";
 import { listPlugins } from "@/lib/db/plugins";
 import { getPluginRegistry } from "@/lib/plugins/registry";
 
@@ -23,8 +22,6 @@ export type PluginStatus = PluginHostState | "not-running";
 export async function pluginStatusAction(): Promise<
   Record<string, PluginStatus>
 > {
-  await requireAdmin();
-
   const rows = await listPlugins();
   const registry = getPluginRegistry();
 

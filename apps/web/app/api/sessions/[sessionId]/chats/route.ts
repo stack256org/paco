@@ -1,8 +1,5 @@
 import { nanoid } from "nanoid";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSession,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSession } from "@/app/api/sessions/_lib/session-context";
 import {
   createChat,
   getChatById,
@@ -16,14 +13,9 @@ type RouteContext = {
 };
 
 export async function GET(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
   const { sessionId } = await context.params;
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {
@@ -31,22 +23,17 @@ export async function GET(req: Request, context: RouteContext) {
   }
 
   const [chats, rawPreferences] = await Promise.all([
-    getChatSummariesBySessionId(sessionId, authResult.userId),
-    getUserPreferences(authResult.userId),
+    getChatSummariesBySessionId(sessionId),
+    getUserPreferences(),
   ]);
   const preferences = rawPreferences;
   return Response.json({ chats, defaultModelId: preferences.defaultModelId });
 }
 
 export async function POST(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
   const { sessionId } = await context.params;
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {
@@ -84,7 +71,7 @@ export async function POST(req: Request, context: RouteContext) {
     }
   }
 
-  const preferences = await getUserPreferences(authResult.userId);
+  const preferences = await getUserPreferences();
   const chat = await createChat({
     id: requestedChatId ?? nanoid(),
     sessionId,

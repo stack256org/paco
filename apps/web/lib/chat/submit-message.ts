@@ -16,7 +16,6 @@ import {
   updateChat,
 } from "@/lib/db/sessions";
 import { appendSessionEventsStrict } from "@/lib/db/session-events";
-import type { Session } from "@/lib/session/types";
 
 export type SubmitMessageUIMessageChunk =
   InferUIMessageChunk<WebAgentUIMessage>;
@@ -27,11 +26,8 @@ const DEFAULT_MAX_STEPS = 500;
 export interface SubmitMessageInput {
   chatId: string;
   sessionId: string;
-  userId: string;
   messages: WebAgentUIMessage[];
   requestUrl: string;
-  /** `null` for a submission with no interactive user behind it (e.g. a plugin). */
-  authSession: Session | null;
   /** The owning session's lifecycle status, as already loaded by the caller. */
   sessionStatus: string;
   /** The chat row's current `activeStreamId`, as already loaded by the caller. */
@@ -77,10 +73,8 @@ export async function submitChatMessage(
   const {
     chatId,
     sessionId,
-    userId,
     messages,
     requestUrl,
-    authSession,
     sessionStatus,
     activeStreamId,
     maxSteps = DEFAULT_MAX_STEPS,
@@ -134,9 +128,7 @@ export async function submitChatMessage(
       messages,
       chatId,
       sessionId,
-      userId,
       requestUrl,
-      authSession,
       assistantId: generateId(),
       maxSteps,
     },

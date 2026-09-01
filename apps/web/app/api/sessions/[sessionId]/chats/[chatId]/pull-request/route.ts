@@ -1,9 +1,6 @@
 import { chatBranchName } from "@paco/sandbox";
 import { z } from "zod";
-import {
-  requireAuthenticatedUser,
-  requireOwnedChatById,
-} from "@/app/api/chat/_lib/chat-context";
+import { requireOwnedChatById } from "@/app/api/chat/_lib/chat-context";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
 import { getGithubToken } from "@/lib/db/github-tokens";
 import { getSessionById, updateSession } from "@/lib/db/sessions";
@@ -41,16 +38,16 @@ export type ChatPullRequestResponse = {
  * worktree, so a session-wide pull request would either span several branches
  * or silently pick one of them.
  */
-async function resolveContext(context: RouteContext, userId: string) {
+async function resolveContext(context: RouteContext) {
   const { sessionId, chatId } = await context.params;
 
-  const chatContext = await requireOwnedChatById({ userId, chatId });
+  const chatContext = await requireOwnedChatById({ chatId });
   if (!chatContext.ok) {
     return { ok: false as const, response: chatContext.response };
   }
 
   const session = await getSessionById(sessionId);
-  if (!session || session.userId !== userId) {
+  if (!session) {
     return {
       ok: false as const,
       response: Response.json({ error: SESSION_NOT_FOUND }, { status: 404 }),
@@ -81,7 +78,7 @@ async function resolveContext(context: RouteContext, userId: string) {
     };
   }
 
-  const token = await getGithubToken(userId);
+  const token = await getGithubToken();
   if (!token) {
     return {
       ok: false as const,
@@ -121,12 +118,7 @@ function toErrorResponse(error: unknown): Response {
 }
 
 export async function GET(_request: Request, context: RouteContext) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
-  const resolved = await resolveContext(context, auth.userId);
+  const resolved = await resolveContext(context);
   if (!resolved.ok) {
     return resolved.response;
   }
@@ -145,11 +137,6 @@ export async function GET(_request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const parsed = openSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
     return Response.json(
@@ -158,7 +145,7 @@ export async function POST(request: Request, context: RouteContext) {
     );
   }
 
-  const resolved = await resolveContext(context, auth.userId);
+  const resolved = await resolveContext(context);
   if (!resolved.ok) {
     return resolved.response;
   }

@@ -13,7 +13,6 @@ import { getSessionByIdCached } from "@/lib/db/sessions-cache";
 import { buildModelOptions } from "@/lib/model-options";
 import { listAllModels } from "@/lib/model-catalog";
 import { enabledPluginRenderers } from "@/lib/plugins/renderer-info";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { parseThemePreference, THEME_COOKIE_NAME } from "@/lib/theme";
 import { getInitialIsOnlyChatInSession } from "./only-chat-in-session";
 import { SessionChatContent } from "./session-chat-content";
@@ -91,26 +90,11 @@ export default async function SessionChatPage({
 }: SessionChatPageProps) {
   const { sessionId, chatId } = await params;
 
-  // Start independent fetches in parallel
-  const sessionPromise = getServerSession();
-  const sessionRecordPromise = getSessionByIdCached(sessionId);
-
-  // Server-side auth check
-  const session = await sessionPromise;
-  if (!session?.user) {
-    redirect("/");
-  }
-
-  // Fetch session record
-  const sessionRecord = await sessionRecordPromise;
+  const sessionRecord = await getSessionByIdCached(sessionId);
   if (!sessionRecord) {
     notFound();
   }
 
-  // Check ownership
-  if (sessionRecord.userId !== session.user.id) {
-    redirect("/");
-  }
   // Fetch chat, messages, models, the chat list, and enabled plugins'
   // renderer slots in parallel.
   const [chat, dbMessages, initialModels, sessionChats, pluginRenderers] =
@@ -118,7 +102,7 @@ export default async function SessionChatPage({
       getChatByIdWithRetry(chatId, sessionId),
       getChatMessages(chatId),
       getInitialModels(),
-      getChatSummariesBySessionId(sessionId, session.user.id),
+      getChatSummariesBySessionId(sessionId),
       enabledPluginRenderers(),
     ]);
 

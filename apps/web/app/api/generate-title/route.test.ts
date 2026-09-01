@@ -2,10 +2,6 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 const generateTextCalls: Array<{ prompt: string }> = [];
 
-let currentSession: { user: { id: string } } | null = {
-  user: { id: "user-1" },
-};
-
 let generateTextResult: { text: string } | Error = {
   text: "Generated session title",
 };
@@ -22,10 +18,6 @@ mock.module("@/lib/claude/generate", () => ({
   },
 }));
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentSession,
-}));
-
 const routeModulePromise = import("./route");
 
 function createJsonRequest(body: unknown): Request {
@@ -38,22 +30,8 @@ function createJsonRequest(body: unknown): Request {
 
 describe("/api/generate-title", () => {
   beforeEach(() => {
-    currentSession = { user: { id: "user-1" } };
     generateTextResult = { text: "Generated session title" };
     generateTextCalls.length = 0;
-  });
-
-  test("returns 401 when user is not authenticated", async () => {
-    currentSession = null;
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(createJsonRequest({ message: "hello" }));
-    const body = (await response.json()) as { error: string };
-
-    expect(response.status).toBe(401);
-    expect(body.error).toBe(
-      "You've been signed out. Sign in again to continue.",
-    );
   });
 
   test("returns 400 for invalid JSON", async () => {

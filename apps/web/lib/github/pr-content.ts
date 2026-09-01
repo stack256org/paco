@@ -1,13 +1,10 @@
 import { generateObject } from "@/lib/claude/generate";
 import type { Sandbox } from "@paco/sandbox";
 
-import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { getConversationContext } from "@/app/api/generate-pr/_lib/generate-pr-helpers";
 import { getGithubConnection } from "@/lib/db/github-tokens";
-import { db } from "@/lib/db/client";
 import { getChatsBySessionId, getSessionById } from "@/lib/db/sessions";
-import { users } from "@/lib/db/schema";
 import { SAFE_BRANCH_PATTERN } from "@/lib/git/helpers";
 
 const prContentSchema = z.object({
@@ -88,31 +85,19 @@ export async function resolvePullRequestContextSection(params: {
   }
 
   if (sessionRecord) {
-    const [userRecord, ghProfile] = await Promise.all([
-      db.query.users.findFirst({
-        where: eq(users.id, sessionRecord.userId),
-        columns: {
-          name: true,
-          username: true,
-        },
-      }),
-      // The connected GitHub account. Read from the stored credential rather
-      // than a linked OAuth account, which no longer exists.
-      getGithubConnection(sessionRecord.userId),
-    ]);
+    // The connected GitHub account. Read from the stored credential rather
+    // than a linked OAuth account, which no longer exists. This used to fall
+    // back to the session owner's own name/username when no GitHub account
+    // was connected — Phase C removed application-level identity, so a
+    // connected GitHub account is the only name left to attribute to.
+    const ghProfile = await getGithubConnection();
     const githubUsername = ghProfile?.login?.trim() || null;
-    const displayName =
-      userRecord?.name?.trim() ||
-      githubUsername ||
-      userRecord?.username?.trim() ||
-      null;
 
-    if (displayName) {
-      const escapedDisplayName = escapeMarkdownText(displayName);
-      const originator = githubUsername
-        ? `[${escapedDisplayName}](https://github.com/${githubUsername})`
-        : escapedDisplayName;
-      parts.push(`Built with guidance from ${originator}`);
+    if (githubUsername) {
+      const escapedDisplayName = escapeMarkdownText(githubUsername);
+      parts.push(
+        `Built with guidance from [${escapedDisplayName}](https://github.com/${githubUsername})`,
+      );
     }
   }
 

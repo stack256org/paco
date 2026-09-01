@@ -1,9 +1,6 @@
 import { connectSandbox } from "@paco/sandbox";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionWithSandboxGuard,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionWithSandboxGuard } from "@/app/api/sessions/_lib/session-context";
 import { updateSession } from "@/lib/db/sessions";
 import { buildHibernatedLifecycleUpdate } from "@/lib/sandbox/lifecycle";
 import {
@@ -86,15 +83,9 @@ function parseGitFiles(output: string): FileSuggestion[] {
 }
 
 export async function GET(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId } = await context.params;
 
   const sessionContext = await requireOwnedSessionWithSandboxGuard({
-    userId: authResult.userId,
     sessionId,
     sandboxGuard: hasRuntimeSandboxState,
     sandboxErrorMessage: WORKSPACE_NOT_STARTED,

@@ -22,7 +22,6 @@ import { generatePullRequestContentFromSandbox } from "@/lib/github/pr-content";
 
 export interface AutoCreatePrParams {
   sandbox: Sandbox;
-  userId: string;
   sessionId: string;
   chatId: string;
   sessionTitle: string;
@@ -51,7 +50,7 @@ export async function performAutoCreatePr(
   const { sandbox, cwd } = params;
   const branch = chatBranchName(params.chatId);
 
-  const token = await getGithubToken(params.userId);
+  const token = await getGithubToken();
   if (!token) {
     return {
       created: false,

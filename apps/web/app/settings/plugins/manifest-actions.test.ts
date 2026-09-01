@@ -1,15 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
 
-let adminOk = true;
-mock.module("@/lib/admin/require-admin", () => ({
-  requireAdmin: async () => {
-    if (!adminOk) {
-      throw new Error("Not an administrator");
-    }
-    return "admin-1";
-  },
-}));
-
 type FakeRow = {
   id: string;
   manifest: {
@@ -59,15 +49,6 @@ mock.module("@/lib/db/plugins", () => ({
 const { getPluginConsentDetailsAction } = await import("./manifest-actions");
 
 describe("getPluginConsentDetailsAction", () => {
-  test("rejects a non-admin caller", async () => {
-    adminOk = false;
-    rows = new Map();
-    await expect(getPluginConsentDetailsAction("some-plugin")).rejects.toThrow(
-      "Not an administrator",
-    );
-    adminOk = true;
-  });
-
   test("returns the manifest's exact declared net:fetch domains", async () => {
     rows = new Map([
       [

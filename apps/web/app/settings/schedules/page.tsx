@@ -8,13 +8,9 @@ export const metadata: Metadata = {
 };
 
 /**
- * Unlike `/settings/agents`, this page is not admin-gated as a whole — every
- * org member may view the organisation's schedules, the same collaborative
- * reasoning `/tasks` uses for the task board. Only creating, editing,
- * deleting, toggling, and "Run now" are admin only, decided inside
- * `SchedulesPageContent` (and enforced again, server-side, by
- * `requireOrgAdmin` in `./actions.ts` regardless of what the client
- * renders).
+ * Shows the organisation's schedules along with full create, edit, delete,
+ * toggle, and "Run now" controls — the instance has exactly one tenant, so
+ * there is no separate admin-only gate for those actions any more.
  */
 export default function SchedulesPage() {
   return <SchedulesPageContent />;

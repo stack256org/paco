@@ -1,8 +1,10 @@
 import { eq } from "drizzle-orm";
-import { nanoid } from "nanoid";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
 import { db } from "./client";
 import { userPreferences, type UserPreferences } from "./schema";
+
+/** The one row `userPreferences` ever holds — see `instanceSettings`'s identical pattern. */
+const PREFERENCES_ROW_ID = true;
 
 export type DiffMode = "unified" | "split";
 
@@ -67,32 +69,28 @@ export function toUserPreferencesData(
 }
 
 /**
- * Get user preferences, creating default preferences if none exist
+ * This instance's one set of preferences, creating defaults if none exist yet.
+ *
+ * Unfiltered by design: the instance has exactly one tenant, so whichever
+ * row exists (there is at most one) is the correct read. No `userId` is
+ * needed to ask for it.
  */
-export async function getUserPreferences(
-  userId: string,
-): Promise<UserPreferencesData> {
-  const [existing] = await db
-    .select()
-    .from(userPreferences)
-    .where(eq(userPreferences.userId, userId))
-    .limit(1);
+export async function getUserPreferences(): Promise<UserPreferencesData> {
+  const [existing] = await db.select().from(userPreferences).limit(1);
 
   return toUserPreferencesData(existing);
 }
 
 /**
- * Update user preferences, creating if they don't exist
+ * Update this instance's preferences, creating the row if it doesn't exist.
+ *
+ * The lookup and the update are both unfiltered — there is at most one row
+ * to find or touch.
  */
 export async function updateUserPreferences(
-  userId: string,
   updates: Partial<UserPreferencesData>,
 ): Promise<UserPreferencesData> {
-  const [existing] = await db
-    .select()
-    .from(userPreferences)
-    .where(eq(userPreferences.userId, userId))
-    .limit(1);
+  const [existing] = await db.select().from(userPreferences).limit(1);
 
   if (existing) {
     const [updated] = await db
@@ -101,7 +99,7 @@ export async function updateUserPreferences(
         ...updates,
         updatedAt: new Date(),
       })
-      .where(eq(userPreferences.userId, userId))
+      .where(eq(userPreferences.id, existing.id))
       .returning();
 
     return toUserPreferencesData(updated);
@@ -111,8 +109,7 @@ export async function updateUserPreferences(
   const [created] = await db
     .insert(userPreferences)
     .values({
-      id: nanoid(),
-      userId,
+      id: PREFERENCES_ROW_ID,
       defaultModelId:
         updates.defaultModelId ?? DEFAULT_PREFERENCES.defaultModelId,
       defaultDiffMode:

@@ -1,13 +1,10 @@
-import { requireAdmin } from "@/lib/admin/require-admin";
-import { NOT_YOURS, SIGNED_OUT } from "@/lib/error-copy";
-
 /**
  * Restart the paco.service unit.
  *
- * A domain saved in Settings only reaches better-auth's trusted-host list when
- * the process starts, so "save" alone leaves the instance in a state where the
- * new address is configured but not yet honoured. Rather than explain that,
- * the settings page offers the restart.
+ * A domain saved in Settings only reaches the process's allowed-host list
+ * when the process starts, so "save" alone leaves the instance in a state
+ * where the new address is configured but not yet honoured. Rather than
+ * explain that, the settings page offers the restart.
  *
  * This used to shell out to `docker restart <container>`, from when Paco
  * itself ran as a Docker container. That deployment path is gone — the
@@ -25,20 +22,6 @@ import { NOT_YOURS, SIGNED_OUT } from "@/lib/error-copy";
  * and the browser would show a network error for an action that worked.
  */
 export async function POST(): Promise<Response> {
-  // Route handlers get no error interceptor in this app, so an admin check
-  // that only throws would let a non-admin's request fall through Next's
-  // generic 500 instead of the `{ error }` shape this route's caller relies
-  // on. Catch it here and answer in that shape ourselves.
-  try {
-    await requireAdmin();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message === SIGNED_OUT) {
-      return Response.json({ error: SIGNED_OUT }, { status: 401 });
-    }
-    return Response.json({ error: NOT_YOURS }, { status: 403 });
-  }
-
   // Detached: the process must not be waiting on a command that kills it.
   setTimeout(() => {
     void import("node:child_process").then(({ spawn }) => {

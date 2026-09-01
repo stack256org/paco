@@ -1,7 +1,7 @@
 # Running Paco yourself
 
 Operator notes for a Paco instance you own: how to install it, what to back
-up, how to restore it, who is allowed to sign in, how to upgrade, and where
+up, how to restore it, how access is controlled, how to upgrade, and where
 the disk goes.
 
 This describes the **native package** (systemd + `apt`) — the only supported
@@ -22,7 +22,10 @@ curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 > **What has been verified**, on bare Ubuntu 24.04 VMs, by installing the real
 > `.deb` and driving it in a browser rather than with `curl`:
 >
-> - `systemctl is-active paco` → `active`; `/` → 307 to `/onboarding`, then 200.
+> - `systemctl is-active paco` → `active`; `/` prompts for the instance
+>   password, then 200 straight through to the app. (An earlier release
+>   redirected `/` to `/onboarding`; that route is gone as of Phase C — there
+>   are no accounts to onboard into.)
 > - Postgres listens on the loopback only, the port is closed from off-host,
 >   and a TCP connection is refused even locally — the role is passwordless and
 >   peer-auth only, by design (§4).
@@ -30,9 +33,11 @@ curl -fsSL https://apt.stack256.org/paco/install.sh | sudo sh
 >   appears anywhere in the install output.
 > - The bundled Claude Code CLI runs as the `paco` user; `/usr/bin/paco` is the
 >   operator CLI, not the service entrypoint; the sudoers rules pass `visudo`.
-> - The whole first-run walk: claim the instance → Platform → Mail (with a bad
->   SMTP server's verbatim error) → Done, and the **Restart now** button
->   actually restarting the unit.
+> - The **Restart now** button (Settings → Admin → Domain) actually
+>   restarting the unit. (The multi-step first-run wizard this bullet used
+>   to describe — claim the instance → Platform → Mail → Done — no longer
+>   exists: accounts are gone, so `/` now goes straight past the instance
+>   password gate into the app, with nothing to configure first.)
 > - `APP_SECRET`, the database, and `/var/lib/paco/.claude` all survive
 >   reinstall → `apt remove` → reinstall. `apt purge` removes exactly the two
 >   things it says it will, and leaves the Postgres database alone (§10).
@@ -81,7 +86,7 @@ install *and* every upgrade:
 - creates the `paco` system user and its home, `/var/lib/paco`;
 - creates `/etc/paco` and generates `/etc/paco/paco.env` — **once, ever** —
   with a fresh `APP_SECRET`, the Postgres connection string, and the
-  workspace root (see §2 and §20);
+  workspace root (see §2 and §19);
 - creates the `paco` Postgres role and the `paco` database, over a Unix
   socket, as the `postgres` OS user — there is no TCP listener to reach, and
   no password, ever (peer authentication matches the connecting OS user to
@@ -109,25 +114,16 @@ paco: installed. Open http://<this host>/ to finish setup.
 
 ### First run
 
-Open that URL (or your domain, if you gave one). First run is a guided setup
-that walks through claiming the instance:
+Open that URL (or your domain, if you gave one). There is no onboarding
+flow — Paco has no application-level authentication and no accounts, so
+there is nothing to claim and nobody to sign in as. The browser prompts for
+the instance password (see [The instance password](#the-instance-password)
+below); enter it, and you land directly on `/sessions`.
 
-1. **Account** — "Claim this instance." Not skippable: this is what makes an
-   account exist at all, and the account created here becomes the
-   administrator. One email address, one optional organisation name (defaults
-   to "Paco").
-2. **Platform** — confirms the address, preview domain, and TLS setting the
-   installer already established (or left blank). The same form as **Settings
-   → Admin → Domain**; nothing here is a one-time-only choice.
-3. **Mail server** — the same form as **Settings → Admin → Mail server**.
-   **Skippable**, with a warning that says exactly what skipping costs:
-   nobody else can be invited until a mail server is set, because the invite
-   form itself refuses without one. Finish it later from Settings if you skip
-   it now.
-4. **Done** — "Go to Paco."
-
-Re-visiting `/` or `/onboarding` after this redirects straight past it; it
-only ever runs once, for the account that claims the instance.
+The address, preview domain, and TLS setting the installer already
+established (or left blank) live in **Settings → Admin → Domain**, the same
+form `install.sh --domain` writes to up front — there is no separate
+first-run step for any of it.
 
 ### What installing does not do for you
 
@@ -137,13 +133,12 @@ the service is running — all before the installer returns. What is left:
 
 - **`sudo paco auth`** — see §3. It needs your Claude account, so no installer
   can do it for you, and nothing runs a chat until it is done.
-- **A domain**, entered in step 2 of the wizard, which will not continue without
-  one. Not for reaching Paco — it answers on whatever address the request came
-  in on, so the IP the installer prints works straight away — but for the links
-  it *sends*. Invitations and sign-in links are built from this; unset, they are
-  built from a localhost fallback and arrive in somebody else's inbox pointing
-  at a host only this server can open. Point an A record at this host, then
-  enter it. `--domain` at install time sets the same value up front.
+- **A domain**, set in **Settings → Admin → Domain** or with `--domain` at
+  install time. Not for reaching Paco — it answers on whatever address the
+  request came in on, so the IP the installer prints works straight away —
+  but for the links it *sends* and for preview hostnames (§8). Unset, links
+  are built from a localhost fallback that only this server can open. Point
+  an A record at this host, then set the domain.
 - **A certificate**, if you want `https://`. See §8.
 
 Two things that look like steps but are not:
@@ -151,7 +146,7 @@ Two things that look like steps but are not:
 - **The workspace image.** The first chat pulls
   `ghcr.io/stack256org/paco-sandbox` itself. It is a few gigabytes, so
   pulling it ahead of time moves that wait somewhere you chose — but doing
-  nothing is fine. The tag is `v<your version>`, not `latest`; see §22 for the
+  nothing is fine. The tag is `v<your version>`, not `latest`; see §21 for the
   exact command.
 - **The docker group.** `postinst` adds the `paco` user to it, so
   `apt install paco` is as complete as the `curl | sh` route. It only skips
@@ -314,7 +309,7 @@ to `/etc/paco/paco.env` (`dockerode` honours it) and restarting `paco`.
 | `/usr/bin/paco` | The operator command (`scripts/paco`): `upgrade`, `logs`, `restart`, `status`, `auth [claude\|poolside]`, `tls`. See §3. |
 | `/usr/lib/paco/paco-entrypoint.sh` | What `paco.service` runs: applies pending migrations, resolves a domain saved in Settings into `APP_URL`, then `exec`s the server so systemd signals the Node process rather than a wrapper. |
 | `/usr/bin/claude` | A thin wrapper `exec`ing `/usr/lib/paco/node/bin/claude`, so `claude` is on `PATH` without also putting the bundled Node/npm/npx on it. |
-| `/etc/paco/paco.env` | Configuration: `POSTGRES_URL`, `PGHOST`, `APP_SECRET`, `PACO_WORKSPACE_ROOT`, plus anything you or `install.sh --domain` add (`APP_URL`, `SMTP_*`). Mode `640`, owned `root:paco` — generated once by `postinst` and never regenerated. See §20. |
+| `/etc/paco/paco.env` | Configuration: `POSTGRES_URL`, `PGHOST`, `APP_SECRET`, `PACO_WORKSPACE_ROOT`, plus `APP_URL` if you or `install.sh --domain` add it. Mode `640`, owned `root:paco` — generated once by `postinst` and never regenerated. See §19. |
 | `/var/lib/paco` | The `paco` user's home, and all of its state: `workspaces/` (every session's git repository and chat worktrees), `.claude/` (the Claude Code credential, written by `paco auth`) and — if you use Poolside and signed in rather than pasting a key — `.config/poolside/` (written by `paco auth poolside`, §18). This directory is the entire reason the delivery model changed — see §3. |
 | `/etc/nginx/sites-available/paco` (+ `sites-enabled/paco`) | The nginx site proxying to the app. Edited by `paco tls` when you add a domain (§8). |
 | `/lib/systemd/system/paco.service` | The systemd unit. `Requires=postgresql.service`; runs as `User=paco Group=paco`. |
@@ -366,15 +361,51 @@ touch, for the same reason.
 | --- | --- |
 | `paco upgrade` | `apt-get update && apt-get install --only-upgrade paco` |
 | `paco logs [-n N]` | Follow the unit's journal; extra args pass through |
-| `paco restart` | Re-reads `paco.env` — the only way to apply a hand-edited `APP_URL` or `SMTP_*` |
+| `paco restart` | Re-reads `paco.env` — the only way to apply a hand-edited `APP_URL` |
 | `paco status` | Unit state, installed version, configured domain, whether the bundled CLI is present, whether `paco` is authenticated, and how Poolside is signed in |
 | `paco auth` | Unchanged: the same as `paco auth claude` |
 | `paco auth claude` | Signs the `paco` user into Claude Code, so the credential lands in `/var/lib/paco/.claude` and survives every upgrade |
 | `paco auth poolside` | Runs `pool login` as the `paco` user, for the Poolside backend (§18). You install `pool` yourself; extra arguments pass through to it |
 | `paco tls <domain>` | A certificate via certbot, DNS-checked first, nginx reloaded after. Optional — and skip it entirely if something in front of this host already terminates TLS (§8) |
+| `paco password` | Rotates the instance password; prompts twice (or reads stdin with `paco password --stdin`) |
 
 There is no `uninstall`; it refuses on purpose and points at `apt remove` /
 `apt purge` (§5).
+
+---
+
+## The instance password
+
+Paco is protected by one password, checked by nginx before a request ever
+reaches the app. The username is always `paco`.
+
+It is set for you at install time. If you install with a terminal, you are
+asked to choose one; if you pipe the installer (`curl ... | sudo sh`), there
+is no terminal to ask on, so a strong password is generated and printed in
+the closing summary. That summary is the only time it is printed — write it
+down.
+
+Change it at any time:
+
+    sudo paco password
+
+Nothing needs restarting. nginx re-reads the password file on every request,
+so the new password works immediately and any browser holding the old one is
+asked again on its next request. That re-prompt is what replaces signing out;
+there is no sign-out button, because there is no session to end.
+
+`paco status` shows whether the instance is still using the password
+generated at install:
+
+    Password:  set (still the one generated at install; change with 'sudo paco password')
+
+Until it is changed, that generated password is also readable at
+`/etc/paco/initial-password`, which is root-only. `paco password` deletes
+that file, so its absence is what "the operator has set their own" means.
+
+**This protection exists only where nginx does** — the `.deb` install. A
+development checkout run with `pnpm web` has no nginx and no password, and
+must not be exposed to a network.
 
 ---
 
@@ -405,6 +436,17 @@ release turns out to be wrong. Back up first:
 ```bash
 sudo -u paco pg_dump -h /var/run/postgresql -Fc paco > pre-upgrade-$(date +%F).dump
 ```
+
+`apt-get install paco` — with no `install.sh` — is itself a supported way to
+get a first install, and `postinst` generates the instance password silently
+on that path: nothing in apt's own output says a password exists. Read it
+with:
+
+    sudo cat /etc/paco/initial-password
+
+and change it any time with:
+
+    sudo paco password
 
 ---
 
@@ -508,22 +550,23 @@ subscription.
 sudo cp /etc/paco/paco.env paco-env-$(date +%F).txt   # contains APP_SECRET — store it encrypted
 ```
 
-**Read this before you rely on any of the above.** `APP_SECRET` does two
-jobs (`apps/web/lib/auth/config.ts`, `apps/web/lib/crypto/secret-box.ts`): it
-signs auth sessions, and it derives — via scrypt with a fixed salt — the
-AES-256-GCM key that encrypts every stored GitHub token. **A database
-restored under a different `APP_SECRET` loses every GitHub token
-permanently** — the ciphertext is authenticated, so decryption fails
+**Read this before you rely on any of the above.** Paco has no
+application-level authentication and no accounts, so `APP_SECRET` now has
+exactly one job (`apps/web/lib/crypto/secret-box.ts`): it derives — via
+scrypt with a fixed salt — the AES-256-GCM key that encrypts the instance's
+one stored GitHub token. That makes it *more* important to back up than
+before, not less — there is no second purpose left to notice it broke.
+**A database restored under a different `APP_SECRET` loses that GitHub
+token permanently** — the ciphertext is authenticated, so decryption fails
 outright instead of returning garbage, and there is no recovery path short
-of every user pasting a new personal access token into Settings →
-Connections. The failure is quiet: `getGithubToken()` catches the error,
-logs it, and returns `null`; Settings → Connections keeps showing the
-account as connected, because that view reads the login and scopes columns
-and never decrypts anything — only pushes and pull requests behave as though
-nothing were connected. So: back up `paco.env`, specifically `APP_SECRET`,
-in a password manager or secrets store — not only as the file sitting on the
-machine you're backing up. Changing `APP_SECRET` also signs everyone out
-immediately, which is the visible half of the same event.
+of pasting a new personal access token into Settings → Connections. The
+failure is quiet: `getGithubToken()` catches the error, logs it, and returns
+`null`; Settings → Connections keeps showing the instance as connected,
+because that view reads the login and scopes columns and never decrypts
+anything — only pushes and pull requests behave as though nothing were
+connected. So: back up `paco.env`, specifically `APP_SECRET`, in a password
+manager or secrets store — not only as the file sitting on the machine
+you're backing up.
 
 ### Restore
 
@@ -576,8 +619,8 @@ directory.
 
 1. `journalctl -u paco` shows `paco: applying migrations` and then `paco:
    starting server`, with no crash in between.
-2. Sign in. A restored `APP_SECRET` means existing session cookies still
-   work; otherwise everyone gets a fresh magic link.
+2. Open the app past the instance password — there is no sign-in to
+   exercise, but a page that loads at all confirms migrations came up clean.
 3. Settings → Connections says "connected" from the database regardless of
    whether decryption actually works — prove it by opening a session and
    pushing, or by checking the server log for "could not be decrypted."
@@ -591,45 +634,49 @@ directory.
 
 ---
 
-## 7. Who can sign in, and who is the administrator
+## 7. Who can access the instance
 
-Sign-in is a magic link and nothing else: type an email address, receive a
-single-use link valid for 10 minutes. There is no password, and there are no
-social providers.
+Anyone who has the instance password — see [The instance
+password](#the-instance-password). There are no accounts, no roles, and no
+administrator: Phase C removed application-level identity entirely
+(`users`, sign-in, and every per-request identity check with it), so
+nginx's `auth_basic` check in front of the app is the whole gate, evaluated
+once per request rather than once at sign-in. Everyone who is past it can do
+everything the instance can do — create chats, run tasks, edit memory,
+install plugins, change settings.
 
-That makes account *creation* the thing to control, because better-auth
-creates an account for any address it hasn't seen before. Two rules do it
-(`apps/web/lib/auth/signup-policy.ts`, `apps/web/lib/auth/bootstrap-admin.ts`):
+### Giving someone access
 
-1. **The account created during first run's "Account" step (§1) becomes the
-   administrator** — this is what claims the instance, and it can only ever
-   happen once, while the instance has zero users.
-2. **Every later account is refused**, unless an administrator has
-   explicitly opened sign-ups.
+Tell them the instance password. There is nothing to invite, nothing to
+approve, and no separate role to grant — having the password *is* having
+access, the same access you have.
 
-The risk this defends against is specific: an instance reachable from the
-internet, with an empty database, hands full ownership to whoever loads the
-URL first. There is no password to guess and no step to get wrong — so on
-any machine that is not `localhost`, **finish first run yourself before you
-share the address.**
+### Taking it away
 
-### Adding someone
+Rotate the password:
 
-1. Sign in as the administrator.
-2. Settings → Admin, turn **sign-ups** on.
-3. Have them sign in with their email address — that creates their account.
-4. Turn sign-ups off again.
+    sudo paco password
 
-While sign-ups are on, anyone who can reach the URL can create an account, so
-keep the window short. A refused sign-up looks like a failed sign-in and says
-nothing about whether the address already exists. Signing *in* to an account
-that already exists is never affected by this setting.
+nginx re-reads the file on every request, so this takes effect immediately.
+Anyone still holding the old password is asked again on their next request;
+there is no session to revoke, because there is no session.
 
-Administrators also get Settings → Users and the ability to delete every
-stored GitHub credential at once (Settings → Admin). Deleting Paco's copy
-does not revoke the token at GitHub — a personal access token belongs to the
-user, who revokes it themselves. Nothing in the UI grants admin to a second
-person; promotion is `UPDATE users SET is_admin = true` against the database.
+Settings → Admin also has a **delete the stored GitHub credential** action,
+which removes Paco's own copy of the instance's GitHub token. It does not
+revoke the token at GitHub — a personal access token is revoked at
+github.com/settings/tokens, by whoever created it.
+
+### Upgrading from before Phase C
+
+**Upgrading from before Phase C:** GitHub used to be connected per user, so
+an instance several people had connected their own accounts to had several
+rows in `github_tokens`. Migration `0018` deletes all of them whenever more
+than one exists, rather than picking one to keep — silently inheriting an
+arbitrary departed teammate's identity and scopes for the instance's git
+commit author would be worse than coming up disconnected. If your instance
+had more than one person connected, it comes up after the upgrade with
+GitHub disconnected; one person reconnects once, deliberately, from
+**Settings → Connections**.
 
 ---
 
@@ -713,13 +760,59 @@ it prints a reminder instead. Do that in Settings, or by hand in
 
 Each chat can be reached at its own hostname — `<slug>.<preview base
 domain>`, the slug derived from the chat's id — once an operator sets a
-**preview domain** in **Settings → Admin → Domain** (also part of first
-run's "Platform" step). Until it's set, the Preview tab says so and links to
-Settings instead of a dead link.
+**preview domain** in **Settings → Admin → Domain**. Until it's set, the
+Preview tab says so and links to Settings instead of a dead link.
 
 **The DNS record is a wildcard A record** — `*.previews.example.com`,
 pointed at this host — because a chat's slug isn't known ahead of time; one
 record covers every chat that will ever exist.
+
+**On a platform that terminates TLS for you, register the wildcard there
+instead.** On Krova Cloud that is one command, once:
+
+```bash
+krova domains add "*.previews.example.com"
+```
+
+Krova provisions and renews the certificate at its edge, so leave TLS **off**
+in Settings and do not run `paco tls` for preview hostnames — the HTTP-01
+challenge would arrive at the edge, not here, for the reason §7 explains.
+Paco then generates plain `listen 80;` blocks and the edge does the rest;
+that is the shape `certDir: null` already produces
+(`apps/web/lib/preview/nginx-reload.ts`), so nothing needs configuring
+beyond the base domain.
+
+One thing to check the first time: **the edge must forward the original
+`Host` header.** Every generated block matches on
+`server_name <slug>.previews.example.com`, so an edge that rewrites `Host`
+sends the request to nginx's default server — you land on Paco itself
+instead of the preview. If that happens, it is the edge's forwarding
+configuration, not Paco's routing. Caddy — which several platforms use,
+Krova among them — preserves it by default on `reverse_proxy`.
+
+That header carries more than preview routing, and the second thing it
+carries fails differently enough to be worth knowing about in advance:
+**Next compares a Server Action's `Origin` against `Host` (or
+`X-Forwarded-Host`) and aborts the request when they disagree.** Paco uses
+server actions for most of Settings, tasks and memory, so an edge that
+rewrites `Host` does not merely break previews — it makes saving anything
+fail, while pages still render normally. Two unrelated-looking symptoms,
+one cause.
+
+Nothing needs configuring for this as long as the header survives the hop.
+If your edge genuinely cannot preserve it, Next's escape hatch is
+`experimental.serverActions.allowedOrigins` in `apps/web/next.config.ts`
+(see `node_modules/next/dist/docs/01-app/02-guides/data-security.md`) —
+but fix the edge first; the allow-list weakens a CSRF protection to work
+around a proxy misconfiguration.
+
+**Why previews get their own hostname rather than a path under Paco's own
+domain.** A preview serves whatever the agent wrote. A separate hostname is a
+separate browser origin, so preview code cannot read Paco's storage, script
+its pages, or make credentialed requests to its API. Served at
+`paco.example.com/preview/<id>/` it would be same-origin, and the browser
+would attach the instance password to every `fetch("/api/…")` that page made.
+The wildcard costs one DNS record; the alternative costs the boundary.
 
 **How it's routed.** Unlike the Traefik deployment this replaced, which
 discovered sandbox containers dynamically through Docker labels, Paco itself
@@ -729,6 +822,19 @@ preview, under `/etc/paco/nginx/paco-preview-<hostname>.conf`
 published the chat's dev server. Before every reload it snapshots every file
 it's about to touch, so a failed `nginx -t` restores exactly what was there
 before rather than leaving a half-written config.
+
+**Sandbox ports are published on loopback only.** A sandbox's dev server is
+bound to `127.0.0.1` on an ephemeral host port, so nginx — which holds the
+instance password — is the only way to reach it
+(`packages/sandbox/docker/sandbox.ts`, `buildPortBindings`). Docker publishes
+on `0.0.0.0` when told nothing, which would have put every chat's dev server
+on every interface with no password at all.
+
+> **Upgrading:** Docker cannot rebind a running container, so any sandbox
+> created before this change keeps its old binding until it is recreated.
+> Stop the affected chats' sandboxes once after upgrading, or run
+> `docker ps --filter name=paco-sandbox --format '{{.Names}}\t{{.Ports}}'`
+> and look for anything published on `0.0.0.0`.
 
 **Why that directory and not `/etc/nginx/conf.d`.** Paco runs as the
 unprivileged `paco` user, and `/etc/paco/nginx/` is a directory it owns. A
@@ -749,28 +855,22 @@ If a preview hostname fails to come up, `journalctl -u paco` after opening
 the link is where a `sudo: a password is required` or a permission error
 writing under `/etc/paco/nginx` would appear.
 
-**Privacy is enforced the same way as before, just fronted by nginx instead
-of Traefik.** Every preview's `location /` runs `auth_request` against
-`GET /api/preview-auth` before proxying anywhere — the same
-`decidePreviewAccess` logic as the old deployment, unchanged. New previews
-are **private** by default; the chat owner can make one **public** from the
-Preview tab, after a warning worth repeating here: a public preview can be
-opened by **anyone with the link, no sign-in required**, serving whatever
-code the agent has just written — code that may be wired to real credentials
-or real data. Treat "make public" as putting a URL on the open internet,
-because that is what it does.
+**A preview is behind the same instance password as everything else — nothing
+more, nothing less.** Every generated `server {}` block carries `auth_basic
+"Paco"` reading `/etc/nginx/paco.htpasswd`, the identical pair the package
+writes for the main site (§`The instance password`). There is no per-chat
+public/private toggle, no "make public" action, and no shareable link that
+bypasses it — a preview that used to be public before this change is no
+longer reachable without the password. **To let someone else see a preview,
+give them the instance password** (or rotate it with `sudo paco password`
+once they no longer need access) — there is no narrower way to share one.
 
-One narrowing worth knowing about: nginx's `auth_request` module only
-understands three outcomes from that subrequest — 2xx (allow), 401, and 403
-(deny) — anything else becomes a bare internal 500. The old Traefik
-forward-auth relayed *any* response, including a 302 that let a private
-preview's owner get redirected through a "grant" round-trip when their
-Paco session cookie couldn't otherwise reach the preview's own hostname.
-Both `nginx-config.ts` and the `/api/preview-auth` route's own comments
-acknowledge that this redirect no longer survives the move to nginx as
-literally as the plain allow/deny paths do — so a private preview's owner,
-opening it for the first time without already holding that preview's grant
-cookie, may see a 500 rather than being signed in automatically.
+This replaced the old `auth_request` subrequest to `/api/preview-auth` and
+its per-chat `decidePreviewAccess` logic entirely, along with the "grant
+cookie" round-trip that used to sign a preview's owner in automatically. Both
+are gone: `auth_basic` is a static check against one password file, so there
+is no subrequest, no cookie, and no separate code path to fail into a bare
+500.
 
 #### Previews over HTTPS
 
@@ -948,7 +1048,7 @@ fails, all at once, for the same reason**:
   ```
 
 - The fix is to point `PACO_PLUGIN_NODE_EXECUTABLE` at a Node >= 24 binary in
-  `/etc/paco/paco.env` and restart (§20). It is a pointer, not a bypass:
+  `/etc/paco/paco.env` and restart (§19). It is a pointer, not a bypass:
   `start()` re-checks whatever it resolves to and refuses again if that binary
   is also too old.
 
@@ -969,7 +1069,7 @@ otherwise the service user's home plus `/.paco`. **On the native package that
 resolves to `/var/lib/paco/.paco/plugins`** — `postinst` uses `PACO_HOME` as a
 shell variable while generating `paco.env` but never writes it into the file,
 so the home-relative fallback is what actually applies, and the `paco` user's
-home is `/var/lib/paco`. `PACO_PLUGINS_DIR` overrides the whole path (§20).
+home is `/var/lib/paco`. `PACO_PLUGINS_DIR` overrides the whole path (§19).
 
 That directory is inside `/var/lib/paco`, so `apt remove` keeps it and
 `apt purge` destroys it (§5) — but **§6's workspaces tarball does not cover
@@ -1020,7 +1120,7 @@ It is given exactly three environment variables — `PACO_INTERNAL_URL`,
 `PACO_INTERNAL_TOKEN` and `PACO_PLUGIN_TOOLS` — and deletes every other key off
 `process.env` before its first network call, recording on stderr which keys
 survived. **These are set by Paco, per turn; never put them in `paco.env`**
-(§20).
+(§19).
 
 The callback URL is loopback, derived from `APP_URL`'s port — and `APP_URL` on
 a native install usually names no port, so it falls back to `:80`. On this
@@ -1034,26 +1134,33 @@ port 80.
 ## 13. Memory
 
 Paco distils durable notes out of chat turns and feeds a scored selection of
-them back into later turns' system prompts. There are three scopes — project,
-user, and organisation — all stored as plain markdown files with YAML
-frontmatter, readable and editable by hand.
+them back into later turns' system prompts. There are two scopes — project
+and instance — both stored as plain markdown files with YAML frontmatter,
+readable and editable by hand.
 
 **There is nothing to turn on.** Memory is always active; the only operator
-surface is **Settings → Memory**, where any member sees and edits their own
-user memory, and an admin also sees the organisation's. Project memory is not
-shown there at all.
+surface is **Settings → Memory**, which shows and edits the instance's
+memory. Project memory is not shown there at all.
 
 ### Where each scope actually lives
 
 | Scope | Path | Written by |
 | --- | --- | --- |
-| **User** | `<data dir>/memory/users/<user id>/` | Post-turn distillation, and hand edits in Settings → Memory |
-| **Organisation** | `<data dir>/memory/orgs/<org id>/` | Promotion only — never automatically |
+| **Instance** | `<data dir>/memory/instance/` | Post-turn distillation, and hand edits in Settings → Memory |
 | **Project** | `<session workspace>/repo/.paco/memory/` | Post-turn distillation only |
 
 The data dir is `PACO_HOME`, or the service user's home plus `/.paco` — on the
 native package, `/var/lib/paco/.paco/memory` (§12 has the same note for
 plugins, and the same backup gap: §6's workspaces tarball does not include it).
+
+**Upgrading from before Phase C:** instance memory used to be two scopes,
+user and organisation, each keyed by an id that no longer exists once
+accounts are gone. Nothing migrates those directories automatically —
+`memory/users/<user id>/` and `memory/orgs/<org id>/` are left on disk,
+untouched and unread, while a fresh, empty `memory/instance/` starts
+accumulating from the next turn. Merging old per-user memories into one
+instance-wide set is a call only you can make; copy what is worth keeping
+into `memory/instance/` by hand.
 
 ### Project memory is not versioned, and is lost with the workspace
 
@@ -1093,30 +1200,26 @@ workspace reclaim, or reach another machine — **commit `.paco/memory` yourself
 if you want it shared and reviewable.** Until you do, treat it as a cache that
 improves turns in a long-lived session, not as a record.
 
-User and organisation memory are unaffected by any of this: they live in the
-data dir, keyed by id, and have no relationship to a repository at all.
+Instance memory is unaffected by any of this: it lives in the data dir and
+has no relationship to a repository at all.
 
 ### What runs, and when
 
 - **Post-turn distillation.** After a qualifying turn, one cheap Haiku call
-  extracts at most three project entries and two user entries. Turns with a
-  prompt under 20 characters, or under 500 output tokens, are skipped as too
+  extracts at most three project entries and two instance entries. Turns with
+  a prompt under 20 characters, or under 500 output tokens, are skipped as too
   trivial to teach anything. It costs a model call per qualifying turn.
 - **Daily reflection, at 04:00 UTC.** A pg-boss cron job looks across up to 50
   recent turns for friction that repeats and proposes encoding it as a project
   skill. It is **human-gated by construction**: a proposal only ever files a
   `blocked` task on the board (§14), and never writes a skill file itself.
-- **Promotion to org memory.** An admin's "promote" writes immediately. A
-  non-admin member's promote writes nothing and files a `blocked` proposal task
-  for an admin to review.
 
-Two costs worth stating plainly. **Distillation and reflection are always
+One cost worth stating plainly: **distillation and reflection are always
 Claude Code**, not the chat's backend — so a chat you moved to Poolside
 specifically to avoid Claude still has its memory distilled by Claude
-(`lib/memory/distill.ts` says so at the call site). And **organisation memory
-is injected into every member's turns**, so a promoted entry is shared context
-for the whole instance; that is why promotion is admin-gated and never
-automatic.
+(`lib/memory/distill.ts` says so at the call site). And **instance memory is
+injected into every turn on this instance**, so a distilled entry is shared
+context for everything that runs here, not just the chat that produced it.
 
 Nothing here can fail a turn. A missing or unreadable memory directory reads as
 an empty list, and any unexpected error is logged and treated as "nothing to
@@ -1193,22 +1296,22 @@ because it runs against a real chat's worktree.
 
 | Origin | Filed by |
 | --- | --- |
-| **User** | The board's own "new task", and a member's org-memory proposal (§13) |
+| **User** | The board's own "new task" |
 | **Planner** | A decomposed goal — the root node and every child |
 | **Schedule** | A cron tick, or "Run now" (§17) |
 | **Channel** | A plugin holding `tasks:create` — a Slack mention, for instance (§12). Hardcoded at the call site, never read from the plugin's payload |
 | **Reflection** | The daily reflection pass, proposing a skill (§13) |
 
-A proposal task — from reflection, or from a non-admin's memory promotion —
-has **no session at all**, and is filed already `blocked`. That is why
-`tasks.sessionId` is nullable, and why unblocking one releases it into the
-backlog for someone to act on rather than resuming a turn that never ran.
+A proposal task — from reflection — has **no session at all**, and is filed
+already `blocked`. That is why `tasks.sessionId` is nullable, and why
+unblocking one releases it into the backlog for someone to act on rather
+than resuming a turn that never ran.
 
 ---
 
 ## 15. Agents (the roster)
 
-**Settings → Agents** (admin only) is the organisation's subagent roster: the
+**Settings → Agents** is the instance's subagent roster: the
 named personas a turn can delegate to, each with its own prompt, model tier and
 tool list. Every chat turn is handed the enabled ones; a task can be assigned to
 one by name.
@@ -1264,7 +1367,7 @@ port convention that is honoured by convention rather than enforced.
 
 Each candidate is served at its own hostname — `<chat slug>-d<n>.<preview base
 domain>` — routed by the same generated nginx blocks and the same
-`auth_request` forward-auth as an ordinary preview (§8). **With no preview base
+`auth_basic` instance-password gate as an ordinary preview (§8). **With no preview base
 domain set in Settings → Admin → Domain, `buildCandidatePreviews` returns an
 empty list and the design panel has nothing to embed.** The candidates still
 run, still commit, and are still there as branches — you just cannot look at
@@ -1335,9 +1438,9 @@ session, a cron, a goal, and optionally a roster agent to assign it to. Each
 tick creates a task with `origin: "schedule"` in that session and starts it
 through exactly the same path the board's own start uses (§14).
 
-Every member can see the list; **only an admin can create, edit, delete, toggle
-or run one**. The session picker only ever offers the caller's own sessions,
-and that ownership is re-checked on every edit, not just on create.
+Anyone who reaches the instance can see the list, create, edit, delete,
+toggle, or run one — there is no separate role that gates this. The session
+picker offers every session on the instance.
 
 ### What to expect from the clock
 
@@ -1416,12 +1519,12 @@ below. Two consequences worth knowing before you debug one of them:
   auth poolside` is how you sign that user in without a `su` incantation; see
   *Two ways to authenticate* below.
 
-Configure it in **Settings → Models → Poolside** (admin only):
+Configure it in **Settings → Models → Poolside**:
 
 | Field | What it does |
 | --- | --- |
 | **Binary path** | Absolute path to `pool`. Unset, Paco spawns the bare name `pool` and relies on the service's `PATH`. |
-| **API key** | Optional — see *Two ways to authenticate* below. Passed to the process as `POOLSIDE_API_KEY`. Sealed with `APP_SECRET` the same way GitHub tokens and the SMTP password are, and never sent back to the browser. Unset, `pool` falls back to the credentials `pool login` wrote in the service user's home; **set, it wins over them.** |
+| **API key** | Optional — see *Two ways to authenticate* below. Passed to the process as `POOLSIDE_API_KEY`. Sealed with `APP_SECRET` the same way the GitHub token is, and never sent back to the browser. Unset, `pool` falls back to the credentials `pool login` wrote in the service user's home; **set, it wins over them.** |
 | **Base URL** | Passed to the process as `POOLSIDE_STANDALONE_BASE_URL`, and genuinely honoured — point it at your own Poolside deployment. Unset, `pool` uses its own default (`inference.poolside.ai`). |
 
 Settings are read fresh on every turn rather than cached, so an edit takes
@@ -1563,42 +1666,7 @@ entirely will still see Claude usage from those two paths.
 
 ---
 
-## 19. Two kinds of administrator
-
-Worth knowing before it reaches you as a bug report, because the two are not
-interchangeable in the database even though they are everywhere in the product.
-
-"Administrator" has two independent sources, and the shared check
-(`lib/admin/require-admin.ts`) is an **OR** of them, never a replacement of one
-by the other:
-
-- **`users.is_admin`** — set for the account that claims the instance during
-  first run (§7), and for anyone migration `0005` promoted on an upgraded
-  install. That migration makes only the *oldest* such account an organisation
-  `owner`; **the rest keep `is_admin` with no organisation membership row at
-  all.**
-- **The organisation `admin`/`owner` role**, granted through an invitation.
-  `owner` and `admin` differ only in that an owner cannot be removed.
-
-Dropping either half strands someone who has access today, which is why both
-are checked. Every org-scoped surface — the task board, Schedules, Memory
-promotion, Evals — accepts a membership row **or** the flag, so a flag-only
-admin is not locked out of any of them.
-
-Two practical consequences:
-
-- **Promotion is still a database write.** Nothing in the UI grants admin to a
-  second person; §7 covers this. `UPDATE users SET is_admin = true` gives the
-  flag; an invitation gives the role. Prefer the invitation — it produces the
-  membership row too, so the account looks the same as every other admin.
-- **A flag-only admin has no organisation membership row**, which is not
-  visible anywhere in the interface. If you are debugging a permissions
-  question in `psql`, check `organization_members` before concluding an account
-  is not an admin.
-
----
-
-## 20. Environment variables
+## 19. Environment variables
 
 Everything lives in `/etc/paco/paco.env` — a flat `KEY=value` file, mode
 `640`, owned `root:paco`. Hand-edit it and run `sudo paco restart` (or
@@ -1611,27 +1679,21 @@ own.
 | --- | --- |
 | `POSTGRES_URL` | `postgres:///paco` — no host, no password. Both driver libraries Paco uses reject a non-empty username with an empty host outright, so the connection string is deliberately bare; `PGHOST` below and OS-user peer authentication supply the rest. |
 | `PGHOST` | `/var/run/postgresql` — the socket directory. |
-| `APP_SECRET` | Signs sessions and derives the key that encrypts stored GitHub tokens. Generated once; regenerating it invalidates both. See §6 before you consider changing it. |
+| `APP_SECRET` | Derives the key that encrypts stored GitHub tokens — the only thing it protects now that there are no sessions to sign. Generated once; regenerating it permanently orphans every already-stored token. See §6 before you consider changing it. |
 | `PACO_WORKSPACE_ROOT` | `/var/lib/paco/workspaces`. |
 | `NODE_ENV` | `production`. |
 | `PORT` | `3000` — matched by the nginx site's `proxy_pass http://127.0.0.1:3000`. Changing one without the other breaks routing: nginx will keep answering requests but silently proxy to the wrong (or no) port. Edit `/etc/nginx/sites-available/paco` too, `nginx -t`, then reload, if you ever change this. |
+| `HOSTNAME` | `127.0.0.1` — also set independently in `packaging/paco.service`, since dpkg replaces that unit (not `paco.env`) on every upgrade. Keeps the app reachable only through nginx, which holds the instance password; changing this to bind another interface skips that password for anyone who can reach it. |
 
 ### Yours to set
 
 | Variable | What it does | Set it via |
 | --- | --- | --- |
-| `APP_URL` | Public origin, scheme and port included. Source for magic-link URLs, pull-request links, and the origins better-auth accepts a sign-in callback from. Unset falls back to the domain saved in Settings, then to `http://localhost:3000`. | `install.sh --domain`, Settings, or by hand in `paco.env` |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | Outbound mail for magic links and invites. Unset `SMTP_HOST` means links are logged instead of sent — fine for a first look, not for anyone else to sign in. | Settings → Admin → Mail server (recommended), or `paco.env` |
+| `APP_URL` | Public origin, scheme and port included. Source for pull-request links, and the port `pnpm dev` listens on. Unset falls back to the domain saved in Settings, then to `http://localhost:3000`. | `install.sh --domain`, Settings, or by hand in `paco.env` |
 | `PACO_HOME` | Paco's own data directory — the root under which memory (§13) and installed plugins (§12) live. Unset, it falls back to the service user's home plus `/.paco`, which on this package is `/var/lib/paco/.paco`. `postinst` does **not** write it into `paco.env`, so the fallback is what applies unless you add it. Moving it moves both subsystems; nothing migrates the old directory for you. | `paco.env` |
 | `PACO_PLUGINS_DIR` | Where plugins are installed, overriding `<data dir>/plugins` for plugins only. A relative value is resolved against the server process's working directory (`/usr/lib/paco`), so give it an absolute path. Unset, plugins go to `/var/lib/paco/.paco/plugins`. | `paco.env` |
 | `PACO_PLUGIN_NODE_EXECUTABLE` | The Node binary plugin workers are spawned with. Unset, Paco spawns plugin workers with the runtime it is itself running on — correct on this package, whose bundled Node is 24.19.0. Point it at a Node >= 24 binary on any host whose runtime is older: below the floor **every** plugin fails to start, with `not-running` on the Plugins page and one log line as the only diagnosis (§12). | `paco.env` |
-| `PACO_SANDBOX_IMAGE` | A full image reference for the sandbox, overriding the `ghcr.io/stack256org/paco-sandbox:v<version>` tag Paco derives from the installed package. For a mirror or a locally built image; see §22. | `paco.env` |
-
-**Settings and the environment don't merge.** If a mail host is saved in
-Settings, every `SMTP_*` variable above is ignored entirely, including
-fields Settings leaves blank — a partly filled Settings form does not fall
-back to the rest of the environment, it just sends unauthenticated. Pick one
-place to configure mail.
+| `PACO_SANDBOX_IMAGE` | A full image reference for the sandbox, overriding the `ghcr.io/stack256org/paco-sandbox:v<version>` tag Paco derives from the installed package. For a mirror or a locally built image; see §21. | `paco.env` |
 
 ### Set by Paco itself — do not set these
 
@@ -1652,18 +1714,18 @@ variable an operator wants is `PACO_PLUGIN_NODE_EXECUTABLE`, above.
 
 ---
 
-## 21. Instance health
+## 20. Instance health
 
-Settings → Health (admin only) answers "is this instance healthy, and what
-is it costing me?" without grepping logs or opening `psql`. It's read-only;
-reclaiming disk or editing SMTP still happens from Settings → Admin.
+Settings → Health answers "is this instance healthy, and what is it costing
+me?" without grepping logs or opening `psql`. It's read-only; reclaiming disk
+still happens from Settings → Admin.
 
-- **Queue.** pg-boss delivers every sign-in and invitation email; when it
-  stalls, nothing looks broken anywhere else — the symptom a user reports is
-  "I never got the email." Reads as *idle*, *working*, *backed-up* (the
-  oldest pending job has waited long enough that a magic link sent then has
-  already expired), or *failing*. Backed-up or failing means check the mail
-  server, not the application.
+- **Queue.** pg-boss is the queue behind every cron schedule tick; when it
+  stalls, nothing looks broken anywhere else — the symptom an operator hears
+  is "my schedule didn't run," which sends them to debug the schedule itself,
+  not the queue. Reads as *idle*, *working*, *backed-up* (the oldest pending
+  job has waited unusually long), or *failing*. Backed-up or failing means
+  check Postgres and the service, not any individual schedule.
 - **Migrations.** *In sync* is normal. *Pending* names the migrations that
   haven't run — **the card's own text still says to run `pnpm --dir apps/web
   db:migrate:apply`, which is stale, dev-oriented copy that predates this
@@ -1676,9 +1738,10 @@ reclaiming disk or editing SMTP still happens from Settings → Admin.
   between while still reporting success — don't run one blindly out of that
   state; compare `drizzle.__drizzle_migrations` against
   `apps/web/lib/db/migrations/meta/_journal.json` first.
-- **Spend.** Per-member token totals and estimated cost over a selectable
-  window. Tokens on a model with no published price are marked `unpriced`
-  rather than folded into the total as if free.
+- **Spend.** This instance's token totals and estimated cost over a
+  selectable window — one total, not broken down by member, since Phase C
+  left nothing to break it down by. Tokens on a model with no published
+  price are marked `unpriced` rather than folded into the total as if free.
 - **Storage & containers.** The same disk and container counts as §10,
   summarized read-only here.
 
@@ -1688,7 +1751,7 @@ couldn't be read is unknown, not clean.
 
 ---
 
-## 22. Troubleshooting
+## 21. Troubleshooting
 
 ### "Paco couldn't download the workspace image"
 
@@ -1799,29 +1862,10 @@ repository is the alternative:
 <https://github.com/cli/cli/blob/trunk/docs/install_linux.md>.
 
 Or the stored token no longer decrypts because `APP_SECRET` changed — see
-§6. The server log shows `Stored token for user … could not be decrypted`.
-Either restore the original `APP_SECRET`, or have each user reconnect in
+§6. The server log shows `[github] Stored token could not be decrypted; it
+was probably sealed under a different APP_SECRET.` Either restore the
+original `APP_SECRET`, or reconnect the instance's token in
 Settings → Connections.
-
-### The sign-in link never arrives
-
-With no mail server configured (§20), Paco doesn't send email — it logs the
-message, link included:
-
-```text
-[email] SMTP is not configured; logging instead of sending.
-```
-
-```bash
-sudo paco logs   # or: journalctl -u paco -f
-```
-
-Mail is delivered by a background worker, so it appears a moment after the
-request. Links expire in 10 minutes and are single-use.
-
-### Sign-in is refused for a new colleague
-
-Expected — new accounts are off by default. See §7.
 
 ### Preview links don't open
 
@@ -1852,7 +1896,7 @@ sudo paco logs | grep "plugin registry"
 ```
 
 `host runtime is below the required Node floor` is the line. Set
-`PACO_PLUGIN_NODE_EXECUTABLE` to a Node >= 24 binary and restart (§12, §20).
+`PACO_PLUGIN_NODE_EXECUTABLE` to a Node >= 24 binary and restart (§12, §19).
 A single plugin reading `not-running` while the others run is a different
 problem — a symlink in its tree, or its files changing on disk since install
 — and the same log grep names it.
@@ -1923,11 +1967,3 @@ instead*).
 
 If instead the turns succeed but reach the wrong deployment, compare the
 endpoint Test connection reports with the **Base URL** you typed (§18).
-
-### An admin is refused somewhere, but not everywhere
-
-Check whether that account has an organisation membership row at all — a
-flag-only admin (`users.is_admin`, no row in `organization_members`) is a real
-and supported state, and §19 explains where it comes from. Every org-scoped
-surface accepts either source today, so a refusal on one page and not another
-is worth reporting rather than working around.

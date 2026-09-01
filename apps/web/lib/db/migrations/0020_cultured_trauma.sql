@@ -1,0 +1,1 @@
+ALTER TABLE "instance_settings" DROP COLUMN "onboarding_completed_at";

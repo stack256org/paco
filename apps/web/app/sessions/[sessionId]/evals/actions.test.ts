@@ -2,20 +2,9 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 mock.module("server-only", () => ({}));
 
-// ── `@/lib/session/get-server-session` ────────────────────────────
-
-let authUserId: string | undefined = "user-1";
-const getServerSessionMock = mock(() =>
-  Promise.resolve(authUserId ? { user: { id: authUserId } } : null),
-);
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: getServerSessionMock,
-}));
-
 // ── `@/lib/db/sessions` ──────────────────────────────────────────
 
-let sessionRow: { userId: string; sandboxState: unknown } | undefined = {
-  userId: "user-1",
+let sessionRow: { sandboxState: unknown } | undefined = {
   sandboxState: { sandboxName: "s1" },
 };
 const getSessionByIdMock = mock(() => Promise.resolve(sessionRow));
@@ -23,26 +12,12 @@ mock.module("@/lib/db/sessions", () => ({
   getSessionById: getSessionByIdMock,
 }));
 
-// ── `@/lib/org/membership` + `@/lib/org/organization` ──────────────
+// ── `@/lib/org/organization` ──────────────────────────────────────
 
-let memberRole: "owner" | "admin" | "member" | null = "member";
-const getMemberRoleMock = mock(() => Promise.resolve(memberRole));
-mock.module("@/lib/org/membership", () => ({
-  getMemberRole: getMemberRoleMock,
-}));
-
-let organizationRow: { id: string } | null = { id: "org-1" };
+let organizationRow: { id: string } = { id: "org-1" };
 const getOrganizationMock = mock(() => Promise.resolve(organizationRow));
 mock.module("@/lib/org/organization", () => ({
   getOrganization: getOrganizationMock,
-}));
-
-// ── `@/lib/admin/require-admin` ──────────────────────────────────
-
-let adminFlag = false;
-const isAdminMock = mock(() => Promise.resolve(adminFlag));
-mock.module("@/lib/admin/require-admin", () => ({
-  isAdmin: isAdminMock,
 }));
 
 // ── `@/lib/agent/workspace-paths` + `@paco/sandbox` ───────────────
@@ -141,94 +116,27 @@ function makeScenario(name = "smoke") {
 }
 
 beforeEach(() => {
-  authUserId = "user-1";
-  sessionRow = { userId: "user-1", sandboxState: { sandboxName: "s1" } };
-  memberRole = "member";
-  adminFlag = false;
+  sessionRow = { sandboxState: { sandboxName: "s1" } };
   organizationRow = { id: "org-1" };
   runCalls = [];
 
-  getServerSessionMock.mockClear();
   getSessionByIdMock.mockClear();
-  getMemberRoleMock.mockClear();
-  isAdminMock.mockClear();
   getOrganizationMock.mockClear();
   discoverEvalScenariosMock.mockClear();
   runEvalScenarioMock.mockClear();
   listEvalRunsMock.mockClear();
 });
 
-describe("auth", () => {
-  test("listEvalScenariosAction rejects a signed-out caller", async () => {
-    authUserId = undefined;
-    await expect(listEvalScenariosAction("session-1")).rejects.toThrow();
-  });
-
-  test("rejects a caller who does not own the session", async () => {
-    sessionRow = { userId: "someone-else", sandboxState: null };
-    await expect(listEvalScenariosAction("session-1")).rejects.toThrow();
-  });
-
-  test("rejects a caller with no session record at all", async () => {
+describe("session lookup", () => {
+  test("rejects an unknown session", async () => {
     sessionRow = undefined;
     await expect(listEvalScenariosAction("session-1")).rejects.toThrow();
-  });
-
-  test("rejects a caller who is neither an organisation member nor an admin", async () => {
-    memberRole = null;
-    adminFlag = false;
-    await expect(listEvalScenariosAction("session-1")).rejects.toThrow();
-  });
-
-  /*
-   * Migration 0005 creates exactly this population: an account promoted by
-   * `users.is_admin` with no `organizationMembers` row at all (only the
-   * oldest such account becomes an org `owner`). Every other surface accepts
-   * them through `isAdmin`'s OR; requiring a membership row here locked them
-   * out of Evals alone.
-   */
-  test("accepts an admin who holds the flag but has no membership row", async () => {
-    memberRole = null;
-    adminFlag = true;
-
-    const result = await listEvalScenariosAction("session-1");
-
-    expect(result).toEqual({ scenarios: [], errors: [] });
-  });
-
-  test("a flag-only admin may also run a scenario and read history", async () => {
-    memberRole = null;
-    adminFlag = true;
-
-    await expect(listEvalHistoryAction("session-1")).resolves.toEqual(
-      historyRows,
-    );
-    const row = await runEvalScenarioAction("session-1", makeScenario());
-    expect(row.status).toBe("passed");
-  });
-
-  test("still rejects a flag-only admin who does not own the session", async () => {
-    // Admin does not mean "may run evals in someone else's session": the
-    // ownership check above is a separate gate and stays.
-    sessionRow = { userId: "someone-else", sandboxState: null };
-    memberRole = null;
-    adminFlag = true;
-
-    await expect(listEvalScenariosAction("session-1")).rejects.toThrow();
-  });
-
-  test("runEvalScenarioAction re-checks auth independently", async () => {
-    authUserId = undefined;
-    await expect(
-      runEvalScenarioAction("session-1", makeScenario()),
-    ).rejects.toThrow();
-    expect(runEvalScenarioMock).not.toHaveBeenCalled();
   });
 });
 
 describe("listEvalScenariosAction", () => {
   test("returns empty results when the session has no sandbox yet", async () => {
-    sessionRow = { userId: "user-1", sandboxState: null };
+    sessionRow = { sandboxState: null };
     const result = await listEvalScenariosAction("session-1");
     expect(result).toEqual({ scenarios: [], errors: [] });
     expect(discoverEvalScenariosMock).not.toHaveBeenCalled();

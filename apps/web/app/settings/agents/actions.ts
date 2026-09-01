@@ -5,7 +5,6 @@ import {
   agentDefinitionSchema,
   type AgentDefinition,
 } from "@/lib/agent/agent-definition-schema";
-import { requireAdmin } from "@/lib/admin/require-admin";
 import { db } from "@/lib/db/client";
 import {
   deleteRosterAgent,
@@ -62,14 +61,6 @@ function toRow(row: typeof rosterAgents.$inferSelect): RosterAgentRow {
   };
 }
 
-async function requireOrganization() {
-  const organization = await getOrganization();
-  if (!organization) {
-    throw new Error("There is no organisation yet.");
-  }
-  return organization;
-}
-
 /**
  * Every roster row for this organisation — enabled or not, builtin or not.
  *
@@ -83,8 +74,7 @@ async function requireOrganization() {
  * the roster looked unconfigured and was not.
  */
 export async function listRosterAgents(): Promise<RosterAgentRow[]> {
-  await requireAdmin();
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
 
   const rows = await listRosterRows(organization.id);
 
@@ -113,11 +103,7 @@ function nameTakenError(name: string): SaveRosterAgentResult {
  * same step when `name` differs from `originalName`.
  *
  * `originalName` is `null` for a brand-new agent. Every failure here comes
- * back as a value, never a throw: the admin gate is the one thing this
- * action still lets fail loudly, matching every other admin action in this
- * codebase (see `instance-settings-actions.ts`), because an admin check that
- * silently returned `{ success: false }` would look, to a broken caller,
- * exactly like a validation error rather than a security boundary.
+ * back as a value, never a throw.
  *
  * Three distinct, all-atomic paths — none of them a select-then-write a
  * concurrent caller could slip between:
@@ -133,8 +119,7 @@ export async function saveRosterAgent(input: {
   name: string;
   definition: unknown;
 }): Promise<SaveRosterAgentResult> {
-  await requireAdmin();
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
   const { originalName, name, definition } = input;
 
   if (!ROSTER_NAME_PATTERN.test(name)) {
@@ -207,8 +192,7 @@ export async function saveRosterAgent(input: {
 export async function deleteRoster(
   name: string,
 ): Promise<{ success: boolean; error?: string }> {
-  await requireAdmin();
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
 
   const result = await deleteRosterAgent(organization.id, name);
   return result.ok
@@ -221,8 +205,7 @@ export async function setRosterEnabled(
   name: string,
   enabled: boolean,
 ): Promise<{ success: boolean }> {
-  await requireAdmin();
-  const organization = await requireOrganization();
+  const organization = await getOrganization();
 
   await setRosterAgentEnabled(organization.id, name, enabled);
   return { success: true };

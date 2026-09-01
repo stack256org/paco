@@ -16,13 +16,12 @@ import { deriveAppKey } from "@/lib/crypto/secret-box";
  * A single process-lifetime shared secret (this file's previous shape) was
  * not enough: anything holding it could invoke ANY enabled plugin's tools,
  * not just the ones the bridge that received it was actually built for. The
- * fix, mirroring `lib/preview/preview-grant.ts`'s scoped-and-signed cookie,
- * is to bind the token itself to the exact set of plugin ids it was minted
- * for (plus an expiry) and sign it with a key derived from `APP_SECRET`
- * (`deriveAppKey`, `lib/crypto/secret-box.ts`) — so the route can verify
- * both that the token is genuine AND that the plugin id a request names is
- * one this particular bridge was actually issued for, rejecting everything
- * else even with a valid signature.
+ * fix is to bind the token itself to the exact set of plugin ids it was
+ * minted for (plus an expiry) and sign it with a key derived from
+ * `APP_SECRET` (`deriveAppKey`, `lib/crypto/secret-box.ts`) — so the route
+ * can verify both that the token is genuine AND that the plugin id a
+ * request names is one this particular bridge was actually issued for,
+ * rejecting everything else even with a valid signature.
  */
 
 /**
@@ -39,8 +38,8 @@ import { deriveAppKey } from "@/lib/crypto/secret-box";
 const TOKEN_TTL_MS = 6 * 60 * 60 * 1000;
 
 /** Domain separator for the key this module derives from `APP_SECRET`. Distinct
- * from `secret-box.ts`'s own and from `preview-grant.ts`'s, so a flaw in one
- * does not expose the others. */
+ * from `secret-box.ts`'s own key, so a flaw in one does not expose the
+ * other. */
 const KEY_INFO = "paco:plugin-tools-token:v1";
 
 /** Version prefix, so the token format can change later without guessing at old ones. */

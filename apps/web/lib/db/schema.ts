@@ -16,27 +16,17 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-// users
-export const users = pgTable("users", {
-  id: text("id").primaryKey(),
-  username: text("username").notNull(),
-  email: text("email"),
-  emailVerified: boolean("email_verified").notNull().default(false),
-  name: text("name"),
-  isAdmin: boolean("is_admin").notNull().default(false),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-  lastLoginAt: timestamp("last_login_at").defaultNow().notNull(),
-});
-
 /**
  * The one organisation this installation serves.
  *
  * Paco is self-hosted: a VPS runs one company's Paco, so there is exactly one
- * row here and no organisation switcher anywhere in the product. It exists as
- * a table rather than an implicit fact because membership and invitations need
- * something to point at, and because "who is in this instance" is a different
- * question from "who has a row in users".
+ * row here and no organisation switcher anywhere in the product. It predates
+ * Phase C's removal of application-level identity — membership and
+ * invitations used to point at it — and survives that removal as instance
+ * metadata: `getOrganization()` is a singleton read backed by the unique
+ * constraint below, this table carries no reference to a person, and every
+ * other call site treats its id as "the one organisation this instance is,"
+ * not as anyone's identity.
  */
 export const organizations = pgTable("organizations", {
   id: text("id").primaryKey(),
@@ -44,138 +34,39 @@ export const organizations = pgTable("organizations", {
   /**
    * Always `true`, and unique — the same one-row trick `instanceSettings`
    * plays with a boolean primary key, adapted to a table whose primary key
-   * is already spoken for by `organization_members`' foreign key.
+   * is already spoken for by every foreign key that still points at it
+   * (`rosterAgents`, `tasks`, `schedules`, `evalRuns`).
    *
-   * `id` has to stay a free-form primary key so membership rows keep
-   * pointing at it; this column exists purely so a second `INSERT` has
-   * something to collide on. Postgres enforces the "only one organisation"
-   * rule structurally, so `ensureOrganizationWithOwner` no longer has to
-   * win a race against a concurrent caller — it only has to handle losing
-   * one.
+   * `id` has to stay a free-form primary key so those rows keep pointing at
+   * it; this column exists purely so a second `INSERT` has something to
+   * collide on. Postgres enforces the "only one organisation" rule
+   * structurally, so `ensureOrganization` (`lib/org/organization.ts`) no
+   * longer has to win a race against a concurrent caller — it only has to
+   * handle losing one.
    */
   singleton: boolean("singleton").notNull().default(true).unique(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-/**
- * Who belongs to the organisation, and what they may do.
- *
- * `owner` is the person who installed Paco — there is exactly one, and it
- * cannot be given up, because an instance with no owner has no one who can
- * invite. `admin` may invite and manage settings; `member` may not.
- */
-export const organizationMembers = pgTable(
-  "organization_members",
-  {
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    role: text("role", { enum: ["owner", "admin", "member"] })
-      .notNull()
-      .default("member"),
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.organizationId, table.userId] })],
-);
-
-/**
- * A pending invitation to join this instance.
- *
- * This is what replaced the instance-wide "anyone may create an account"
- * switch. The token is a credential — it is emailed and never returned by any
- * API — and an invitation is single-use: `acceptedAt` is what stops one link
- * being forwarded to a second person.
- */
-export const invitations = pgTable(
-  "invitations",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    email: text("email").notNull(),
-    role: text("role", { enum: ["admin", "member"] })
-      .notNull()
-      .default("member"),
-    /** Random, unguessable, and the only thing that proves the holder was invited. */
-    token: text("token").notNull().unique(),
-    invitedBy: text("invited_by").references(() => users.id, {
-      onDelete: "set null",
-    }),
-    expiresAt: timestamp("expires_at").notNull(),
-    acceptedAt: timestamp("accepted_at"),
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-  },
-  (table) => [index("invitations_email_idx").on(table.email)],
-);
-
 export type Organization = typeof organizations.$inferSelect;
-export type OrganizationMember = typeof organizationMembers.$inferSelect;
-export type Invitation = typeof invitations.$inferSelect;
-
-// oauth provider accounts
-export const accounts = pgTable("accounts", {
-  id: text("id").primaryKey(),
-  accountId: text("account_id").notNull(),
-  providerId: text("provider_id").notNull(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  accessToken: text("access_token"),
-  refreshToken: text("refresh_token"),
-  idToken: text("id_token"),
-  accessTokenExpiresAt: timestamp("access_token_expires_at"),
-  refreshTokenExpiresAt: timestamp("refresh_token_expires_at"),
-  scope: text("scope"),
-  password: text("password"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
-
-// better-auth sessions
-export const authSessions = pgTable("auth_sessions", {
-  id: text("id").primaryKey(),
-  expiresAt: timestamp("expires_at").notNull(),
-  token: text("token").notNull().unique(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-  ipAddress: text("ip_address"),
-  userAgent: text("user_agent"),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-});
-
-// better-auth verification tokens
-export const verification = pgTable("verification", {
-  id: text("id").primaryKey(),
-  identifier: text("identifier").notNull(),
-  value: text("value").notNull(),
-  expiresAt: timestamp("expires_at").notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-});
 
 /**
- * One GitHub token per user, for driving the `gh` CLI on their behalf.
+ * This instance's one GitHub token, for driving the `gh` CLI.
  *
  * The token is stored sealed (AES-256-GCM, see `lib/crypto/secret-box`)
  * because it cannot be hashed: `gh` needs the original value on every call.
  * `login` and `scopes` are recorded in clear as they are what the UI shows —
- * whose account this is and whether it can do what the user is asking — and
+ * whose account this is and whether it can do what is being asked — and
  * neither grants access on its own.
  *
- * Keyed by user rather than global so two people using one Paco act as
- * themselves on GitHub. `onDelete: "cascade"` so deleting a user takes their
- * credential with them.
+ * Used to be keyed by user, one token per person using this Paco. Phase C
+ * removed application-level identity, so this follows `instanceSettings`'s
+ * single-row pattern instead: a boolean primary key pinned to `true` by
+ * `saveGithubToken`, since there is exactly one tenant and therefore at most
+ * one credential.
  */
 export const githubTokens = pgTable("github_tokens", {
-  userId: text("user_id")
-    .primaryKey()
-    .references(() => users.id, { onDelete: "cascade" }),
+  id: boolean("id").primaryKey().default(true),
   /** Sealed token. Never returned to the browser. */
   sealedToken: text("sealed_token").notNull(),
   /** GitHub login the token belongs to, as reported by `gh api user`. */
@@ -197,92 +88,85 @@ export const githubTokens = pgTable("github_tokens", {
 export type GithubToken = typeof githubTokens.$inferSelect;
 export type NewGithubToken = typeof githubTokens.$inferInsert;
 
-export const sessions = pgTable(
-  "sessions",
-  {
-    id: text("id").primaryKey(),
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    title: text("title").notNull(),
-    status: text("status", {
-      enum: ["running", "completed", "failed", "archived"],
-    })
-      .notNull()
-      .default("running"),
-    // Repository info
-    repoOwner: text("repo_owner"),
-    repoName: text("repo_name"),
-    branch: text("branch"),
-    cloneUrl: text("clone_url"),
-    // Whether this session uses a new auto-generated branch
-    isNewBranch: boolean("is_new_branch").default(false).notNull(),
-    // Optional per-session override for committing locally after a turn.
-    // null means "use the user's default preference".
-    autoCommitLocalOverride: boolean("auto_commit_local_override"),
-    // Optional per-session override for pushing those commits to GitHub.
-    // null means "use the user's default preference".
-    autoCommitPushOverride: boolean("auto_commit_push_override"),
-    // Optional per-session override for auto PR creation after auto-commit.
-    // null means "use the user's default preference".
-    autoCreatePrOverride: boolean("auto_create_pr_override"),
-    // Unified sandbox state
-    sandboxState: jsonb("sandbox_state").$type<SandboxState>(),
-    // Lifecycle orchestration state for sandbox management
-    lifecycleState: text("lifecycle_state", {
-      enum: [
-        "provisioning",
-        "active",
-        "hibernating",
-        "hibernated",
-        "restoring",
-        "archived",
-        "failed",
-      ],
-    }),
-    lifecycleVersion: integer("lifecycle_version").notNull().default(0),
-    lastActivityAt: timestamp("last_activity_at"),
-    sandboxExpiresAt: timestamp("sandbox_expires_at"),
-    hibernateAfter: timestamp("hibernate_after"),
-    lifecycleRunId: text("lifecycle_run_id"),
-    sandboxProvisioningRunId: text("sandbox_provisioning_run_id"),
-    lifecycleError: text("lifecycle_error"),
-    // Git stats (for display in session list)
-    linesAdded: integer("lines_added").default(0),
-    linesRemoved: integer("lines_removed").default(0),
-    // PR info if created
-    prNumber: integer("pr_number"),
-    prStatus: text("pr_status", {
-      enum: ["open", "merged", "closed"],
-    }),
-    /**
-     * Rolled-up CI conclusion for the pull request.
-     *
-     * Kept alongside `prStatus` so the sidebar can say "checks failing" without
-     * asking GitHub on every render. `null` means either no pull request or no
-     * checks configured — the UI shows nothing in both cases, so they do not
-     * need telling apart.
-     */
-    prChecks: text("pr_checks", {
-      enum: ["passing", "failing", "pending"],
-    }),
-    /**
-     * When GitHub was last asked about the pull request.
-     *
-     * Webhooks used to answer this, but GitHub cannot reach a self-hosted
-     * install on localhost, so the state is polled instead. This is what keeps
-     * the poll from running `gh` on every session on every list request.
-     */
-    prCheckedAt: timestamp("pr_checked_at"),
-    // Cached diff for offline viewing
-    cachedDiff: jsonb("cached_diff"),
-    cachedDiffUpdatedAt: timestamp("cached_diff_updated_at"),
-    // Timestamps
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-    updatedAt: timestamp("updated_at").defaultNow().notNull(),
-  },
-  (table) => [index("sessions_user_id_idx").on(table.userId)],
-);
+export const sessions = pgTable("sessions", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  status: text("status", {
+    enum: ["running", "completed", "failed", "archived"],
+  })
+    .notNull()
+    .default("running"),
+  // Repository info
+  repoOwner: text("repo_owner"),
+  repoName: text("repo_name"),
+  branch: text("branch"),
+  cloneUrl: text("clone_url"),
+  // Whether this session uses a new auto-generated branch
+  isNewBranch: boolean("is_new_branch").default(false).notNull(),
+  // Optional per-session override for committing locally after a turn.
+  // null means "use the user's default preference".
+  autoCommitLocalOverride: boolean("auto_commit_local_override"),
+  // Optional per-session override for pushing those commits to GitHub.
+  // null means "use the user's default preference".
+  autoCommitPushOverride: boolean("auto_commit_push_override"),
+  // Optional per-session override for auto PR creation after auto-commit.
+  // null means "use the user's default preference".
+  autoCreatePrOverride: boolean("auto_create_pr_override"),
+  // Unified sandbox state
+  sandboxState: jsonb("sandbox_state").$type<SandboxState>(),
+  // Lifecycle orchestration state for sandbox management
+  lifecycleState: text("lifecycle_state", {
+    enum: [
+      "provisioning",
+      "active",
+      "hibernating",
+      "hibernated",
+      "restoring",
+      "archived",
+      "failed",
+    ],
+  }),
+  lifecycleVersion: integer("lifecycle_version").notNull().default(0),
+  lastActivityAt: timestamp("last_activity_at"),
+  sandboxExpiresAt: timestamp("sandbox_expires_at"),
+  hibernateAfter: timestamp("hibernate_after"),
+  lifecycleRunId: text("lifecycle_run_id"),
+  sandboxProvisioningRunId: text("sandbox_provisioning_run_id"),
+  lifecycleError: text("lifecycle_error"),
+  // Git stats (for display in session list)
+  linesAdded: integer("lines_added").default(0),
+  linesRemoved: integer("lines_removed").default(0),
+  // PR info if created
+  prNumber: integer("pr_number"),
+  prStatus: text("pr_status", {
+    enum: ["open", "merged", "closed"],
+  }),
+  /**
+   * Rolled-up CI conclusion for the pull request.
+   *
+   * Kept alongside `prStatus` so the sidebar can say "checks failing" without
+   * asking GitHub on every render. `null` means either no pull request or no
+   * checks configured — the UI shows nothing in both cases, so they do not
+   * need telling apart.
+   */
+  prChecks: text("pr_checks", {
+    enum: ["passing", "failing", "pending"],
+  }),
+  /**
+   * When GitHub was last asked about the pull request.
+   *
+   * Webhooks used to answer this, but GitHub cannot reach a self-hosted
+   * install on localhost, so the state is polled instead. This is what keeps
+   * the poll from running `gh` on every session on every list request.
+   */
+  prCheckedAt: timestamp("pr_checked_at"),
+  // Cached diff for offline viewing
+  cachedDiff: jsonb("cached_diff"),
+  cachedDiffUpdatedAt: timestamp("cached_diff_updated_at"),
+  // Timestamps
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
 
 export const chats = pgTable(
   "chats",
@@ -368,33 +252,21 @@ export const chats = pgTable(
       .default({}),
     lastAssistantMessageAt: timestamp("last_assistant_message_at"),
     /**
-     * Who may open this chat's preview.
-     *
-     * Private by default, and deliberately so: a preview serves code the
-     * agent has just written, from a container with the workspace mounted.
-     * Public means anyone with the hostname can reach it — which is a
-     * decision the owner makes per preview, not a default they inherit.
-     */
-    previewVisibility: text("preview_visibility", {
-      enum: ["private", "public"],
-    })
-      .notNull()
-      .default("private"),
-    /**
      * DNS-safe slug derived from `id`, mirroring `previewSlug()` in
      * `lib/preview/hostname.ts` exactly: lowercase, `[^a-z0-9-]` replaced
      * with `-`, leading/trailing hyphens trimmed.
      *
-     * Stored, not recomputed — the preview forward-auth check
-     * (`app/api/preview-auth/route.ts`) has to map a hostname's leading
-     * label back to a chat on every preview request, and
-     * `previewSlug()` is lossy (case and `_` both collapse into `-`), so
-     * there is no way to invert it back to `id`. Without a stored, indexed
-     * copy the only option would be recomputing the slug for every chat row
-     * on every request — a full table scan on a busy instance. `GENERATED
-     * ALWAYS` lets Postgres keep it correct for every insert automatically,
-     * including ones this column's own migration never has to touch, rather
-     * than relying on every chat-creation call site to remember to set it.
+     * Stored, not recomputed — `lib/preview/hostname.ts` builds each
+     * preview's hostname from this column, and the reconcile sweep in
+     * `lib/preview/nginx-reload.ts` regenerates nginx config from it for
+     * every chat, on every run. `previewSlug()` is lossy (case and `_` both
+     * collapse into `-`), so there is no way to recover `id` from a slug
+     * alone — an indexed, stored copy is the only way to look a chat up by
+     * hostname or list every chat's hostname without recomputing the slug
+     * for every row. `GENERATED ALWAYS` lets Postgres keep it correct for
+     * every insert automatically, including ones this column's own
+     * migration never has to touch, rather than relying on every
+     * chat-creation call site to remember to set it.
      */
     previewSlug: text("preview_slug")
       .notNull()
@@ -427,24 +299,14 @@ export const chatMessages = pgTable("chat_messages", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const chatReads = pgTable(
-  "chat_reads",
-  {
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    chatId: text("chat_id")
-      .notNull()
-      .references(() => chats.id, { onDelete: "cascade" }),
-    lastReadAt: timestamp("last_read_at").notNull().defaultNow(),
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-    updatedAt: timestamp("updated_at").defaultNow().notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.userId, table.chatId] }),
-    index("chat_reads_chat_id_idx").on(table.chatId),
-  ],
-);
+export const chatReads = pgTable("chat_reads", {
+  chatId: text("chat_id")
+    .primaryKey()
+    .references(() => chats.id, { onDelete: "cascade" }),
+  lastReadAt: timestamp("last_read_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
 
 /**
  * Append-only session event log — the source of truth for what happened in a
@@ -497,9 +359,6 @@ export const workflowRuns = pgTable(
     sessionId: text("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
     modelId: text("model_id"),
     status: text("status", {
       enum: ["completed", "aborted", "failed"],
@@ -512,7 +371,6 @@ export const workflowRuns = pgTable(
   (table) => [
     index("workflow_runs_chat_id_idx").on(table.chatId),
     index("workflow_runs_session_id_idx").on(table.sessionId),
-    index("workflow_runs_user_id_idx").on(table.userId),
   ],
 );
 
@@ -553,13 +411,17 @@ export type NewWorkflowRun = typeof workflowRuns.$inferInsert;
 export type WorkflowRunStep = typeof workflowRunSteps.$inferSelect;
 export type NewWorkflowRunStep = typeof workflowRunSteps.$inferInsert;
 
-// User preferences for settings
+/**
+ * This instance's settings for the app's own preferences — as opposed to
+ * `instanceSettings`, which holds installation-level config.
+ *
+ * Used to be keyed by user, one row per person using this Paco. Phase C
+ * removed application-level identity, so this follows `instanceSettings`'s
+ * single-row pattern instead: a boolean primary key pinned to `true`, since
+ * there is exactly one tenant.
+ */
 export const userPreferences = pgTable("user_preferences", {
-  id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .unique()
-    .references(() => users.id, { onDelete: "cascade" }),
+  id: boolean("id").primaryKey().default(true),
   defaultModelId: text("default_model_id").default("opus"),
   defaultDiffMode: text("default_diff_mode", {
     enum: ["unified", "split"],
@@ -584,9 +446,6 @@ export type NewUserPreferences = typeof userPreferences.$inferInsert;
 // Usage tracking — one row per assistant turn (append-only)
 export const usageEvents = pgTable("usage_events", {
   id: text("id").primaryKey(),
-  userId: text("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
   source: text("source", { enum: ["web"] })
     .notNull()
     .default("web"),
@@ -628,21 +487,6 @@ export const instanceSettings = pgTable("instance_settings", {
   /** Parent domain for preview hostnames, e.g. "previews.example.com". */
   previewBaseDomain: text("preview_base_domain"),
 
-  smtpHost: text("smtp_host"),
-  smtpPort: integer("smtp_port"),
-  smtpSecure: boolean("smtp_secure"),
-  smtpUser: text("smtp_user"),
-  /**
-   * Sealed with `lib/crypto/secret-box`, never hashed.
-   *
-   * nodemailer authenticates with the original on every send, so there is
-   * nothing to compare a hash against. Sealed with the key derived from
-   * `APP_SECRET`, exactly as GitHub tokens are — changing that secret makes
-   * this unreadable and the operator re-enters it.
-   */
-  smtpPasswordSealed: text("smtp_password_sealed"),
-  smtpFrom: text("smtp_from"),
-
   /**
    * Bring-your-own Poolside provider config: a chat whose `backend` is
    * `"poolside"` runs its turns through the `pool` CLI configured here
@@ -659,24 +503,13 @@ export const instanceSettings = pgTable("instance_settings", {
   poolsideBaseUrl: text("poolside_base_url"),
   /**
    * Sealed with `lib/crypto/secret-box`, never hashed — same rationale and
-   * mechanism as `smtpPasswordSealed`: the original value is needed on every
-   * call, so there is nothing to compare a hash against. Forwarded to the
-   * `pool` process as `POOLSIDE_API_KEY`.
+   * mechanism as `githubTokens.sealedToken`: the original value is needed on
+   * every call, so there is nothing to compare a hash against. Forwarded to
+   * the `pool` process as `POOLSIDE_API_KEY`.
    */
   poolsideApiKeySealed: text("poolside_api_key_sealed"),
   /** Path to the `pool` binary on this instance, when it is not on `PATH`. */
   poolsideBinaryPath: text("poolside_binary_path"),
-  /**
-   * When the guided first-run flow (account, platform, mail) was finished.
-   *
-   * Null is the normal state until then, and is what makes the flow
-   * re-entrant: an admin who closes the browser mid-way is sent back to
-   * `/onboarding` on their next visit instead of either restarting at account
-   * creation (already done, and `POST /api/auth/first-run` would 409 on it
-   * anyway) or landing in the app with no way back to the mail-server step
-   * that still matters.
-   */
-  onboardingCompletedAt: timestamp("onboarding_completed_at"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
@@ -788,45 +621,17 @@ export const plugins = pgTable("plugins", {
    * break its already-configured webhook.
    */
   ingressSecret: text("ingress_secret"),
-  /**
-   * The administrator who installed the plugin — the plugin's SECURITY
-   * PRINCIPAL, and the whole reason this column exists.
-   *
-   * A plugin process is not a person, so "what may this plugin touch?" has
-   * no answer until something records whom it acts for. Without this column
-   * the strictest rule `authorizeSessionForPlugin`
-   * (`lib/plugins/capability-handlers.ts`) could derive was "the target
-   * session's owner must be an administrator" — a property of the victim,
-   * not of the actor, which let a plugin into an admin's session while
-   * locking it out of an ordinary member's. That is backwards for the
-   * product's own worked example (`docs/plugins.md`: a Slack `channelMap`
-   * points at whichever sessions the team actually works in, mostly
-   * non-admins'). `installPluginAction` runs behind `requireAdmin`, so the
-   * installer is always an administrator at the moment it is written, and
-   * "a plugin may reach what its installer could reach" is a rule about the
-   * actor.
-   *
-   * NULLABLE, deliberately, in two directions:
-   *
-   * - Rows written before this column existed have no installer on record.
-   *   Backfilling them to "some administrator" would invent a principal
-   *   nobody consented as, so they stay null and every capability that
-   *   authorizes through this column REFUSES for them (fail closed) until
-   *   an administrator re-installs the plugin. That is a visible,
-   *   fixable outage, not a silent widening.
-   * - `onDelete: "set null"` for the same reason `invitations.invitedBy`
-   *   and `tasks.createdBy` use it: deleting a user must not cascade into
-   *   deleting installed plugins, and a plugin whose installer no longer
-   *   exists has lost its principal — null, and therefore refused, is the
-   *   correct end state rather than an orphaned id or a blocked user
-   *   deletion.
-   *
-   * Being an administrator is re-checked live at every call, never trusted
-   * from this column: a demoted installer's plugin stops being able to act.
+  /*
+   * Used to carry `installedBy` — the administrator who installed the
+   * plugin, the plugin's security principal, checked live against
+   * `isAdmin` on every capability call. Phase C removed application-level
+   * identity (`users`, and every per-request identity check with it), which
+   * removed the requester this column used to distinguish: a plugin may now
+   * act on any session that exists, same as every other caller in this
+   * codebase (see `lib/plugins/capability-handlers.ts`'s "plugin
+   * authorization" note). Nothing set this column to a real value even
+   * before the column was dropped — see that same note.
    */
-  installedBy: text("installed_by").references(() => users.id, {
-    onDelete: "set null",
-  }),
   installedAt: timestamp("installed_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -942,9 +747,6 @@ export const tasks = pgTable(
     reviewerRejections: integer("reviewer_rejections").notNull().default(0),
     origin: text("origin", { enum: TASK_ORIGINS }).notNull().default("user"),
     resultSummary: text("result_summary"),
-    createdBy: text("created_by").references(() => users.id, {
-      onDelete: "set null",
-    }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
@@ -1033,8 +835,9 @@ export type NewEvalRun = typeof evalRuns.$inferInsert;
  * there is deliberately no "missed windows" bookkeeping here — a schedule
  * that fires only records that it fired, never what it would have fired for
  * while nothing was watching (see that file's own comment on catch-up).
- * `createdBy` is nullable and set-null-on-delete like `tasks.createdBy`: the
- * schedule keeps firing after the admin who created it is gone.
+ * Used to carry a nullable, set-null-on-delete `createdBy` — Phase C removed
+ * application-level identity, so there is no more admin to attribute a
+ * schedule to.
  */
 export const schedules = pgTable(
   "schedules",
@@ -1055,9 +858,6 @@ export const schedules = pgTable(
     assignedAgent: text("assigned_agent"),
     enabled: boolean("enabled").notNull().default(true),
     lastFiredAt: timestamp("last_fired_at"),
-    createdBy: text("created_by").references(() => users.id, {
-      onDelete: "set null",
-    }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },

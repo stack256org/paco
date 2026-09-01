@@ -134,7 +134,7 @@ const fakeDb = {
 mock.module("@/lib/db/client", () => ({ db: fakeDb }));
 
 let chatRow: { sessionId: string; activeStreamId: string | null } | undefined;
-let sessionRow: { id: string; userId: string; status: string } | undefined;
+let sessionRow: { id: string; status: string } | undefined;
 const getChatByIdSpy = mock(async (_chatId: string) => chatRow);
 const getSessionByIdSpy = mock(async (_sessionId: string) => sessionRow);
 
@@ -143,28 +143,12 @@ mock.module("@/lib/db/sessions", () => ({
   getSessionById: getSessionByIdSpy,
 }));
 
-/**
- * `tasks:create` resolves "the instance's organization" via `getOrganization`
- * (self-hosted Paco serves exactly one) and checks the session belongs to it
- * via the exact same helper `planGoal` uses, imported from `lib/tasks/planner`
- * rather than re-derived — mocking that module (not `@/lib/org/membership`)
- * matches what `capability-handlers.ts` actually imports.
- */
-let organizationRow: { id: string } | null = { id: "org-1" };
+/** `tasks:create` resolves "the instance's organization" via `getOrganization` (self-hosted Paco serves exactly one). */
+let organizationRow: { id: string } = { id: "org-1" };
 const getOrganizationSpy = mock(async () => organizationRow);
 
 mock.module("@/lib/org/organization", () => ({
   getOrganization: getOrganizationSpy,
-}));
-
-let sessionBelongsToOrganizationResult = true;
-const sessionBelongsToOrganizationSpy = mock(
-  async (_sessionUserId: string, _organizationId: string) =>
-    sessionBelongsToOrganizationResult,
-);
-
-mock.module("@/lib/tasks/planner", () => ({
-  sessionBelongsToOrganization: sessionBelongsToOrganizationSpy,
 }));
 
 let createdTask: { id: string } = { id: "task-1" };
@@ -269,35 +253,6 @@ mock.module("undici", () => ({
   Agent: FakeDispatcher,
 }));
 
-/**
- * Both `messages:post` and `tasks:create` authorize as the plugin's
- * INSTALLER (`plugins.installedBy`) — a plugin may reach what the
- * administrator who installed it could reach — not as the target session's
- * owner. Keyed by user id, so a test can make the installer an admin while
- * the target session's owner is a plain member (the Slack `channelMap`
- * case), and the other way round.
- */
-let adminUserIds = new Set<string>(["installer-1"]);
-const isAdminSpy = mock(async (userId: string) => adminUserIds.has(userId));
-
-mock.module("@/lib/admin/require-admin", () => ({
-  isAdmin: isAdminSpy,
-}));
-
-/**
- * The installer's account still existing is part of the principal check: a
- * plugin whose installer has been deleted has no principal left to act as,
- * and must fail closed rather than fall back to anything.
- */
-let existingUserIds = new Set<string>(["installer-1", "user-1"]);
-const userExistsSpy = mock(async (userId: string) =>
-  existingUserIds.has(userId),
-);
-
-mock.module("@/lib/db/users", () => ({
-  userExists: userExistsSpy,
-}));
-
 const { buildCapabilityHandlers } = await import("./capability-handlers");
 
 function manifest(overrides: Partial<PluginManifest> = {}): PluginManifest {
@@ -324,7 +279,6 @@ function pluginRow(overrides: Partial<PluginRow> = {}): PluginRow {
     consentedNetDomains: ["api.linear.app"],
     enabled: true,
     ingressSecret: null,
-    installedBy: "installer-1",
     installedAt: now,
     updatedAt: now,
     ...overrides,
@@ -1240,35 +1194,26 @@ describe("net:fetch", () => {
 });
 
 /**
- * Puts every authorization mock back into the "allowed" state. Both
- * `messages:post` and `tasks:create` go through the same gate, so both
- * suites share one reset.
+ * Puts every shared mock back into its default state. Both `messages:post`
+ * and `tasks:create` read the same session/org/chat state, so both suites
+ * share one reset.
  */
-function resetAuthorizationMocks(): void {
+function resetMocks(): void {
   organizationRow = { id: "org-1" };
   chatRow = { sessionId: "session-1", activeStreamId: null };
-  sessionRow = { id: "session-1", userId: "user-1", status: "running" };
-  sessionBelongsToOrganizationResult = true;
-  // The installer is an admin; the session's owner (`user-1`) deliberately
-  // is NOT, so every "allowed" test below is also proving that a plain
-  // member's session is reachable — the `channelMap` case in docs/plugins.md.
-  adminUserIds = new Set<string>(["installer-1"]);
-  existingUserIds = new Set<string>(["installer-1", "user-1"]);
+  sessionRow = { id: "session-1", status: "running" };
   submitOutcome = {
     kind: "streaming",
     runId: "run-42",
     stream: new ReadableStream(),
   };
   getOrganizationSpy.mockClear();
-  sessionBelongsToOrganizationSpy.mockClear();
-  isAdminSpy.mockClear();
-  userExistsSpy.mockClear();
 }
 
 describe("messages:post", () => {
   test("calls submitChatMessage (the route's shared submit path) for an existing chat", async () => {
     chatRow = { sessionId: "session-1", activeStreamId: null };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionRow = { id: "session-1", status: "running" };
     submitOutcome = {
       kind: "streaming",
       runId: "run-42",
@@ -1292,14 +1237,12 @@ describe("messages:post", () => {
     const call = submitChatMessageSpy.mock.calls[0]?.[0] as {
       chatId: string;
       sessionId: string;
-      userId: string;
       sessionStatus: string;
       activeStreamId: string | null;
       messages: Array<{ role: string }>;
     };
     expect(call.chatId).toBe("chat-1");
     expect(call.sessionId).toBe("session-1");
-    expect(call.userId).toBe("user-1");
     expect(call.sessionStatus).toBe("running");
     expect(call.activeStreamId).toBeNull();
     expect(call.messages).toHaveLength(1);
@@ -1308,7 +1251,7 @@ describe("messages:post", () => {
 
   test("attributes the posted message to the plugin via metadata.postedBy", async () => {
     chatRow = { sessionId: "session-1", activeStreamId: null };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionRow = { id: "session-1", status: "running" };
     submitOutcome = {
       kind: "streaming",
       runId: "run-42",
@@ -1357,7 +1300,7 @@ describe("messages:post", () => {
 
   test("surfaces a conflicting active stream as a rejection", async () => {
     chatRow = { sessionId: "session-1", activeStreamId: "run-existing" };
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
+    sessionRow = { id: "session-1", status: "running" };
     submitOutcome = { kind: "conflict" };
 
     const handlers = buildCapabilityHandlers(pluginRow());
@@ -1371,146 +1314,8 @@ describe("messages:post", () => {
     ).rejects.toThrow(/conflicting active stream/);
   });
 
-  test("rejects a chat whose session is outside the instance's organization, identically to an unknown chat", async () => {
-    resetAuthorizationMocks();
-    submitChatMessageSpy.mockClear();
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-    const payload = { chatId: "chat-1", text: "hi" };
-
-    // Same chatId in both calls, so the two messages are only identical if
-    // "no such chat" and "not this organization's chat" are genuinely
-    // indistinguishable to the plugin.
-    chatRow = undefined;
-    const unknownChatError = await messagesPost("my-plugin", payload).catch(
-      (error: unknown) => error,
-    );
-
-    chatRow = { sessionId: "session-1", activeStreamId: null };
-    sessionBelongsToOrganizationResult = false;
-    const foreignOrgError = await messagesPost("my-plugin", payload).catch(
-      (error: unknown) => error,
-    );
-
-    expect(foreignOrgError).toBeInstanceOf(Error);
-    expect((foreignOrgError as Error).message).toBe(
-      (unknownChatError as Error).message,
-    );
-    expect(submitChatMessageSpy).not.toHaveBeenCalled();
-  });
-
-  test("posts into a chat owned by a plain member, and authorizes as the INSTALLER rather than the chat's owner", async () => {
-    resetAuthorizationMocks();
-    submitChatMessageSpy.mockClear();
-
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-
-    // `user-1` is deliberately not an administrator — this is the
-    // docs/plugins.md `channelMap` shape, where a Slack channel is mapped to
-    // an ordinary member's session.
-    await messagesPost("my-plugin", { chatId: "chat-1", text: "hi" });
-
-    expect(submitChatMessageSpy).toHaveBeenCalled();
-    expect(isAdminSpy).toHaveBeenCalledWith("installer-1");
-    expect(isAdminSpy).not.toHaveBeenCalledWith("user-1");
-  });
-
-  test("rejects when the plugin row predates installedBy, rather than falling back to any rule", async () => {
-    resetAuthorizationMocks();
-    submitChatMessageSpy.mockClear();
-
-    const handlers = buildCapabilityHandlers(pluginRow({ installedBy: null }));
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-
-    await expect(
-      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
-    ).rejects.toThrow(/not found/);
-    expect(submitChatMessageSpy).not.toHaveBeenCalled();
-  });
-
-  test("rejects when the installer's account has been deleted", async () => {
-    resetAuthorizationMocks();
-    existingUserIds = new Set<string>(["user-1"]);
-    submitChatMessageSpy.mockClear();
-
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-
-    await expect(
-      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
-    ).rejects.toThrow(/not found/);
-    expect(submitChatMessageSpy).not.toHaveBeenCalled();
-  });
-
-  test("rejects when the installer is no longer an administrator", async () => {
-    resetAuthorizationMocks();
-    adminUserIds = new Set<string>();
-    submitChatMessageSpy.mockClear();
-
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-
-    await expect(
-      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
-    ).rejects.toThrow(/not found/);
-    expect(submitChatMessageSpy).not.toHaveBeenCalled();
-  });
-
-  test("a demoted installer is refused even when the target session's own owner is an administrator", async () => {
-    resetAuthorizationMocks();
-    // Precisely the fallback being removed: the old rule allowed any
-    // admin-owned session regardless of who installed the plugin.
-    adminUserIds = new Set<string>(["user-1"]);
-    submitChatMessageSpy.mockClear();
-
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-
-    await expect(
-      messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }),
-    ).rejects.toThrow(/not found/);
-    expect(submitChatMessageSpy).not.toHaveBeenCalled();
-  });
-
-  test("no write happens before the authorization check", async () => {
-    resetAuthorizationMocks();
-    sessionBelongsToOrganizationResult = false;
-    submitChatMessageSpy.mockClear();
-
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const messagesPost = handlers["messages:post"];
-    if (!messagesPost) {
-      throw new Error("messages:post handler missing");
-    }
-
-    await messagesPost("my-plugin", { chatId: "chat-1", text: "hi" }).catch(
-      () => undefined,
-    );
-
-    expect(submitChatMessageSpy).not.toHaveBeenCalled();
-  });
-
   test("the text the MODEL receives names the posting plugin, not just the UI metadata", async () => {
-    resetAuthorizationMocks();
+    resetMocks();
     submitChatMessageSpy.mockClear();
 
     const handlers = buildCapabilityHandlers(pluginRow());
@@ -1537,7 +1342,7 @@ describe("messages:post", () => {
   });
 
   test("plugin text cannot forge its way out of the attribution wrapper", async () => {
-    resetAuthorizationMocks();
+    resetMocks();
     submitChatMessageSpy.mockClear();
 
     const handlers = buildCapabilityHandlers(pluginRow());
@@ -1571,7 +1376,7 @@ describe("messages:post", () => {
 
 describe("tasks:create", () => {
   function resetTasksCreateMocks(): void {
-    resetAuthorizationMocks();
+    resetMocks();
     createdTask = { id: "task-1" };
     startTaskResult = { ok: true, chatId: "chat-99" };
     createTaskSpy.mockClear();
@@ -1622,44 +1427,6 @@ describe("tasks:create", () => {
     expect(createTaskSpy).not.toHaveBeenCalled();
   });
 
-  test("rejects a session belonging to a different organization, identically to an unknown session", async () => {
-    resetTasksCreateMocks();
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const tasksCreate = handlers["tasks:create"];
-    if (!tasksCreate) {
-      throw new Error("tasks:create handler missing");
-    }
-    const payload = {
-      sessionId: "session-1",
-      title: "Investigate",
-      goal: "Investigate the thing",
-    };
-
-    // Same sessionId in both calls, so the two error messages are only
-    // identical if "no such session" and "not your organization's session"
-    // are genuinely indistinguishable to the caller.
-    sessionRow = undefined;
-    const unknownSessionError = await tasksCreate("my-plugin", payload).catch(
-      (error: unknown) => error,
-    );
-
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
-    sessionBelongsToOrganizationResult = false;
-    const foreignOrgError = await tasksCreate("my-plugin", payload).catch(
-      (error: unknown) => error,
-    );
-
-    expect(foreignOrgError).toBeInstanceOf(Error);
-    expect((foreignOrgError as Error).message).toBe(
-      (unknownSessionError as Error).message,
-    );
-    expect(createTaskSpy).not.toHaveBeenCalled();
-    expect(sessionBelongsToOrganizationSpy).toHaveBeenCalledWith(
-      "user-1",
-      "org-1",
-    );
-  });
-
   test('creates a task scoped to the instance\'s organization with origin "channel"', async () => {
     resetTasksCreateMocks();
     const handlers = buildCapabilityHandlers(pluginRow());
@@ -1682,7 +1449,6 @@ describe("tasks:create", () => {
       title: "Investigate the outage",
       goal: "Find out why the outage happened",
       origin: "channel",
-      createdBy: "installer-1",
     });
     expect(startTaskSpy).not.toHaveBeenCalled();
   });
@@ -1747,122 +1513,6 @@ describe("tasks:create", () => {
     });
 
     expect(result).toEqual({ taskId: "task-1", error: "sandbox unavailable" });
-  });
-
-  test("creates a task on a plain member's session — the docs/plugins.md channelMap case — authorizing as the installer", async () => {
-    resetTasksCreateMocks();
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const tasksCreate = handlers["tasks:create"];
-    if (!tasksCreate) {
-      throw new Error("tasks:create handler missing");
-    }
-
-    // `user-1` owns the mapped session and is NOT an administrator.
-    const result = await tasksCreate(freshPluginId(), {
-      sessionId: "session-1",
-      title: "Investigate",
-      goal: "Investigate the thing",
-    });
-
-    expect(result).toEqual({ taskId: "task-1" });
-    expect(createTaskSpy).toHaveBeenCalled();
-    expect(isAdminSpy).toHaveBeenCalledWith("installer-1");
-    expect(isAdminSpy).not.toHaveBeenCalledWith("user-1");
-  });
-
-  test("rejects a plugin row with no installer, identically to an unknown session", async () => {
-    resetTasksCreateMocks();
-    const payload = {
-      sessionId: "session-1",
-      title: "Investigate",
-      goal: "Investigate the thing",
-    };
-
-    const withInstaller = buildCapabilityHandlers(pluginRow())["tasks:create"];
-    const withoutInstaller = buildCapabilityHandlers(
-      pluginRow({ installedBy: null }),
-    )["tasks:create"];
-    if (!(withInstaller && withoutInstaller)) {
-      throw new Error("tasks:create handler missing");
-    }
-
-    sessionRow = undefined;
-    const unknownSessionError = await withInstaller(
-      freshPluginId(),
-      payload,
-    ).catch((error: unknown) => error);
-
-    sessionRow = { id: "session-1", userId: "user-1", status: "running" };
-    const noPrincipalError = await withoutInstaller(
-      freshPluginId(),
-      payload,
-    ).catch((error: unknown) => error);
-
-    expect(noPrincipalError).toBeInstanceOf(Error);
-    expect((noPrincipalError as Error).message).toBe(
-      (unknownSessionError as Error).message,
-    );
-    expect(createTaskSpy).not.toHaveBeenCalled();
-  });
-
-  test("rejects when the installer's account has been deleted", async () => {
-    resetTasksCreateMocks();
-    existingUserIds = new Set<string>(["user-1"]);
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const tasksCreate = handlers["tasks:create"];
-    if (!tasksCreate) {
-      throw new Error("tasks:create handler missing");
-    }
-
-    await expect(
-      tasksCreate(freshPluginId(), {
-        sessionId: "session-1",
-        title: "Investigate",
-        goal: "Investigate the thing",
-      }),
-    ).rejects.toThrow(/not found/);
-    expect(createTaskSpy).not.toHaveBeenCalled();
-  });
-
-  test("rejects when the installer is no longer an administrator, even for an admin-owned session", async () => {
-    resetTasksCreateMocks();
-    adminUserIds = new Set<string>(["user-1"]);
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const tasksCreate = handlers["tasks:create"];
-    if (!tasksCreate) {
-      throw new Error("tasks:create handler missing");
-    }
-
-    await expect(
-      tasksCreate(freshPluginId(), {
-        sessionId: "session-1",
-        title: "Investigate",
-        goal: "Investigate the thing",
-      }),
-    ).rejects.toThrow(/not found/);
-    expect(createTaskSpy).not.toHaveBeenCalled();
-  });
-
-  test("attributes the task to the plugin's installer, keeping origin as the plugin marker", async () => {
-    resetTasksCreateMocks();
-    const handlers = buildCapabilityHandlers(pluginRow());
-    const tasksCreate = handlers["tasks:create"];
-    if (!tasksCreate) {
-      throw new Error("tasks:create handler missing");
-    }
-
-    await tasksCreate(freshPluginId(), {
-      sessionId: "session-1",
-      title: "Investigate",
-      goal: "Investigate the thing",
-    });
-
-    const call = createTaskSpy.mock.calls[0]?.[0] as {
-      createdBy?: string;
-      origin?: string;
-    };
-    expect(call.createdBy).toBe("installer-1");
-    expect(call.origin).toBe("channel");
   });
 
   test("bounds how many tasks one plugin can create in a minute", async () => {

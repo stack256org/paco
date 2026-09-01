@@ -1,11 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-let currentSession: {
-  user: { id: string; email?: string };
-} | null = {
-  user: { id: "user-1" },
-};
-
 const preferencesState = {
   defaultModelId: "haiku",
   defaultDiffMode: "unified" as const,
@@ -17,16 +11,9 @@ const preferencesState = {
 
 const updateCalls: Array<Record<string, unknown>> = [];
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentSession,
-}));
-
 mock.module("@/lib/db/user-preferences", () => ({
-  getUserPreferences: async (_userId: string) => preferencesState,
-  updateUserPreferences: async (
-    _userId: string,
-    updates: Record<string, unknown>,
-  ) => {
+  getUserPreferences: async () => preferencesState,
+  updateUserPreferences: async (updates: Record<string, unknown>) => {
     updateCalls.push(updates);
     return {
       ...preferencesState,
@@ -47,22 +34,8 @@ function createJsonRequest(method: "PATCH" | "GET", body?: unknown): Request {
 
 describe("/api/settings/preferences", () => {
   beforeEach(() => {
-    currentSession = { user: { id: "user-1" } };
     preferencesState.defaultModelId = "haiku";
     updateCalls.length = 0;
-  });
-
-  test("GET returns 401 when unauthenticated", async () => {
-    currentSession = null;
-    const { GET } = await routeModulePromise;
-
-    const response = await GET();
-    const body = (await response.json()) as { error: string };
-
-    expect(response.status).toBe(401);
-    expect(body.error).toBe(
-      "You've been signed out. Sign in again to continue.",
-    );
   });
 
   test("GET returns preferences including autoCommitPush and autoCreatePr", async () => {

@@ -1,6 +1,5 @@
 import { repoDir } from "@paco/sandbox";
 import { z } from "zod";
-import { requireAuthenticatedUser } from "@/app/api/chat/_lib/chat-context";
 import { hostWorkspaceFor } from "@/lib/agent/workspace-paths";
 import { getGithubToken } from "@/lib/db/github-tokens";
 import { getSessionById, updateSession } from "@/lib/db/sessions";
@@ -34,11 +33,6 @@ const createRepoSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const auth = await requireAuthenticatedUser();
-  if (!auth.ok) {
-    return auth.response;
-  }
-
   const parsed = createRepoSchema.safeParse(
     await request.json().catch(() => null),
   );
@@ -51,13 +45,13 @@ export async function POST(request: Request) {
 
   const { sessionId, repoName, description, isPrivate, owner } = parsed.data;
 
-  const token = await getGithubToken(auth.userId);
+  const token = await getGithubToken();
   if (!token) {
     return Response.json({ error: GITHUB_NOT_CONNECTED }, { status: 400 });
   }
 
   const session = await getSessionById(sessionId);
-  if (!session || session.userId !== auth.userId) {
+  if (!session) {
     return Response.json({ error: SESSION_NOT_FOUND }, { status: 404 });
   }
   if (!session.sandboxState) {

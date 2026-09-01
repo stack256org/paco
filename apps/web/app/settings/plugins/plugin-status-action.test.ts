@@ -3,16 +3,6 @@ import type { Capability } from "@paco/plugin-kit";
 
 mock.module("server-only", () => ({}));
 
-let adminOk = true;
-mock.module("@/lib/admin/require-admin", () => ({
-  requireAdmin: async () => {
-    if (!adminOk) {
-      throw new Error("Not an administrator");
-    }
-    return "admin-1";
-  },
-}));
-
 type FakeRow = {
   id: string;
   source: string;
@@ -48,17 +38,11 @@ function row(id: string, overrides: Partial<FakeRow> = {}): FakeRow {
 }
 
 beforeEach(() => {
-  adminOk = true;
   rows = [];
   registry = new Map();
 });
 
 describe("pluginStatusAction", () => {
-  test("throws when the caller is not an admin", async () => {
-    adminOk = false;
-    await expect(pluginStatusAction()).rejects.toThrow(/administrator/);
-  });
-
   test("reports a running host's state", async () => {
     rows = [row("plugin-a")];
     registry.set("plugin-a", { state: "running" });

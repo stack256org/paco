@@ -10,7 +10,7 @@ import type { TurnPolicy } from "@paco/agent-backend";
 import type { SkillMetadata } from "@paco/sandbox";
 import { TurnEventRecorder } from "@/lib/agent/event-recorder";
 import { runAgentTurn } from "@/lib/agent/run-step";
-import { appUrl } from "@/lib/app-url";
+import { appLoopbackUrl } from "@/lib/app-url";
 import {
   classifySetupFailure,
   setupFailureMessage,
@@ -64,7 +64,6 @@ import {
 import { getChatById, getSessionById } from "@/lib/db/sessions";
 import { getUserPreferences } from "@/lib/db/user-preferences";
 import { APP_DEFAULT_MODEL_ID } from "@/lib/models";
-import type { Session as AuthSession } from "@/lib/session/types";
 import type {
   WorkflowRunStatus,
   WorkflowRunStepTiming,
@@ -73,15 +72,11 @@ import { resolveChatModelSelection } from "../api/chat/_lib/model-selection";
 import { resolveChatSandboxRuntime } from "./chat-sandbox-runtime";
 import { takeChatCheckpoint } from "./chat-checkpoint";
 
-type AuthSessionContext = Pick<AuthSession, "user"> | null;
-
 type Options = {
   messages: WebAgentUIMessage[];
   chatId: string;
   sessionId: string;
-  userId: string;
   requestUrl: string;
-  authSession: AuthSessionContext;
   selectedModelId?: string;
   modelId?: string;
   agentOptions?: Omit<AgentCallOptions, "sandbox" | "skills">;
@@ -141,18 +136,16 @@ function shouldRefreshDiffCacheForParts(
  */
 
 async function resolveChatModelRuntime(params: {
-  userId: string;
   sessionId: string;
   chatId: string;
   requestUrl: string;
-  authSession: AuthSessionContext;
 }): Promise<ChatModelRuntime> {
   "use step";
 
   const [sessionRecord, chat, rawPreferences] = await Promise.all([
     getSessionById(params.sessionId),
     getChatById(params.chatId),
-    getUserPreferences(params.userId).catch((error) => {
+    getUserPreferences().catch((error) => {
       console.error("Failed to load user preferences:", error);
       return null;
     }),
@@ -160,9 +153,6 @@ async function resolveChatModelRuntime(params: {
 
   if (!sessionRecord) {
     throw new Error("Session not found");
-  }
-  if (sessionRecord.userId !== params.userId) {
-    throw new Error("Unauthorized");
   }
   if (!chat || chat.sessionId !== params.sessionId) {
     throw new Error("Chat not found");
@@ -385,22 +375,18 @@ async function sendDataPart(
 /**
  * The tool-approval hook's callback URL.
  *
- * The hook posts back to this server. It runs on the same machine, so
- * localhost is right even when the app is reached through another origin.
- *
- * The port comes from APP_URL, the one place the port is configured. It used
- * to be `process.env.PORT ?? "3000"`, which happened to work only because
- * Next assigns PORT internally after binding — and the default of 3000 was
- * wrong for this app, which serves 3066. That matters more than it looks: the
- * approval hook fails *open* on a transport error by design, so a callback
- * aimed at a closed port would not error loudly. It would silently approve
+ * The hook posts back to this server. It runs on the same machine, so it
+ * must address this app's own loopback port, never the public origin — see
+ * `appLoopbackUrl`'s doc for why. The approval hook fails *open* on a
+ * transport error by design, so a callback aimed at a closed (or
+ * nginx-guarded) port would not error loudly. It would silently approve
  * every tool call.
  *
  * One function rather than an expression at each call site, so every turn is
  * gated by the same hook at the same address.
  */
 function approvalHookUrl(): string {
-  return `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`;
+  return `${appLoopbackUrl()}/api/internal/approvals`;
 }
 
 /**
@@ -456,14 +442,11 @@ export async function runAgentWorkflow(options: Options) {
     ? Promise.resolve()
     : persistInputMessages(options.chatId, options.messages);
   const modelRuntimePromise = resolveChatModelRuntime({
-    userId: options.userId,
     sessionId: options.sessionId,
     chatId: options.chatId,
     requestUrl: options.requestUrl,
-    authSession: options.authSession,
   });
   const runtimePromise = resolveChatSandboxRuntime({
-    userId: options.userId,
     sessionId: options.sessionId,
     chatId: options.chatId,
   });
@@ -655,7 +638,6 @@ export async function runAgentWorkflow(options: Options) {
           workflowRunId,
           options.chatId,
           options.sessionId,
-          options.userId,
           selectedModelId,
           modelId,
           agentOptions,
@@ -895,7 +877,6 @@ export async function runAgentWorkflow(options: Options) {
         );
         await sendDataPart(writable, pendingPrPart);
         const autoPrResult = await runAutoCreatePrStep({
-          userId: options.userId,
           sessionId: options.sessionId,
           chatId: options.chatId,
           sessionTitle: runtime.sessionTitle,
@@ -987,7 +968,6 @@ export async function runAgentWorkflow(options: Options) {
         await distillTurnMemoryStep({
           chatId: options.chatId,
           sessionRepoDir: finalSessionRepoDir,
-          userId: options.userId,
           turnId,
         });
       }
@@ -1018,7 +998,6 @@ export async function runAgentWorkflow(options: Options) {
     } finally {
       const runFinishedAt = new Date();
       await recordWorkflowUsage(
-        options.userId,
         modelId,
         totalUsage,
         pendingAssistantResponse,
@@ -1276,7 +1255,6 @@ const runAgentStep = async (
   workflowRunId: string,
   chatId: string,
   _sessionId: string,
-  userId: string,
   selectedModelId: string,
   modelId: string,
   agentOptions: AgentCallOptions,
@@ -1376,7 +1354,7 @@ const runAgentStep = async (
     // by the durable workflow runtime, so a token that crossed a step boundary
     // would be written to the database in clear — the one place the sealed
     // column exists to keep it out of.
-    const githubToken = await getGithubToken(userId);
+    const githubToken = await getGithubToken();
 
     recorder = new TurnEventRecorder(chatId, crypto.randomUUID());
     // Falls back to the assistant row only in the degenerate case of a run
@@ -1467,8 +1445,6 @@ const runAgentStep = async (
       const organization = await getOrganization();
       memorySection = await loadMemorySectionForTurn({
         ...(sessionRepoDir ? { sessionRepoDir } : {}),
-        userId,
-        organizationId: organization?.id,
         prompt,
       });
       // `resolveChatAgents` treats `organizationId` as optional — plugin

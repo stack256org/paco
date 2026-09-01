@@ -29,10 +29,6 @@ let sessionRow: SessionRow = {
 const updateCalls: Array<Record<string, unknown>> = [];
 const archiveCalls: Array<Record<string, unknown>> = [];
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => ({ user: { id: "user-1" } }),
-}));
-
 mock.module("@/lib/db/sessions", () => ({
   getSessionById: async () => sessionRow,
   deleteSession: async () => undefined,
@@ -291,15 +287,5 @@ describe("DELETE /api/sessions/[sessionId]", () => {
 
     expect(response.status).toBe(200);
     expect(deleteCalls).toEqual([{ sessionId: "session-1", force: true }]);
-  });
-
-  test("someone else's session is not theirs to delete", async () => {
-    sessionRow = { ...sessionRow, userId: "user-2" };
-
-    const response = await del();
-
-    expect(response.status).toBe(403);
-    // Nothing was removed from the host before the ownership check.
-    expect(deleteCalls).toEqual([]);
   });
 });

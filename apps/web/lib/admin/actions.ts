@@ -2,7 +2,6 @@
 
 import { db } from "@/lib/db/client";
 import { githubTokens } from "@/lib/db/schema";
-import { requireAdmin } from "./require-admin";
 
 // ---------------------------------------------------------------------------
 // GitHub revocation helpers
@@ -23,11 +22,9 @@ export async function revokeAllGitHubTokens(): Promise<{
   deletedConnections?: number;
 }> {
   try {
-    await requireAdmin();
-
     const deleted = await db
       .delete(githubTokens)
-      .returning({ userId: githubTokens.userId });
+      .returning({ id: githubTokens.id });
 
     return { success: true, deletedConnections: deleted.length };
   } catch (error) {

@@ -3,35 +3,9 @@ import type { Schedule } from "@/lib/db/schema";
 
 mock.module("server-only", () => ({}));
 
-// ── session / org / membership ────────────────────────────────────
+// ── org ──────────────────────────────────────────────────────────
 
-let signedIn = true;
-let adminOk = false;
-let memberRole: "owner" | "admin" | "member" | null = "member";
-let organization: { id: string } | null = { id: "org-1" };
-
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => (signedIn ? { user: { id: "user-1" } } : null),
-}));
-
-const requireAdminMock = mock(async () => {
-  if (!signedIn) {
-    throw new Error("Sign in to continue.");
-  }
-  if (!adminOk) {
-    throw new Error("That isn't yours.");
-  }
-  return "user-1";
-});
-
-mock.module("@/lib/admin/require-admin", () => ({
-  isAdmin: async (_userId: string) => adminOk,
-  requireAdmin: requireAdminMock,
-}));
-
-mock.module("@/lib/org/membership", () => ({
-  getMemberRole: async (_userId: string) => memberRole,
-}));
+const organization = { id: "org-1" };
 
 mock.module("@/lib/org/organization", () => ({
   getOrganization: async () => organization,
@@ -39,12 +13,12 @@ mock.module("@/lib/org/organization", () => ({
 
 // ── sessions / roster ────────────────────────────────────────────
 
-let mySessions: Array<{ id: string; title: string; status: string }> = [
+let allSessions: Array<{ id: string; title: string; status: string }> = [
   { id: "session-1", title: "My repo", status: "running" },
 ];
 
 mock.module("@/lib/db/sessions", () => ({
-  getSessionsByUserId: async (_userId: string) => mySessions,
+  getSessions: async () => allSessions,
 }));
 
 let roster: Record<string, unknown> = { explorer: {}, executor: {} };
@@ -66,7 +40,6 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     assignedAgent: null,
     enabled: true,
     lastFiredAt: null,
-    createdBy: "user-1",
     createdAt: new Date("2026-08-25T00:00:00Z"),
     updatedAt: new Date("2026-08-25T00:00:00Z"),
     ...overrides,
@@ -90,7 +63,6 @@ const createScheduleMock = mock(
     cron: string;
     goal: string;
     assignedAgent?: string | null;
-    createdBy?: string | null;
   }) => {
     if (input.cron === "garbage") {
       return { ok: false as const, error: "Invalid cron expression" };
@@ -203,15 +175,10 @@ const {
 } = await import("./actions");
 
 beforeEach(() => {
-  signedIn = true;
-  adminOk = false;
-  memberRole = "member";
-  organization = { id: "org-1" };
-  mySessions = [{ id: "session-1", title: "My repo", status: "running" }];
+  allSessions = [{ id: "session-1", title: "My repo", status: "running" }];
   roster = { explorer: {}, executor: {} };
   store = [];
   fireResult = { ok: true, taskId: "task-1" };
-  requireAdminMock.mockClear();
   listSchedulesMock.mockClear();
   getScheduleMock.mockClear();
   createScheduleMock.mockClear();
@@ -230,21 +197,8 @@ const VALID_INPUT = {
   goal: "Run the suite; open a fix PR if it's red.",
 };
 
-describe("read gate", () => {
-  test("a signed-out caller is rejected", async () => {
-    signedIn = false;
-    await expect(listSchedulesAction()).rejects.toThrow();
-  });
-
-  test("a non-member, non-admin caller is rejected", async () => {
-    memberRole = null;
-    adminOk = false;
-    await expect(listSchedulesAction()).rejects.toThrow();
-  });
-
-  test("any org member may list schedules", async () => {
-    memberRole = "member";
-    adminOk = false;
+describe("listSchedulesAction", () => {
+  test("lists every schedule in the organisation", async () => {
     store = [makeSchedule()];
 
     const rows = await listSchedulesAction();
@@ -252,57 +206,15 @@ describe("read gate", () => {
   });
 });
 
-describe("write gate", () => {
-  test("a non-admin member is rejected, not handed a field error", async () => {
-    memberRole = "member";
-    adminOk = false;
-
-    await expect(createScheduleAction(VALID_INPUT)).rejects.toThrow();
-    await expect(
-      updateScheduleAction("sched-1", VALID_INPUT),
-    ).rejects.toThrow();
-    await expect(setScheduleEnabledAction("sched-1", false)).rejects.toThrow();
-    await expect(deleteScheduleAction("sched-1")).rejects.toThrow();
-    await expect(runScheduleNowAction("sched-1")).rejects.toThrow();
-
-    expect(createScheduleMock).not.toHaveBeenCalled();
-  });
-
-  test("an admin may create a schedule", async () => {
-    adminOk = true;
-
+describe("createScheduleAction", () => {
+  test("creates a schedule and syncs its pg-boss registration", async () => {
     const result = await createScheduleAction(VALID_INPUT);
 
     expect(result.success).toBe(true);
     expect(syncScheduleRegistrationMock).toHaveBeenCalledTimes(1);
   });
 
-  /*
-   * The gate has to BE `requireAdmin`, not a line-for-line copy of it —
-   * which is the duplication `lib/admin/require-admin.ts`'s own docstring
-   * exists to prevent ("an admin check that exists in two places is an admin
-   * check that will exist in one place after the next refactor"). Asserting
-   * the shared helper was actually called is the only way to hold that,
-   * since a copy behaves identically right up until one of them changes.
-   */
-  test("every write goes through the shared requireAdmin helper", async () => {
-    adminOk = true;
-    store = [makeSchedule()];
-
-    await createScheduleAction(VALID_INPUT);
-    await updateScheduleAction("sched-1", VALID_INPUT);
-    await setScheduleEnabledAction("sched-1", false);
-    await runScheduleNowAction("sched-1");
-    await deleteScheduleAction("sched-1");
-
-    expect(requireAdminMock).toHaveBeenCalledTimes(5);
-  });
-});
-
-describe("createScheduleAction validation", () => {
   test("a bad cron comes back as an inline field error, not a throw", async () => {
-    adminOk = true;
-
     const result = await createScheduleAction({
       ...VALID_INPUT,
       cron: "garbage",
@@ -316,25 +228,12 @@ describe("createScheduleAction validation", () => {
   });
 
   test("a missing goal comes back as a field error", async () => {
-    adminOk = true;
-
     const result = await createScheduleAction({ ...VALID_INPUT, goal: "" });
 
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.fieldErrors?.goal).toBeDefined();
     }
-  });
-
-  test("a session that isn't the caller's own is rejected", async () => {
-    adminOk = true;
-
-    const result = await createScheduleAction({
-      ...VALID_INPUT,
-      sessionId: "someone-elses-session",
-    });
-
-    expect(result.success).toBe(false);
   });
 
   /*
@@ -346,8 +245,6 @@ describe("createScheduleAction validation", () => {
    * did not.
    */
   test("an assignedAgent that is not in the roster is rejected", async () => {
-    adminOk = true;
-
     const result = await createScheduleAction({
       ...VALID_INPUT,
       assignedAgent: "ghost",
@@ -362,8 +259,6 @@ describe("createScheduleAction validation", () => {
   });
 
   test("an assignedAgent that IS in the roster is accepted", async () => {
-    adminOk = true;
-
     const result = await createScheduleAction({
       ...VALID_INPUT,
       assignedAgent: "explorer",
@@ -374,7 +269,6 @@ describe("createScheduleAction validation", () => {
   });
 
   test("a null assignedAgent stays null without consulting the roster", async () => {
-    adminOk = true;
     roster = {};
 
     const result = await createScheduleAction({
@@ -392,7 +286,6 @@ describe("createScheduleAction validation", () => {
    * roster row" test `createTaskAction` applies.
    */
   test("an agent that has since been disabled is rejected", async () => {
-    adminOk = true;
     roster = { executor: {} };
 
     const result = await createScheduleAction({
@@ -404,9 +297,8 @@ describe("createScheduleAction validation", () => {
   });
 });
 
-describe("updateScheduleAction validation", () => {
+describe("updateScheduleAction", () => {
   test("a bad cron on edit comes back as a field error", async () => {
-    adminOk = true;
     store = [makeSchedule()];
 
     const result = await updateScheduleAction("sched-1", {
@@ -418,32 +310,8 @@ describe("updateScheduleAction validation", () => {
     expect(syncScheduleRegistrationMock).not.toHaveBeenCalled();
   });
 
-  /**
-   * Mirrors the create-side "a session that isn't the caller's own is
-   * rejected" test above: an edit retargeting an existing schedule at a
-   * session the caller doesn't own must be refused the same way a create
-   * naming one is, not trusted just because the schedule row already
-   * exists.
-   */
-  test("retargeting an existing schedule at a session that isn't the caller's own is rejected", async () => {
-    adminOk = true;
-    store = [makeSchedule()];
-
-    const result = await updateScheduleAction("sched-1", {
-      ...VALID_INPUT,
-      sessionId: "someone-elses-session",
-    });
-
-    expect(result.success).toBe(false);
-    expect(updateScheduleMock).not.toHaveBeenCalled();
-    expect(syncScheduleRegistrationMock).not.toHaveBeenCalled();
-    // The stored row must be untouched by the refused write.
-    expect(store[0]?.sessionId).toBe("session-1");
-  });
-
   /** Same reasoning as the session check: an edit is caller input too. */
   test("retargeting an existing schedule at an unknown agent is rejected", async () => {
-    adminOk = true;
     store = [makeSchedule()];
 
     const result = await updateScheduleAction("sched-1", {
@@ -459,7 +327,6 @@ describe("updateScheduleAction validation", () => {
 
 describe("setScheduleEnabledAction", () => {
   test("syncs the pg-boss registration after flipping enabled", async () => {
-    adminOk = true;
     store = [makeSchedule({ enabled: true })];
 
     const result = await setScheduleEnabledAction("sched-1", false);
@@ -471,7 +338,6 @@ describe("setScheduleEnabledAction", () => {
 
 describe("deleteScheduleAction", () => {
   test("unregisters the pg-boss entry after deleting", async () => {
-    adminOk = true;
     store = [makeSchedule()];
 
     const result = await deleteScheduleAction("sched-1");
@@ -483,7 +349,6 @@ describe("deleteScheduleAction", () => {
 
 describe("runScheduleNowAction", () => {
   test("fires through the shared fire path and returns its result", async () => {
-    adminOk = true;
     store = [makeSchedule()];
     fireResult = { ok: true, taskId: "task-42" };
 
@@ -494,7 +359,6 @@ describe("runScheduleNowAction", () => {
   });
 
   test("surfaces a disabled-schedule skip as a non-throwing failure", async () => {
-    adminOk = true;
     store = [makeSchedule({ enabled: false })];
     fireResult = { ok: false, error: "disabled" };
 

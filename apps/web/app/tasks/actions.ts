@@ -1,9 +1,8 @@
 "use server";
 
-import { isAdmin } from "@/lib/admin/require-admin";
 import type { TaskOrigin, TaskStatus } from "@/lib/db/schema";
 import { getRoster } from "@/lib/db/roster";
-import { getSessionById, getSessionsByUserId } from "@/lib/db/sessions";
+import { getSessionById, getSessions } from "@/lib/db/sessions";
 import {
   createTask,
   getTask,
@@ -13,55 +12,10 @@ import {
   taskTree,
   transitionTaskStatus,
 } from "@/lib/db/tasks";
-import { NOT_YOURS, SIGNED_OUT } from "@/lib/error-copy";
-import { getMemberRole } from "@/lib/org/membership";
 import { getOrganization } from "@/lib/org/organization";
-import { getServerSession } from "@/lib/session/get-server-session";
 import { planGoal } from "@/lib/tasks/planner";
 import { kickExecutorFixTurn } from "@/lib/tasks/reviewer-gate";
 import { startTask } from "@/lib/tasks/start";
-
-/**
- * The gate on every task-board action.
- *
- * Unlike `requireAdmin` (`lib/admin/require-admin.ts`), any org member may
- * act — tasks are collaborative, not an admin-only surface — so the check
- * is "is this user in the organisation at all", by either an explicit
- * membership row (`getMemberRole`) or the `is_admin` flag (see
- * `promoteMemoryAction` in `lib/memory/promote.ts` for why the flag alone
- * still has to count: a flag-promoted account can legitimately have no
- * membership row). The app is single-org per instance, so "the caller's
- * org" is simply the one organisation this installation has.
- *
- * Throws rather than returning a flag, matching `requireAdmin`: a signed-out
- * or non-member caller is a security boundary, not a normal branch every
- * action would otherwise have to remember to check.
- */
-async function requireOrgMembership(): Promise<{
-  userId: string;
-  organizationId: string;
-}> {
-  const session = await getServerSession();
-  if (!session?.user?.id) {
-    throw new Error(SIGNED_OUT);
-  }
-  const userId = session.user.id;
-
-  const organization = await getOrganization();
-  if (!organization) {
-    throw new Error("There is no organisation yet.");
-  }
-
-  const [role, admin] = await Promise.all([
-    getMemberRole(userId),
-    isAdmin(userId),
-  ]);
-  if (!role && !admin) {
-    throw new Error(NOT_YOURS);
-  }
-
-  return { userId, organizationId: organization.id };
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -95,13 +49,11 @@ export type TaskBoardItem = {
  * Every task in the organisation, newest first, joined with each task's
  * session title for display.
  *
- * The board shows the whole organisation's tasks — not just the caller's
- * own — because tasks are collaborative; `listTasks` is already scoped to
- * `organizationId` from `requireOrgMembership`, so there is no cross-org
- * leakage to guard against here.
+ * The board shows the whole organisation's tasks: `listTasks` is scoped to
+ * `organizationId`, and the instance has exactly one organisation.
  */
 export async function listOrgTasksAction(): Promise<TaskBoardItem[]> {
-  const { organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
   const rows = await listTasks(organizationId);
 
   const parentIds = new Set<string>();
@@ -144,14 +96,13 @@ export async function listOrgTasksAction(): Promise<TaskBoardItem[]> {
   }));
 }
 
-/** One of the caller's own, non-archived sessions — the "new task" session picker. */
+/** Every non-archived session — the "new task" session picker. */
 export type MySessionOption = { id: string; title: string };
 
 export async function listMySessionsForTaskAction(): Promise<
   MySessionOption[]
 > {
-  const { userId } = await requireOrgMembership();
-  const sessions = await getSessionsByUserId(userId);
+  const sessions = await getSessions();
   return sessions
     .filter((session) => session.status !== "archived")
     .map((session) => ({ id: session.id, title: session.title }));
@@ -159,7 +110,7 @@ export async function listMySessionsForTaskAction(): Promise<
 
 /** Enabled roster agent names, for the "assigned agent" picker. */
 export async function listEnabledAgentNamesAction(): Promise<string[]> {
-  const { organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
   const roster = await getRoster(organizationId);
   return Object.keys(roster).sort();
 }
@@ -181,18 +132,16 @@ export type CreateTaskResult =
  * Creates one task directly, or — with `planThisGoal` — decomposes the goal
  * into a task tree via `planGoal` instead.
  *
- * The session must be one of the caller's own (mirrors the picker
- * `listMySessionsForTaskAction` offers): a session id from another user is
- * rejected here rather than trusted from the client. `assignedAgent`, when
- * given, must name a currently-enabled roster row — an unrecognised or
- * disabled name is a validation error, not silently dropped, since a
- * direct create (unlike the planner's own best-effort normalization) has a
- * human picking from a list that should already only offer valid names.
+ * `assignedAgent`, when given, must name a currently-enabled roster row —
+ * an unrecognised or disabled name is a validation error, not silently
+ * dropped, since a direct create (unlike the planner's own best-effort
+ * normalization) has a human picking from a list that should already only
+ * offer valid names.
  */
 export async function createTaskAction(
   input: CreateTaskInput,
 ): Promise<CreateTaskResult> {
-  const { userId, organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
 
   const title = input.title.trim();
   const goal = input.goal.trim();
@@ -207,7 +156,7 @@ export async function createTaskAction(
   }
 
   const session = await getSessionById(input.sessionId);
-  if (!session || session.userId !== userId) {
+  if (!session) {
     return { ok: false, error: "That session was not found." };
   }
 
@@ -216,7 +165,6 @@ export async function createTaskAction(
       organizationId,
       sessionId: input.sessionId,
       goal,
-      createdBy: userId,
     });
     if (!result.ok) {
       return { ok: false, error: result.error };
@@ -243,7 +191,6 @@ export async function createTaskAction(
     goal,
     assignedAgent,
     origin: "user",
-    createdBy: userId,
   });
 
   return { ok: true, taskId: task.id };
@@ -257,7 +204,7 @@ export type StartTaskResult =
 export async function startTaskAction(
   taskId: string,
 ): Promise<StartTaskResult> {
-  const { organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
   return await startTask(organizationId, taskId);
 }
 
@@ -303,7 +250,7 @@ function todoLeaves(nodes: TaskTreeNode[]): TaskTreeNode[] {
 export async function startSubtasksAction(
   taskId: string,
 ): Promise<StartSubtasksResult> {
-  const { organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
 
   const node = await taskTree(organizationId, taskId);
   if (!node) {
@@ -350,7 +297,7 @@ export type TaskActionResult = { ok: true } | { ok: false; error: string };
 export async function retryTaskAction(
   taskId: string,
 ): Promise<TaskActionResult> {
-  const { organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
   try {
     await transitionTaskStatus(organizationId, taskId, "todo");
     return { ok: true };
@@ -365,7 +312,7 @@ export async function retryTaskAction(
 export type UnblockTaskOptions = {
   /**
    * The session to attach to a task that has none — a proposal task
-   * (`lib/memory/reflect.ts`, `lib/memory/promote.ts`) is created `blocked`
+   * (`lib/memory/reflect.ts`) is created `blocked`
    * with `sessionId: null`, so the human unblocking it is the first person
    * to say which repository the work belongs in. Ignored for a task that
    * already has a session.
@@ -406,7 +353,7 @@ export async function unblockTaskAction(
   taskId: string,
   options?: UnblockTaskOptions,
 ): Promise<StartTaskResult> {
-  const { userId, organizationId } = await requireOrgMembership();
+  const { id: organizationId } = await getOrganization();
 
   const task = await getTask(organizationId, taskId);
   if (!task) {
@@ -431,20 +378,11 @@ export async function unblockTaskAction(
   if (!session) {
     return { ok: false, error: `Session "${sessionId}" not found` };
   }
-  // Only a session the caller is newly *attaching* is theirs to prove: a
-  // session the task already carries was vetted when the task was created,
-  // and the board is deliberately org-wide, so re-checking ownership there
-  // would stop a colleague unblocking a task they can plainly see. Mirrors
-  // `createTaskAction`'s check on the session picker it offers.
-  if (!task.sessionId && session.userId !== userId) {
-    return { ok: false, error: "That session was not found." };
-  }
 
   if (task.chatId) {
     return await resumeBlockedTask(organizationId, task.id, {
       chatId: task.chatId,
       sessionId,
-      userId: session.userId,
     });
   }
 
@@ -460,7 +398,7 @@ export async function unblockTaskAction(
 async function resumeBlockedTask(
   organizationId: string,
   taskId: string,
-  chat: { chatId: string; sessionId: string; userId: string },
+  chat: { chatId: string; sessionId: string },
 ): Promise<StartTaskResult> {
   try {
     await transitionTaskStatus(organizationId, taskId, "running", {
@@ -474,7 +412,6 @@ async function resumeBlockedTask(
     await kickExecutorFixTurn({
       sessionId: chat.sessionId,
       chatId: chat.chatId,
-      userId: chat.userId,
       problems: ["A human unblocked this task. Continue the work."],
     });
   } catch (error) {

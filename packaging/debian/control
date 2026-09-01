@@ -3,7 +3,7 @@ Version: __VERSION__
 Architecture: __ARCH__
 Maintainer: Paco Maintainers <noreply@localhost>
 Homepage: https://github.com/stack256org/paco
-Depends: postgresql, postgresql-client, nginx, git, ca-certificates, adduser, sudo
+Depends: postgresql, postgresql-client, nginx, git, ca-certificates, adduser, sudo, apache2-utils
 Recommends: docker.io, gh
 Suggests: certbot, python3-certbot-nginx
 Description: self-hosted AI coding agent

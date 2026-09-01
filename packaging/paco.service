@@ -52,6 +52,18 @@ Type=simple
 User=paco
 Group=paco
 WorkingDirectory=/usr/lib/paco
+# Next's standalone server defaults to binding 0.0.0.0 when HOSTNAME is
+# unset. The instance password lives entirely in nginx's auth_basic — the
+# app has no application-level authentication of its own (see
+# docs/agents' Authentication note) — so a process listening on every
+# interface lets anyone on the network reach it on :3000 directly, skipping
+# nginx and the password it holds. Binding loopback forces every request
+# through nginx. dpkg replaces this unit on every upgrade, so this line is
+# what repairs an already-installed instance; packaging/debian/postinst
+# sets the same thing for a fresh install. An operator who deliberately
+# wants the app reachable off-loopback (no nginx in front, for example)
+# must remove this line knowingly.
+Environment=HOSTNAME=127.0.0.1
 EnvironmentFile=/etc/paco/paco.env
 # The installed package's version, generated into the package by
 # packaging/build-deb.sh. Read second so an operator can still override

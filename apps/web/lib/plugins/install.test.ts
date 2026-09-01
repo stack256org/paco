@@ -156,10 +156,7 @@ describe("installPlugin", () => {
     await mkdir(path.join(source, "tools"), { recursive: true });
     await writeFile(path.join(source, "tools", "hello.ts"), "export {};");
 
-    const result = await installPlugin(
-      { kind: "local", path: source },
-      "admin-1",
-    );
+    const result = await installPlugin({ kind: "local", path: source });
 
     expect(result.ok).toBe(true);
     if (!result.ok) {
@@ -175,30 +172,10 @@ describe("installPlugin", () => {
     expect(row.grantedCapabilities).toEqual([]);
     expect(row.contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(row.source).toBe(`local:${source}`);
-    // The plugin's security principal: without it the installed row can do
-    // nothing (see `authorizeSessionForPlugin`).
-    expect(row.installedBy).toBe("admin-1");
 
     const installedDir = path.join(pluginsRoot, "sample-plugin");
     const entries = await readdir(installedDir);
     expect(entries.sort()).toEqual(["plugin.json", "tools"]);
-  });
-
-  test("re-installing re-attributes the plugin to the administrator who ran it", async () => {
-    const sourceV1 = await makeLocalSource();
-    await writeManifest(sourceV1, { version: "1.0.0" });
-
-    await installPlugin({ kind: "local", path: sourceV1 }, "admin-1");
-
-    const sourceV2 = await makeLocalSource();
-    await writeManifest(sourceV2, { version: "2.0.0" });
-
-    await installPlugin({ kind: "local", path: sourceV2 }, "admin-2");
-
-    // The principal follows the consent: whoever reviewed and installed
-    // THIS code is who the plugin now acts as.
-    expect(upsertPluginCalls[0].installedBy).toBe("admin-1");
-    expect(upsertPluginCalls[1].installedBy).toBe("admin-2");
   });
 
   test("an invalid manifest installs nothing on disk or in the db", async () => {
@@ -208,10 +185,7 @@ describe("installPlugin", () => {
       JSON.stringify({ nope: true }),
     );
 
-    const result = await installPlugin(
-      { kind: "local", path: source },
-      "admin-1",
-    );
+    const result = await installPlugin({ kind: "local", path: source });
 
     expect(result.ok).toBe(false);
     expect(upsertPluginCalls).toHaveLength(0);
@@ -225,25 +199,18 @@ describe("installPlugin", () => {
     await writeManifest(sourceV1, { version: "1.0.0" });
     await writeFile(path.join(sourceV1, "marker.txt"), "v1");
 
-    const first = await installPlugin(
-      { kind: "local", path: sourceV1 },
-      "admin-1",
-    );
+    const first = await installPlugin({ kind: "local", path: sourceV1 });
     expect(first.ok).toBe(true);
 
     const sourceV2 = await makeLocalSource();
     await writeManifest(sourceV2, { version: "2.0.0" });
     await writeFile(path.join(sourceV2, "marker.txt"), "v2");
 
-    const second = await installPlugin(
-      { kind: "local", path: sourceV2 },
-      "admin-1",
-    );
+    const second = await installPlugin({ kind: "local", path: sourceV2 });
     expect(second.ok).toBe(true);
 
     expect(upsertPluginCalls).toHaveLength(2);
     expect(upsertPluginCalls[1].version).toBe("2.0.0");
-    expect(upsertPluginCalls[1].installedBy).toBe("admin-1");
     expect(upsertPluginCalls[1].contentHash).not.toBe(
       upsertPluginCalls[0].contentHash,
     );
@@ -265,10 +232,7 @@ describe("installPlugin", () => {
     await writeManifest(sourceV1, { version: "1.0.0" });
     await writeFile(path.join(sourceV1, "marker.txt"), "v1");
 
-    const first = await installPlugin(
-      { kind: "local", path: sourceV1 },
-      "admin-1",
-    );
+    const first = await installPlugin({ kind: "local", path: sourceV1 });
     expect(first.ok).toBe(true);
 
     upsertPluginImpl = async () => {
@@ -279,10 +243,7 @@ describe("installPlugin", () => {
     await writeManifest(sourceV2, { version: "2.0.0" });
     await writeFile(path.join(sourceV2, "marker.txt"), "v2");
 
-    const second = await installPlugin(
-      { kind: "local", path: sourceV2 },
-      "admin-1",
-    );
+    const second = await installPlugin({ kind: "local", path: sourceV2 });
     expect(second.ok).toBe(false);
 
     const installedDir = path.join(pluginsRoot, "sample-plugin");
@@ -303,10 +264,11 @@ describe("installPlugin", () => {
   });
 
   test("github source clones via execFile with validated argv, never a shell", async () => {
-    const result = await installPlugin(
-      { kind: "github", repo: "acme/widgets", ref: "main" },
-      "admin-1",
-    );
+    const result = await installPlugin({
+      kind: "github",
+      repo: "acme/widgets",
+      ref: "main",
+    });
 
     // The mocked execFile does nothing, so there's no plugin.json for
     // discoverPlugin to find in the clone target — that's expected. This
@@ -330,10 +292,10 @@ describe("installPlugin", () => {
   });
 
   test("an invalid github repo never reaches execFile", async () => {
-    const result = await installPlugin(
-      { kind: "github", repo: "acme/widgets; rm -rf /" },
-      "admin-1",
-    );
+    const result = await installPlugin({
+      kind: "github",
+      repo: "acme/widgets; rm -rf /",
+    });
 
     expect(result.ok).toBe(false);
     expect(execFileCalls).toHaveLength(0);
@@ -348,10 +310,7 @@ describe("installPlugin", () => {
       path.join(source, "escape-hatch"),
     );
 
-    const result = await installPlugin(
-      { kind: "local", path: source },
-      "admin-1",
-    );
+    const result = await installPlugin({ kind: "local", path: source });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -374,10 +333,7 @@ describe("installPlugin", () => {
       const source = await makeLocalSource();
       await writeManifest(source);
 
-      const result = await installPlugin(
-        { kind: "local", path: source },
-        "admin-1",
-      );
+      const result = await installPlugin({ kind: "local", path: source });
 
       expect(result.ok).toBe(true);
       const installedDir = path.join(expectedAbsoluteRoot, "sample-plugin");

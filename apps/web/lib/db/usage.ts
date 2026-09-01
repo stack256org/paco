@@ -8,21 +8,18 @@ import { usageEvents } from "./schema";
 export type UsageSource = "web";
 export type UsageAgentType = "main" | "subagent";
 
-export async function recordUsage(
-  userId: string,
-  data: {
-    source: UsageSource;
-    agentType?: UsageAgentType;
-    model: LanguageModel | string;
-    messages: UIMessage[];
-    usage: {
-      inputTokens: number;
-      cachedInputTokens: number;
-      outputTokens: number;
-    };
-    toolCallCount?: number;
-  },
-) {
+export async function recordUsage(data: {
+  source: UsageSource;
+  agentType?: UsageAgentType;
+  model: LanguageModel | string;
+  messages: UIMessage[];
+  usage: {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+  };
+  toolCallCount?: number;
+}) {
   const inferredToolCallCount = data.messages
     .flatMap((m) => m.parts)
     .filter(isToolUIPart).length;
@@ -37,7 +34,6 @@ export async function recordUsage(
 
   await db.insert(usageEvents).values({
     id: nanoid(),
-    userId,
     source: data.source,
     agentType: data.agentType ?? "main",
     provider: provider ?? null,
@@ -68,27 +64,27 @@ export interface UsageHistoryOptions {
   allTime?: boolean;
 }
 
-function buildUsageHistoryWhereClause(
-  userId: string,
-  options?: UsageHistoryOptions,
-) {
+/**
+ * Unfiltered by `userId`: the instance has exactly one tenant, so its usage
+ * history is every `usageEvents` row in range, not a subset of them.
+ */
+function buildUsageHistoryWhereClause(options?: UsageHistoryOptions) {
   if (options?.range) {
-    return sql`${usageEvents.userId} = ${userId} and date(${usageEvents.createdAt}) >= ${options.range.from} and date(${usageEvents.createdAt}) <= ${options.range.to}`;
+    return sql`date(${usageEvents.createdAt}) >= ${options.range.from} and date(${usageEvents.createdAt}) <= ${options.range.to}`;
   }
 
   if (options?.allTime) {
-    return sql`${usageEvents.userId} = ${userId}`;
+    return sql`true`;
   }
 
   const days = options?.days ?? 280;
   const since = new Date();
   since.setDate(since.getDate() - days);
 
-  return sql`${usageEvents.userId} = ${userId} and ${usageEvents.createdAt} >= ${since.toISOString()}`;
+  return sql`${usageEvents.createdAt} >= ${since.toISOString()}`;
 }
 
 export async function getUsageHistory(
-  userId: string,
   options?: UsageHistoryOptions,
 ): Promise<DailyUsage[]> {
   const rows = await db
@@ -105,7 +101,7 @@ export async function getUsageHistory(
       toolCallCount: sql<number>`coalesce(sum(${usageEvents.toolCallCount}), 0)::double precision`,
     })
     .from(usageEvents)
-    .where(buildUsageHistoryWhereClause(userId, options))
+    .where(buildUsageHistoryWhereClause(options))
     .groupBy(
       sql`date(${usageEvents.createdAt})`,
       usageEvents.source,

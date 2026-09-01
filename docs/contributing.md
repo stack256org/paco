@@ -72,31 +72,25 @@ claude auth status          # should print a logged-in account
 
 # 5. Create the schema. This applies the migrations and the workflow tables.
 #    If it prints "POSTGRES_URL not set — skipping", your .env is not being
-#    read: fix that before continuing, or sign-in will fail later.
+#    read: fix that before continuing.
 pnpm --dir apps/web db:migrate:apply
 
 # 6. Run it.
 pnpm web
 ```
 
+> **A development checkout has no password.** The instance password is
+> enforced by nginx, which only the `.deb` install sets up — so `pnpm web`
+> serves an unprotected Paco. That is fine on localhost and is the only
+> supported unprotected configuration; do not expose it to a network.
+
 Open <http://localhost:3066> (or <http://localhost:3000> if you left `APP_URL`
-commented out) and sign in with an email address. With `SMTP_HOST` unset the
-link is printed to the terminal running `pnpm web` instead of emailed — copy
-it from there. The first account to sign in becomes the administrator. For a
-realistic sign-in loop, point Paco at [Mailpit](https://mailpit.axllent.org)
-instead:
+commented out). There is no account to create and nothing to sign in to —
+Paco has no application-level authentication, so the page you land on is the
+app itself.
 
-```bash
-mailpit          # SMTP on :1025, web UI on http://localhost:8025
-```
-
-```env
-SMTP_HOST=127.0.0.1
-SMTP_PORT=1025
-```
-
-GitHub is connected separately and per-user, from **Settings → Connections** —
-see the README for how that works. It needs `gh` on `PATH`; nothing else to
+GitHub is connected instance-wide, from **Settings → Connections** — see the
+README for how that works. It needs `gh` on `PATH`; nothing else to
 configure.
 
 ## Repository layout

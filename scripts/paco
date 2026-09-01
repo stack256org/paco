@@ -15,6 +15,17 @@ PACO_USER=paco
 UNIT=paco.service
 NGINX_SITE=/etc/nginx/sites-available/paco
 
+# The instance password, as an nginx htpasswd file.
+#
+# Under /etc/nginx rather than /etc/paco because $PACO_ETC is 0750 root:paco
+# and nginx's workers run as www-data — not in that group, and so unable even
+# to traverse into it. /etc/nginx is 0755 root:root, so www-data gets there,
+# and the file's group-read bit is what lets it read this.
+#
+# Overridable so the test suite can point it at a temporary path; see the
+# /etc/* guard in cmd_password for why that does not weaken the root check.
+NGINX_HTPASSWD="${PACO_HTPASSWD:-/etc/nginx/paco.htpasswd}"
+
 fail() {
   echo "paco: $1" >&2
   exit 1
@@ -59,6 +70,17 @@ Usage: paco <command>
 
              Neither needs a restart afterwards. Each turn spawns a fresh CLI
              process that reads the credential off disk as it starts.
+  password   Set the password protecting this instance, asked for by the
+             browser as user `paco`. Requires root.
+
+             paco password           Prompts twice, with echo off.
+             paco password --stdin   Reads the password from stdin, for
+                                     scripts and for install.sh.
+
+             Takes effect immediately — nginx re-reads the password file on
+             every request, so there is nothing to restart. Browsers holding
+             the old password are asked again on their next request; that is
+             what replaces signing out.
   tls DOMAIN Obtain and install a certificate for DOMAIN with certbot's
              nginx plugin (the HTTP-01 challenge, served on port 80), then
              reload nginx. Requires root.
@@ -554,13 +576,134 @@ poolside_state() {
   echo "no (run 'sudo paco auth poolside', or set an API key in Settings)"
 }
 
+# Whether this instance is still using the password postinst generated.
+#
+# The marker file is what distinguishes the two, not the hash: a bcrypt hash
+# cannot be compared against anything without the original. `paco password`
+# deletes the marker, so its presence means "generated, never changed".
+password_state() {
+  # /etc/paco is 0750 root:paco (see packaging/debian/postinst), so a
+  # non-root, non-paco-group caller gets EACCES on the marker file below;
+  # [ -f ... ] cannot tell "not there" from "cannot look" and would silently
+  # report "not there". That reads as false assurance about a security
+  # control, so this must degrade like every other *_state() helper here.
+  if [ "$(id -u)" != "0" ]; then
+    echo "unknown (run as root to check)"
+    return 0
+  fi
+
+  if [ ! -s "$NGINX_HTPASSWD" ]; then
+    echo "NOT SET - the password file is missing, so nginx will deny every request until 'sudo paco password' is run."
+    return 0
+  fi
+
+  if [ -f "$PACO_ETC/initial-password" ]; then
+    echo "set (still the one generated at install; change with 'sudo paco password')"
+    return 0
+  fi
+
+  echo "set"
+}
+
 cmd_status() {
   echo "Unit:      $(unit_state)"
   echo "Version:   $(installed_version)"
   echo "Domain:    $(configured_domain)"
+  echo "Password:  $(password_state)"
   echo "CLI:       $(claude_cli_present)"
   echo "Claude:    $(claude_auth_state)"
   echo "Poolside:  $(poolside_state)"
+}
+
+# --- password ----------------------------------------------------------------
+
+read_password_twice() {
+  [ -t 0 ] || fail "password: no terminal to prompt on. Use 'paco password --stdin'."
+
+  # Ctrl-C while echo is off must not leave the operator's terminal silently
+  # not echoing keystrokes typed afterward. Save the terminal state once and
+  # restore it from a trap on INT, in addition to the normal restore below.
+  saved_stty="$(stty -g 2>/dev/null || true)"
+  trap '[ -n "$saved_stty" ] && stty "$saved_stty" 2>/dev/null; exit 130' INT
+
+  printf 'New password for this Paco instance: '
+  stty -echo 2>/dev/null || true
+  IFS= read -r new_password || true
+  stty echo 2>/dev/null || true
+  printf '\n'
+
+  printf 'Confirm: '
+  stty -echo 2>/dev/null || true
+  IFS= read -r confirm_password || true
+  stty echo 2>/dev/null || true
+  printf '\n'
+
+  trap - INT
+
+  [ "$new_password" = "$confirm_password" ] \
+    || fail "password: the two entries did not match. Nothing was changed."
+}
+
+cmd_password() {
+  use_stdin=0
+  case "${1:-}" in
+    --stdin) use_stdin=1 ;;
+    "") ;;
+    *) fail "password: unknown argument: $1" ;;
+  esac
+  [ $# -le 1 ] || fail "password: unexpected extra argument: $2"
+
+  # Root is required to write the real file under /etc, and only for that.
+  # A run pointed somewhere writable by $PACO_HTPASSWD needs no privilege,
+  # which is what makes this command testable without weakening the check:
+  # the guard is on the path actually being written, not on an opt-out flag.
+  case "$NGINX_HTPASSWD" in
+    /etc/*) require_root password ;;
+  esac
+
+  command -v htpasswd >/dev/null 2>&1 \
+    || fail "password: htpasswd not found. Install apache2-utils."
+
+  new_password=""
+  confirm_password=""
+
+  if [ "$use_stdin" -eq 1 ]; then
+    IFS= read -r new_password || true
+  else
+    read_password_twice
+  fi
+
+  [ -n "$new_password" ] || fail "password: an empty password is not allowed."
+
+  # This is the only gate on this instance: once a later phase removes the
+  # app's own login, this password is the sole thing between the public
+  # internet and a machine that runs arbitrary code in containers. The
+  # generated password is 24 characters; a 1-character operator-chosen one
+  # would otherwise pass right through the check above.
+  password_len=${#new_password}
+  [ "$password_len" -ge 10 ] \
+    || fail "password: too short - use at least 10 characters."
+
+  # -i reads the password from stdin. `htpasswd -b` would put it in argv,
+  # where `ps` shows it to every user on this machine. -B is bcrypt, which
+  # nginx reads and `openssl passwd` cannot produce. -c truncates, which is
+  # what we want: this file holds exactly one entry and rotating replaces it.
+  umask 027
+  printf '%s' "$new_password" \
+    | htpasswd -i -B -c "$NGINX_HTPASSWD" paco >/dev/null 2>&1 \
+    || fail "password: htpasswd failed to write $NGINX_HTPASSWD."
+
+  # Best-effort: fails harmlessly when this is a test run as a normal user.
+  chown root:www-data "$NGINX_HTPASSWD" 2>/dev/null || true
+  chmod 640 "$NGINX_HTPASSWD"
+
+  # The generated password is no longer a fact about this system.
+  rm -f "$PACO_ETC/initial-password"
+
+  # No `systemctl reload`: nginx reads auth_basic_user_file per request, so
+  # this is already in effect. Browsers holding the old password start
+  # getting 401s and re-prompt on their own — that is the re-authentication.
+  echo "paco: password updated. Browsers will ask for it again on their next request."
 }
 
 # --- dispatch ----------------------------------------------------------------
@@ -576,6 +719,7 @@ case "$command" in
   restart) cmd_restart ;;
   status) cmd_status ;;
   auth) cmd_auth "$@" ;;
+  password) cmd_password "$@" ;;
   tls) cmd_tls "$@" ;;
   uninstall)
     echo "paco: there is no uninstall." >&2

@@ -1,15 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type OwnedSessionChatResult =
   | {
       ok: true;
@@ -33,13 +23,6 @@ type DeleteMessageResult =
       deletedMessageIds: string[];
     };
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
-let currentAuthSession: {
-  user: {
-    id: string;
-    email?: string;
-  };
-} | null = null;
 let ownedSessionChatResult: OwnedSessionChatResult = {
   ok: true,
   sessionRecord: { id: "session-1" },
@@ -57,7 +40,6 @@ let deleteResult: DeleteMessageResult = {
 const deleteCalls: Array<{ chatId: string; messageId: string }> = [];
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSessionChat: async () => ownedSessionChatResult,
 }));
 
@@ -79,10 +61,6 @@ mock.module("workflow/api", () => ({
   }),
 }));
 
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: async () => currentAuthSession,
-}));
-
 const routeModulePromise = import("./route");
 
 function createContext(
@@ -97,8 +75,6 @@ function createContext(
 
 describe("/api/sessions/[sessionId]/chats/[chatId]/messages/[messageId]", () => {
   beforeEach(() => {
-    authResult = { ok: true, userId: "user-1" };
-    currentAuthSession = null;
     ownedSessionChatResult = {
       ok: true,
       sessionRecord: { id: "session-1" },
@@ -116,31 +92,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/messages/[messageId]", () => 
     mockWorkflowStatus = "running";
   });
 
-  test("returns auth error from guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { DELETE } = await routeModulePromise;
-
-    const response = await DELETE(
-      new Request(
-        "http://localhost/api/sessions/session-1/chats/chat-1/messages/message-2",
-        {
-          method: "DELETE",
-        },
-      ),
-      createContext(),
-    );
-
-    expect(response.status).toBe(401);
-    expect(deleteCalls).toHaveLength(0);
-  });
-
-  test("returns ownership error from guard", async () => {
+  test("returns not-found error from guard", async () => {
     ownedSessionChatResult = {
       ok: false,
       response: Response.json(

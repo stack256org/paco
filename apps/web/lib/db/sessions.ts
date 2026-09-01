@@ -17,7 +17,6 @@ import {
   chats,
   type NewChat,
   type NewChatMessage,
-  type NewChatRead,
   type NewSession,
   sessions,
 } from "./schema";
@@ -90,9 +89,8 @@ export type SessionRecord = NonNullable<
   Awaited<ReturnType<typeof getSessionById>>
 >;
 
-export async function getSessionsByUserId(userId: string) {
+export async function getSessions() {
   const records = await db.query.sessions.findMany({
-    where: eq(sessions.userId, userId),
     orderBy: [desc(sessions.createdAt)],
   });
 
@@ -119,28 +117,6 @@ export async function getSessionsWithActiveSandbox() {
   });
 
   return records;
-}
-
-export async function countSessionsByUserId(userId: string): Promise<number> {
-  const [result] = await db
-    .select({ count: sql<number>`COUNT(*)::int` })
-    .from(sessions)
-    .where(eq(sessions.userId, userId));
-
-  return result?.count ?? 0;
-}
-
-export async function countUserMessagesByUserId(
-  userId: string,
-): Promise<number> {
-  const [result] = await db
-    .select({ count: sql<number>`COUNT(*)::int` })
-    .from(chatMessages)
-    .innerJoin(chats, eq(chats.id, chatMessages.chatId))
-    .innerJoin(sessions, eq(sessions.id, chats.sessionId))
-    .where(and(eq(sessions.userId, userId), eq(chatMessages.role, "user")));
-
-  return result?.count ?? 0;
 }
 
 type SessionSidebarFields = Pick<
@@ -174,7 +150,7 @@ export type SessionWithUnread = SessionSidebarFields & {
  * only for the handful of sessions with an *open* pull request, since a merged
  * or closed one is final and never has to be checked again.
  */
-export async function getSessionsWithOpenPullRequests(userId: string): Promise<
+export async function getSessionsWithOpenPullRequests(): Promise<
   Array<{
     id: string;
     prNumber: number | null;
@@ -198,13 +174,7 @@ export async function getSessionsWithOpenPullRequests(userId: string): Promise<
     })
     .from(sessions)
     .leftJoin(chats, eq(chats.sessionId, sessions.id))
-    .where(
-      and(
-        eq(sessions.userId, userId),
-        eq(sessions.prStatus, "open"),
-        ne(sessions.status, "archived"),
-      ),
-    )
+    .where(and(eq(sessions.prStatus, "open"), ne(sessions.status, "archived")))
     .groupBy(sessions.id);
 }
 
@@ -244,22 +214,21 @@ export async function updatePullRequestState(params: {
     .where(eq(sessions.id, params.sessionId));
 }
 
-type GetSessionsWithUnreadByUserIdOptions = {
+type GetSessionsWithUnreadOptions = {
   status?: "all" | "active" | "archived";
   limit?: number;
   offset?: number;
 };
 
 /**
- * Returns sessions for a user, each annotated with a `hasUnread` flag
- * that is true when any chat in the session has unread assistant messages.
+ * Returns every session, each annotated with a `hasUnread` flag that is true
+ * when any chat in the session has unread assistant messages.
  *
  * The sidebar only needs lightweight fields, so we intentionally avoid
  * selecting heavyweight JSON columns like `sandboxState` and `cachedDiff`.
  */
-export async function getSessionsWithUnreadByUserId(
-  userId: string,
-  options?: GetSessionsWithUnreadByUserIdOptions,
+export async function getSessionsWithUnread(
+  options?: GetSessionsWithUnreadOptions,
 ): Promise<SessionWithUnread[]> {
   const status = options?.status ?? "all";
   const statusFilter =
@@ -300,15 +269,8 @@ export async function getSessionsWithUnreadByUserId(
     })
     .from(sessions)
     .leftJoin(chats, eq(chats.sessionId, sessions.id))
-    .leftJoin(
-      chatReads,
-      and(eq(chatReads.chatId, chats.id), eq(chatReads.userId, userId)),
-    )
-    .where(
-      statusFilter
-        ? and(eq(sessions.userId, userId), statusFilter)
-        : eq(sessions.userId, userId),
-    )
+    .leftJoin(chatReads, eq(chatReads.chatId, chats.id))
+    .where(statusFilter)
     .groupBy(sessions.id)
     .orderBy(desc(sessions.createdAt));
 
@@ -325,42 +287,34 @@ export async function getSessionsWithUnreadByUserId(
   return rows;
 }
 
-export async function getArchivedSessionCountByUserId(
-  userId: string,
-): Promise<number> {
+export async function getArchivedSessionCount(): Promise<number> {
   const [result] = await db
     .select({ count: sql<number>`COUNT(*)::int` })
     .from(sessions)
-    .where(and(eq(sessions.userId, userId), eq(sessions.status, "archived")));
+    .where(eq(sessions.status, "archived"));
 
   return result?.count ?? 0;
 }
 
 /**
- * Returns a Set of all session titles for a given user.
+ * Returns a Set of every session title.
  * Used to avoid duplicate random city names when creating new sessions.
  */
-export async function getUsedSessionTitles(
-  userId: string,
-): Promise<Set<string>> {
-  const rows = await db
-    .select({ title: sessions.title })
-    .from(sessions)
-    .where(eq(sessions.userId, userId));
+export async function getUsedSessionTitles(): Promise<Set<string>> {
+  const rows = await db.select({ title: sessions.title }).from(sessions);
   return new Set(rows.map((r) => r.title));
 }
 
 /**
- * Columns that say whose session this is, and when it began.
+ * Columns that say which session this is, and when it began.
  *
  * The type signatures below already exclude them, but a type is not a guard: a
  * `PATCH /api/sessions/:id` body reached `updateSession` through a cast, was
- * spread into `.set()`, and drizzle wrote every key that named a real column —
- * so `{"userId": "<someone else>"}` handed the session to another account. The
- * route now validates its input, and this makes the guarantee hold for any
- * caller, including one written later that forgets to.
+ * spread into `.set()`, and drizzle wrote every key that named a real column.
+ * The route now validates its input, and this makes the guarantee hold for
+ * any caller, including one written later that forgets to.
  */
-const IMMUTABLE_SESSION_COLUMNS = ["id", "userId", "createdAt"];
+const IMMUTABLE_SESSION_COLUMNS = ["id", "createdAt"];
 
 function withoutImmutableColumns<T extends object>(data: T): T {
   const sanitized = { ...data } as Record<string, unknown>;
@@ -372,7 +326,7 @@ function withoutImmutableColumns<T extends object>(data: T): T {
 
 export async function updateSession(
   sessionId: string,
-  data: Partial<Omit<NewSession, "id" | "userId" | "createdAt">>,
+  data: Partial<Omit<NewSession, "id" | "createdAt">>,
 ) {
   const [session] = await db
     .update(sessions)
@@ -385,7 +339,7 @@ export async function updateSession(
 
 export async function updateSessionIfNotArchived(
   sessionId: string,
-  data: Partial<Omit<NewSession, "id" | "userId" | "createdAt">>,
+  data: Partial<Omit<NewSession, "id" | "createdAt">>,
 ) {
   const [session] = await db
     .update(sessions)
@@ -523,11 +477,10 @@ export type ChatSummary = typeof chats.$inferSelect & {
 };
 
 /**
- * Returns chats with per-user unread flags for sidebar rendering.
+ * Returns chats with unread flags for sidebar rendering.
  */
 export async function getChatSummariesBySessionId(
   sessionId: string,
-  userId: string,
 ): Promise<ChatSummary[]> {
   const rows = await db
     .select({
@@ -542,7 +495,6 @@ export async function getChatSummariesBySessionId(
       claudeSessionId: chats.claudeSessionId,
       resumeTokens: chats.resumeTokens,
       lastAssistantMessageAt: chats.lastAssistantMessageAt,
-      previewVisibility: chats.previewVisibility,
       previewSlug: chats.previewSlug,
       createdAt: chats.createdAt,
       updatedAt: chats.updatedAt,
@@ -557,10 +509,7 @@ export async function getChatSummariesBySessionId(
       isStreaming: sql<boolean>`${chats.activeStreamId} IS NOT NULL`,
     })
     .from(chats)
-    .leftJoin(
-      chatReads,
-      and(eq(chatReads.chatId, chats.id), eq(chatReads.userId, userId)),
-    )
+    .leftJoin(chatReads, eq(chatReads.chatId, chats.id))
     .where(eq(chats.sessionId, sessionId))
     .orderBy(chats.createdAt);
 
@@ -759,7 +708,6 @@ function cloneChatMessagePartsWithId(parts: unknown, id: string): unknown {
 }
 
 type ForkChatThroughMessageInput = {
-  userId: string;
   sourceChatId: string;
   throughMessageId: string;
   forkedChat: Pick<NewChat, "id" | "sessionId" | "title" | "modelId">;
@@ -832,14 +780,13 @@ export async function forkChatThroughMessage(
     await tx
       .insert(chatReads)
       .values({
-        userId: input.userId,
         chatId: forkedChat.id,
         lastReadAt: now,
         createdAt: now,
         updatedAt: now,
       })
       .onConflictDoUpdate({
-        target: [chatReads.userId, chatReads.chatId],
+        target: chatReads.chatId,
         set: {
           lastReadAt: now,
           updatedAt: now,
@@ -1038,20 +985,17 @@ export async function isFirstChatMessage(chatId: string, messageId: string) {
   return rows.length === 1 && rows[0]?.id === messageId;
 }
 
-export async function markChatRead(
-  data: Pick<NewChatRead, "userId" | "chatId">,
-) {
+export async function markChatRead(chatId: string) {
   const now = new Date();
   const [chatRead] = await db
     .insert(chatReads)
     .values({
-      userId: data.userId,
-      chatId: data.chatId,
+      chatId,
       lastReadAt: now,
       updatedAt: now,
     })
     .onConflictDoUpdate({
-      target: [chatReads.userId, chatReads.chatId],
+      target: chatReads.chatId,
       set: {
         lastReadAt: now,
         updatedAt: now,

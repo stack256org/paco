@@ -1,7 +1,4 @@
-import {
-  requireAuthenticatedUser,
-  requireOwnedSessionChat,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSessionChat } from "@/app/api/sessions/_lib/session-context";
 import {
   CHAT_DELETE_BLOCKED,
   CHAT_DELETE_NEEDS_WORKSPACE,
@@ -51,14 +48,9 @@ export interface ChatRefreshResponse {
 }
 
 export async function GET(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: authResult.userId,
     sessionId,
     chatId,
   });
@@ -82,14 +74,9 @@ export async function GET(req: Request, context: RouteContext) {
 }
 
 export async function PATCH(req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: authResult.userId,
     sessionId,
     chatId,
   });
@@ -201,15 +188,9 @@ export async function PATCH(req: Request, context: RouteContext) {
 }
 
 export async function DELETE(_req: Request, context: RouteContext) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   const { sessionId, chatId } = await context.params;
 
   const chatContext = await requireOwnedSessionChat({
-    userId: authResult.userId,
     sessionId,
     chatId,
   });

@@ -148,7 +148,7 @@ export async function startTask(
     ? ((await getTask(organizationId, node.parentTaskId)) ?? null)
     : null;
 
-  const preferences = await getUserPreferences(session.userId);
+  const preferences = await getUserPreferences();
   /*
    * The roster as it stands NOW, not as it stood when the task was saved.
    * `assignedAgent` is validated on save, but disabling or renaming a roster
@@ -183,7 +183,6 @@ export async function startTask(
     const outcome = await submitChatMessage({
       chatId: chat.id,
       sessionId: node.sessionId,
-      userId: session.userId,
       messages: [
         {
           id: generateId(),
@@ -197,7 +196,6 @@ export async function startTask(
         },
       ],
       requestUrl: "internal://tasks/start",
-      authSession: null,
       sessionStatus: session.status,
       activeStreamId: chat.activeStreamId ?? null,
       maxSteps: opts?.maxTurns ?? TASK_DEFAULT_MAX_TURNS,

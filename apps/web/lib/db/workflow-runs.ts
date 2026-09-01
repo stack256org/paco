@@ -17,7 +17,6 @@ export async function recordWorkflowRun(data: {
   id: string;
   chatId: string;
   sessionId: string;
-  userId: string;
   modelId?: string;
   status: WorkflowRunStatus;
   startedAt: string;
@@ -32,7 +31,6 @@ export async function recordWorkflowRun(data: {
         id: data.id,
         chatId: data.chatId,
         sessionId: data.sessionId,
-        userId: data.userId,
         modelId: data.modelId ?? null,
         status: data.status,
         startedAt: new Date(data.startedAt),

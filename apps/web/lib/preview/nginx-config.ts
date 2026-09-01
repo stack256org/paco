@@ -7,36 +7,20 @@
  * combination of hostname and TLS exhaustively, and the injection guard
  * below only has to be written once.
  *
- * Four properties matter, each a lesson the Traefik version paid for:
+ * Two properties matter, both lessons the Traefik version paid for:
  *
- * 1. `auth_request` is emitted unconditionally, never conditioned on
- *    `tlsEnabled` or any stored visibility. `decidePreviewAccess`
- *    (`lib/preview/decide-access.ts`) reads the chat's row fresh on every
- *    request; a config that only ever describes the visibility it was
- *    generated with cannot react when a preview is made private again
- *    without being regenerated — and nothing regenerates it on that event.
- * 2. The auth subrequest targets `127.0.0.1:<appPort>` — the loopback, not
- *    the public origin. A request that left this host and re-entered
- *    through the public entrypoint would have `X-Forwarded-Host`
- *    recomputed from the new request, not the one the browser actually
- *    sent, and `/api/preview-auth` would deny every private preview.
- * 3. `X-Forwarded-Host $host` is passed on the auth subrequest so
- *    `/api/preview-auth` can resolve the *preview's* hostname back to a
- *    chat, not nginx's own.
- * 4. The hostname is validated before it is ever interpolated into
- *    generated config text. It comes from `previewSlug(chatId)` plus a
- *    configured base domain, so it should always be safe — but nginx
- *    config is executed as configuration, and "should" is not a guarantee.
- *
- * One known gap, worth stating rather than hiding: nginx's `auth_request`
- * module only understands three outcomes from the subrequest — 2xx (allow),
- * 401, and 403 (deny) — anything else becomes an internal 500. Traefik's
- * forwardAuth, by contrast, relayed *any* non-2xx response — including the
- * 302 `redirectToGrant`/`consumeGrant` responses in
- * `app/api/preview-auth/route.ts` use to hand a private preview's owner a
- * grant cookie. Because that route must not be rewritten as part of this
- * change, the redirect-to-grant flow does not survive the move to nginx as
- * literally as the allow/deny paths do — see the task-345 report's concerns.
+ * 1. Access is decided by nginx, from the instance password, and nothing
+ *    else. Previews used to be individually public or private, authorized
+ *    per request by `/api/preview-auth`; that apparatus is gone along with
+ *    public sharing, and a preview is now exactly as reachable as the rest
+ *    of the instance. The `auth_basic` pair below must stay byte-identical
+ *    to the one the package writes for the main site — two files disagreeing
+ *    about which password guards this host is the failure to avoid.
+ * 2. The hostname is validated before it is ever interpolated into generated
+ *    config text. It comes from `previewSlug(chatId)` plus a configured base
+ *    domain, so it should always be safe — but nginx config is executed as
+ *    configuration, and "should" is not a guarantee. This guard is unrelated
+ *    to authentication and must outlive every change to it.
  */
 
 export const CERT_ROOT = "/etc/paco/preview-certs";
@@ -117,6 +101,11 @@ export function previewServerBlock(input: PreviewServerBlockInput): string {
 
   assertSafeHostname(hostname);
   assertValidPort(upstreamPort, "upstreamPort");
+  // appPort is unused below now that the auth subrequest to
+  // /api/preview-auth is gone — previews are gated by auth_basic instead.
+  // Kept as a parameter (and still validated) so this function's signature
+  // and its callers don't have to change as part of this task; Phase C may
+  // remove it.
   assertValidPort(appPort, "appPort");
 
   // A certificate directory is interpolated into generated nginx config, so
@@ -148,25 +137,14 @@ export function previewServerBlock(input: PreviewServerBlockInput): string {
 server {
 ${listenLines}    server_name ${hostname};
 
-${httpsRedirect}    # Every preview is authorized by Paco on every request, public or
-    # private alike. decidePreviewAccess reads the chat's live visibility,
-    # so this subrequest is never conditioned on it here — see this file's
-    # header comment for why a config that decided for itself broke the
-    # moment a public preview was made private again.
-    location = /_paco_auth {
-        internal;
-        # The loopback, not the public origin: see this file's header
-        # comment, point 2.
-        proxy_pass http://127.0.0.1:${appPort}/api/preview-auth;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Uri $request_uri;
-    }
+    # See this file's header comment, point 1: the instance password is the
+    # only thing deciding preview access, and this pair must stay
+    # byte-identical to the one packaging/debian/postinst writes for the
+    # main site.
+    auth_basic "Paco";
+    auth_basic_user_file /etc/nginx/paco.htpasswd;
 
-    location / {
-        auth_request /_paco_auth;
-
+${httpsRedirect}    location / {
         proxy_pass http://127.0.0.1:${upstreamPort};
         proxy_http_version 1.1;
         proxy_set_header Host $host;

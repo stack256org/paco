@@ -37,7 +37,6 @@ export type CreateScheduleInput = {
   cron: string;
   goal: string;
   assignedAgent?: string | null;
-  createdBy?: string | null;
 };
 
 export type ScheduleWriteResult =
@@ -63,7 +62,6 @@ export async function createSchedule(
       cron: input.cron,
       goal: input.goal,
       assignedAgent: input.assignedAgent ?? null,
-      createdBy: input.createdBy ?? null,
     })
     .returning();
   if (!row) {

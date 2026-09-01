@@ -10,7 +10,6 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { useGithubConnection } from "@/hooks/use-github-connection";
-import { useSession } from "@/hooks/use-session";
 import { useUserPreferences } from "@/hooks/use-user-preferences";
 import { cn } from "@/lib/utils";
 import { BranchSelectorCompact } from "./branch-selector-compact";
@@ -48,18 +47,14 @@ export function SessionStarter({
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
   const [isNewBranch, setIsNewBranch] = useState(!!lastRepo);
 
-  const { loading: sessionLoading, hasGitHub } = useSession();
   const { connected: githubConnected, loading: githubConnectionLoading } =
-    useGithubConnection({
-      enabled: hasGitHub,
-    });
+    useGithubConnection();
   const { preferences, loading: preferencesLoading } = useUserPreferences();
   const defaultAutoCommitPush = preferences?.autoCommitPush ?? false;
   const defaultAutoCreatePr = preferences?.autoCreatePr ?? false;
   const [autoCommitPush, setAutoCommitPush] = useState<boolean | null>(null);
   const [autoCreatePr, setAutoCreatePr] = useState<boolean | null>(null);
   const [gitSettingsExpanded, setGitSettingsExpanded] = useState(false);
-  const isRepoModeDisabled = sessionLoading;
 
   const handleRepoSelect = (owner: string, repo: string) => {
     setSelectedOwner(owner);
@@ -81,8 +76,6 @@ export function SessionStarter({
   };
 
   const handleModeChange = (newMode: SessionMode) => {
-    if (isRepoModeDisabled && newMode === "repo") return;
-
     setMode(newMode);
     if (newMode === "empty") handleRepoClear();
   };
@@ -92,7 +85,6 @@ export function SessionStarter({
   const controlsDisabled = isLoading || preferencesLoading;
   const isSubmitDisabled =
     controlsDisabled ||
-    (isRepoModeDisabled && mode === "repo") ||
     (mode === "repo" && (githubConnectionLoading || !githubConnected)) ||
     !isRepoSelectionComplete;
   const effectiveAutoCommitPush = autoCommitPush ?? defaultAutoCommitPush;
@@ -145,14 +137,11 @@ export function SessionStarter({
           <button
             type="button"
             onClick={() => handleModeChange("repo")}
-            disabled={isRepoModeDisabled}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-all",
-              isRepoModeDisabled
-                ? "cursor-not-allowed text-base-content/50"
-                : mode === "repo"
-                  ? "border border-base-300/70 bg-base-100 text-base-content"
-                  : "text-base-content/60 hover:text-base-content",
+              mode === "repo"
+                ? "border border-base-300/70 bg-base-100 text-base-content"
+                : "text-base-content/60 hover:text-base-content",
             )}
           >
             <GitBranch className="h-3.5 w-3.5" />

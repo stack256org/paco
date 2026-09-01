@@ -39,8 +39,10 @@ const VERSION = "v1";
 /**
  * Domain separator for the derived key.
  *
- * `APP_SECRET` also signs sessions. Deriving a distinct key per purpose means
- * a flaw that exposes one use does not hand over the other.
+ * There is only one purpose left to derive a key for — sealing the stored
+ * GitHub token — but the separator stays so a future second purpose gets its
+ * own key rather than reusing this one: a flaw that exposes one use should
+ * not hand over the other.
  */
 const KEY_INFO = "paco:secret-box:v1";
 
@@ -64,8 +66,7 @@ const globalForKey = globalThis as typeof globalThis & {
  * Derive a purpose-specific key from `APP_SECRET`.
  *
  * Exported so other modules that need a key derived from the same root
- * secret — `lib/preview/preview-grant.ts` signs a preview-scoped cookie with
- * one — go through the same guard and the same cache as `seal`/`open`,
+ * secret go through the same guard and the same cache as `seal`/`open`,
  * rather than re-deriving their own from the raw secret. `info` is the
  * domain separator (see `KEY_INFO` below): different callers must use
  * different values, or a flaw in one use's key exposes the other's.

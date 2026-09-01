@@ -77,10 +77,10 @@ export const PREVIEW_PORT = DEFAULT_SANDBOX_PORTS[0];
  * Port Paco's own service listens on, on the native install as much as the
  * Docker one.
  *
- * `packaging/debian/postinst` writes this same literal into `paco.env`
- * (`PORT=3000`) and into the default nginx site's `proxy_pass`. It is also
- * where every generated preview's `auth_request` subrequest is aimed
- * (`lib/preview/nginx-config.ts`) — see that file for why it has to be
- * `127.0.0.1:<this port>` and never the public origin.
+ * `packaging/debian/postinst` writes this same literal twice: into
+ * `paco.env` (`PORT=3000`, what the app itself binds to) and into the
+ * default nginx site's `proxy_pass` (`http://127.0.0.1:3000`, how nginx
+ * reaches it). This constant has to keep agreeing with both, or the
+ * packaged install stops routing to a live app.
  */
 export const PACO_APP_PORT = 3000;

@@ -1,7 +1,4 @@
-import {
-  requireAuthenticatedUser,
-  requireOwnedSession,
-} from "@/app/api/sessions/_lib/session-context";
+import { requireOwnedSession } from "@/app/api/sessions/_lib/session-context";
 import { updateSession } from "@/lib/db/sessions";
 import { buildLifecycleActivityUpdate } from "@/lib/sandbox/lifecycle";
 import { BAD_REQUEST } from "@/lib/error-copy";
@@ -17,11 +14,6 @@ interface ActivityRequest {
  * premature hibernation.
  */
 export async function POST(req: Request) {
-  const authResult = await requireAuthenticatedUser();
-  if (!authResult.ok) {
-    return authResult.response;
-  }
-
   let body: ActivityRequest;
   try {
     body = (await req.json()) as ActivityRequest;
@@ -36,7 +28,6 @@ export async function POST(req: Request) {
   }
 
   const sessionContext = await requireOwnedSession({
-    userId: authResult.userId,
     sessionId,
   });
   if (!sessionContext.ok) {

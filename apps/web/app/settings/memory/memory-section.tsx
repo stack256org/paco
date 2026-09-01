@@ -14,17 +14,15 @@ export interface MemorySectionProps {
   onDelete: (slug: string) => void;
   deletingSlug: string | null;
   emptyMessage: string;
-  /** Present only for the user section — see `MemoryEntryCard`. */
-  onPromote?: (entry: MemoryEntry) => void;
-  promotingSlug?: string | null;
 }
 
 /**
- * One scope's worth of memory entries: a heading, a loading/error state,
- * and a list of `MemoryEntryCard`s. Rendered twice by `MemoryPageContent` —
- * once for the caller's user memory (always) and once for org memory
- * (admin only) — so the loading/empty/error chrome lives here instead of
- * being duplicated at each call site.
+ * This instance's memory entries: a heading, a loading/error state, and a
+ * list of `MemoryEntryCard`s. Used to be rendered twice by
+ * `MemoryPageContent` — once for a user's own memory, once for the
+ * organisation's — before Phase C collapsed both into one instance scope;
+ * the loading/empty/error chrome living here rather than at the call site
+ * is a leftover of that, not a sign a second call site is coming back.
  */
 export function MemorySection({
   title,
@@ -36,8 +34,6 @@ export function MemorySection({
   onDelete,
   deletingSlug,
   emptyMessage,
-  onPromote,
-  promotingSlug,
 }: MemorySectionProps) {
   return (
     <section className="space-y-3">
@@ -70,9 +66,7 @@ export function MemorySection({
               entry={entry}
               key={entry.slug}
               onDelete={() => onDelete(entry.slug)}
-              onPromote={onPromote ? () => onPromote(entry) : undefined}
               onSave={(body) => onSave(entry.slug, body)}
-              promoting={promotingSlug === entry.slug}
             />
           ))}
         </div>

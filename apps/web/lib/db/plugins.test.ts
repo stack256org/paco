@@ -21,7 +21,6 @@ type Row = {
   consentedNetDomains: unknown;
   enabled: boolean;
   ingressSecret: string | null;
-  installedBy: string | null;
   installedAt: Date;
   updatedAt: Date;
 };
@@ -68,7 +67,6 @@ function makeRow(partial: Partial<Row>): Row {
     consentedNetDomains: partial.consentedNetDomains ?? [],
     enabled: partial.enabled ?? false,
     ingressSecret: partial.ingressSecret ?? null,
-    installedBy: partial.installedBy ?? null,
     installedAt: partial.installedAt ?? now,
     updatedAt: partial.updatedAt ?? now,
   };
@@ -171,130 +169,6 @@ describe("upsertPlugin / getPlugin", () => {
     expect(row?.manifest).toEqual(
       manifestWithCapabilities(["events:subscribe"]),
     );
-  });
-
-  test("records installedBy as the plugin's security principal", async () => {
-    store = [];
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "1.0.0",
-      contentHash: "sha256:abc",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-      installedBy: "admin-1",
-    });
-
-    const row = await getPlugin("my-plugin");
-    expect(row?.installedBy).toBe("admin-1");
-  });
-
-  test("a re-install by a different administrator re-attributes the principal", async () => {
-    store = [];
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "1.0.0",
-      contentHash: "sha256:abc",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-      installedBy: "admin-1",
-    });
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "2.0.0",
-      contentHash: "sha256:def",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-      installedBy: "admin-2",
-    });
-
-    // Consent is to the code that was just reviewed, so the person who
-    // reviewed it is who the plugin now acts as.
-    const row = await getPlugin("my-plugin");
-    expect(row?.installedBy).toBe("admin-2");
-  });
-
-  test("an upsert that names no installer carries the existing one forward instead of erasing it", async () => {
-    store = [];
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "1.0.0",
-      contentHash: "sha256:abc",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-      installedBy: "admin-1",
-    });
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "2.0.0",
-      contentHash: "sha256:def",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-    });
-
-    const row = await getPlugin("my-plugin");
-    expect(row?.installedBy).toBe("admin-1");
-  });
-
-  test("a row that never had an installer stays without one rather than inventing a principal", async () => {
-    store = [];
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "1.0.0",
-      contentHash: "sha256:abc",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-    });
-
-    const row = await getPlugin("my-plugin");
-    expect(row?.installedBy).toBeNull();
-  });
-
-  test("an explicit null installer clears the principal, so a deleted installer cannot be resurrected", async () => {
-    store = [];
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "1.0.0",
-      contentHash: "sha256:abc",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-      installedBy: "admin-1",
-    });
-    await upsertPlugin({
-      id: "my-plugin",
-      source: "local:/tmp/my-plugin",
-      version: "2.0.0",
-      contentHash: "sha256:def",
-      manifest: manifestWithCapabilities([]),
-      grantedCapabilities: [],
-      installedBy: null,
-    });
-
-    const row = await getPlugin("my-plugin");
-    expect(row?.installedBy).toBeNull();
-  });
-
-  test("a stored installedBy that is not a usable id reads back as no principal, never as an empty one", async () => {
-    // A hand-edited or otherwise corrupt row: `""` would be a string that
-    // passes a naive truthiness check while naming nobody. Fail closed.
-    store = [
-      makeRow({
-        id: "my-plugin",
-        manifest: manifestWithCapabilities([]),
-        grantedCapabilities: [],
-        installedBy: "",
-      }),
-    ];
-
-    const row = await getPlugin("my-plugin");
-    expect(row).toBeDefined();
-    expect(row?.installedBy).toBeNull();
   });
 
   test("enabled defaults to false: install is consent-gated", async () => {

@@ -13,7 +13,6 @@ import { postgresUrl } from "@/lib/db/url";
 
 /** Queue names. Keep them centralized so producers and workers cannot drift. */
 export const QUEUES = {
-  sendEmail: "send-email",
   /**
    * One queue for every cron schedule (`lib/db/schema.ts`'s `schedules`
    * table). Each schedule row registers its own pg-boss cron entry on this
@@ -46,13 +45,12 @@ const globalForBoss = globalThis as typeof globalThis & {
  * meant that if Postgres was unreachable for the one moment the first job was
  * enqueued — which is normal on boot, where the app and the database start
  * together — the rejected promise stayed on `globalThis` for the life of the
- * process. Every later call got that same rejection back, so magic-link sign-in
- * was dead until someone restarted Paco, long after Postgres had recovered, and
- * the only symptom was "Could not send the sign-in link" forever.
+ * process. Every later call got that same rejection back, so a schedule never
+ * fired until someone restarted Paco, long after Postgres had recovered.
  *
- * `startWorkers` already resets its own flag on failure so a later boot can
- * retry; that retry went through this function and got the poisoned promise, so
- * the care taken there had no effect.
+ * `startScheduleJob` already resets its own flag on failure so a later boot
+ * can retry; that retry went through this function and got the poisoned
+ * promise, so the care taken there had no effect.
  */
 export function getBoss(): Promise<PgBoss> {
   if (globalForBoss.__pacoBoss) {
@@ -62,8 +60,8 @@ export function getBoss(): Promise<PgBoss> {
   const boss = new PgBoss({
     connectionString: postgresUrl(),
     schema: "pgboss",
-    // Email delivery is low volume; it does not need a wide pool, and every
-    // connection here is one the app cannot use.
+    // Schedule dispatch is low volume; it does not need a wide pool, and
+    // every connection here is one the app cannot use.
     max: 2,
   });
 

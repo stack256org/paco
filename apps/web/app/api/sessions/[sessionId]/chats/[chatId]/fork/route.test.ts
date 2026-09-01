@@ -1,15 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
-type AuthResult =
-  | {
-      ok: true;
-      userId: string;
-    }
-  | {
-      ok: false;
-      response: Response;
-    };
-
 type OwnedSessionChatResult =
   | {
       ok: true;
@@ -39,7 +29,6 @@ type ForkResult =
   | { status: "message_not_found" }
   | { status: "not_assistant_message" };
 
-let authResult: AuthResult = { ok: true, userId: "user-1" };
 let ownedSessionChatResult: OwnedSessionChatResult = {
   ok: true,
   sessionRecord: { id: "session-1" },
@@ -64,7 +53,6 @@ let forkResult: ForkResult = {
 
 const getChatByIdCalls: string[] = [];
 const forkCalls: Array<{
-  userId: string;
   sourceChatId: string;
   throughMessageId: string;
   forkedChat: {
@@ -76,7 +64,6 @@ const forkCalls: Array<{
 }> = [];
 
 mock.module("@/app/api/sessions/_lib/session-context", () => ({
-  requireAuthenticatedUser: async () => authResult,
   requireOwnedSessionChat: async () => ownedSessionChatResult,
 }));
 
@@ -112,7 +99,6 @@ function createPostRequest(body: unknown): Request {
 
 describe("/api/sessions/[sessionId]/chats/[chatId]/fork", () => {
   beforeEach(() => {
-    authResult = { ok: true, userId: "user-1" };
     ownedSessionChatResult = {
       ok: true,
       sessionRecord: { id: "session-1" },
@@ -138,26 +124,7 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/fork", () => {
     forkCalls.length = 0;
   });
 
-  test("returns auth error from guard", async () => {
-    authResult = {
-      ok: false,
-      response: Response.json(
-        { error: "You've been signed out. Sign in again to continue." },
-        { status: 401 },
-      ),
-    };
-    const { POST } = await routeModulePromise;
-
-    const response = await POST(
-      createPostRequest({ messageId: "message-2" }),
-      createContext(),
-    );
-
-    expect(response.status).toBe(401);
-    expect(forkCalls).toHaveLength(0);
-  });
-
-  test("returns ownership error from guard", async () => {
+  test("returns not-found error from guard", async () => {
     ownedSessionChatResult = {
       ok: false,
       response: Response.json(
@@ -289,7 +256,6 @@ describe("/api/sessions/[sessionId]/chats/[chatId]/fork", () => {
     expect(response.status).toBe(200);
     expect(forkCalls).toEqual([
       {
-        userId: "user-1",
         sourceChatId: "chat-1",
         throughMessageId: "message-2",
         forkedChat: {

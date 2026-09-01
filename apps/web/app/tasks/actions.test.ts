@@ -1,47 +1,25 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 // Every dependency `actions.ts` imports is mocked here, at the module level —
-// none of them do their own database work in this test, mirroring
-// `lib/memory/promote.test.ts`'s reasoning for why `@/lib/db/tasks` (a real
-// module exercised for real by `lib/db/tasks.test.ts`) is never itself
+// none of them do their own database work in this test. `@/lib/db/tasks` (a
+// real module exercised for real by `lib/db/tasks.test.ts`) is never itself
 // mocked in-place, only its call sites' *dependencies* are.
 mock.module("server-only", () => ({}));
 
-let sessionUser: { id: string } | null = { id: "user-1" };
-mock.module("@/lib/session/get-server-session", () => ({
-  getServerSession: () =>
-    Promise.resolve(
-      sessionUser ? { user: sessionUser, created: 0 } : undefined,
-    ),
-}));
-
-let organization: { id: string } | null = { id: "org-1" };
+const organization = { id: "org-1" };
 mock.module("@/lib/org/organization", () => ({
   getOrganization: () => Promise.resolve(organization),
 }));
 
-let memberRole: "owner" | "admin" | "member" | null = "member";
-mock.module("@/lib/org/membership", () => ({
-  getMemberRole: () => Promise.resolve(memberRole),
-}));
-
-let adminFlag = false;
-mock.module("@/lib/admin/require-admin", () => ({
-  isAdmin: () => Promise.resolve(adminFlag),
-}));
-
 type FakeSession = {
   id: string;
-  userId: string;
   title: string;
   status: string;
 };
 let sessionsById = new Map<string, FakeSession>();
-let sessionsByUser = new Map<string, FakeSession[]>();
 mock.module("@/lib/db/sessions", () => ({
   getSessionById: (id: string) => Promise.resolve(sessionsById.get(id)),
-  getSessionsByUserId: (userId: string) =>
-    Promise.resolve(sessionsByUser.get(userId) ?? []),
+  getSessions: () => Promise.resolve([...sessionsById.values()]),
 }));
 
 let roster: Record<string, unknown> = { executor: {}, explorer: {} };
@@ -77,7 +55,6 @@ type FakeTask = {
   reviewerRejections: number;
   chatId: string | null;
   resultSummary: string | null;
-  createdBy: string | null;
 };
 
 let tasksStore: FakeTask[] = [];
@@ -115,7 +92,6 @@ mock.module("@/lib/db/tasks", () => ({
       reviewerRejections: 0,
       chatId: null,
       resultSummary: null,
-      createdBy: (input.createdBy as string | null) ?? null,
     };
     tasksStore.push(row);
     return Promise.resolve(row);
@@ -234,17 +210,12 @@ const {
 } = await import("./actions");
 
 beforeEach(() => {
-  sessionUser = { id: "user-1" };
-  organization = { id: "org-1" };
-  memberRole = "member";
-  adminFlag = false;
   roster = { executor: {}, explorer: {} };
   sessionsById = new Map([
     [
       "session-1",
       {
         id: "session-1",
-        userId: "user-1",
         title: "My session",
         status: "active",
       },
@@ -253,14 +224,10 @@ beforeEach(() => {
       "session-2",
       {
         id: "session-2",
-        userId: "user-2",
         title: "Someone else's session",
         status: "active",
       },
     ],
-  ]);
-  sessionsByUser = new Map([
-    ["user-1", [sessionsById.get("session-1") as FakeSession]],
   ]);
   tasksStore = [];
   createTaskCalls = [];
@@ -272,31 +239,6 @@ beforeEach(() => {
   startTaskResultByTaskId = new Map();
   kickExecutorFixTurnCalls = [];
   kickExecutorFixTurnResult = Promise.resolve();
-});
-
-describe("requireOrgMembership gate", () => {
-  test("a signed-out caller is rejected", async () => {
-    sessionUser = null;
-    await expect(listOrgTasksAction()).rejects.toThrow();
-  });
-
-  test("a caller with no membership row and no admin flag is rejected", async () => {
-    memberRole = null;
-    adminFlag = false;
-    await expect(listOrgTasksAction()).rejects.toThrow();
-  });
-
-  test("a plain member (not admin) may act", async () => {
-    memberRole = "member";
-    adminFlag = false;
-    await expect(listOrgTasksAction()).resolves.toEqual([]);
-  });
-
-  test("a flag-admin with no membership row may still act", async () => {
-    memberRole = null;
-    adminFlag = true;
-    await expect(listOrgTasksAction()).resolves.toEqual([]);
-  });
 });
 
 describe("listOrgTasksAction", () => {
@@ -315,7 +257,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
       {
         id: "task-other-org",
@@ -330,7 +271,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-2",
       },
     ];
 
@@ -355,7 +295,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
       {
         id: "child",
@@ -370,7 +309,6 @@ describe("listOrgTasksAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
     ];
 
@@ -384,20 +322,19 @@ describe("listOrgTasksAction", () => {
 });
 
 describe("listMySessionsForTaskAction / listEnabledAgentNamesAction", () => {
-  test("only the caller's own, non-archived sessions come back", async () => {
-    sessionsByUser.set("user-1", [
-      { id: "session-1", userId: "user-1", title: "Active", status: "active" },
-      {
-        id: "session-3",
-        userId: "user-1",
-        title: "Archived",
-        status: "archived",
-      },
-    ]);
+  test("every non-archived session comes back, across the whole instance", async () => {
+    sessionsById.set("session-3", {
+      id: "session-3",
+      title: "Archived",
+      status: "archived",
+    });
 
     const rows = await listMySessionsForTaskAction();
 
-    expect(rows).toEqual([{ id: "session-1", title: "Active" }]);
+    expect(rows).toEqual([
+      { id: "session-1", title: "My session" },
+      { id: "session-2", title: "Someone else's session" },
+    ]);
   });
 
   test("lists enabled roster names, sorted", async () => {
@@ -408,7 +345,7 @@ describe("listMySessionsForTaskAction / listEnabledAgentNamesAction", () => {
 });
 
 describe("createTaskAction", () => {
-  test("creates a task directly against one of the caller's own sessions", async () => {
+  test("creates a task directly against an existing session", async () => {
     const result = await createTaskAction({
       title: "Ship it",
       goal: "Ship the feature",
@@ -422,20 +359,8 @@ describe("createTaskAction", () => {
       sessionId: "session-1",
       title: "Ship it",
       goal: "Ship the feature",
-      createdBy: "user-1",
     });
     expect(planGoalCalls).toHaveLength(0);
-  });
-
-  test("refuses a session that belongs to another user", async () => {
-    const result = await createTaskAction({
-      title: "Ship it",
-      goal: "Ship the feature",
-      sessionId: "session-2",
-    });
-
-    expect(result.ok).toBe(false);
-    expect(createTaskCalls).toHaveLength(0);
   });
 
   test("refuses an assignedAgent that is not in the enabled roster", async () => {
@@ -464,7 +389,6 @@ describe("createTaskAction", () => {
       organizationId: "org-1",
       sessionId: "session-1",
       goal: "Build the whole feature",
-      createdBy: "user-1",
     });
     expect(createTaskCalls).toHaveLength(0);
   });
@@ -521,7 +445,6 @@ describe("retryTaskAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: "boom",
-        createdBy: "user-1",
       },
     ];
 
@@ -546,7 +469,6 @@ describe("retryTaskAction", () => {
         reviewerRejections: 0,
         chatId: null,
         resultSummary: null,
-        createdBy: "user-1",
       },
     ];
 
@@ -574,7 +496,6 @@ describe("unblockTaskAction", () => {
       reviewerRejections: 2,
       chatId: "chat-1",
       resultSummary: "blocked: too many rejections",
-      createdBy: "user-1",
       ...overrides,
     };
   }
@@ -591,7 +512,6 @@ describe("unblockTaskAction", () => {
     expect(kickExecutorFixTurnCalls[0]).toMatchObject({
       sessionId: "session-1",
       chatId: "chat-1",
-      userId: "user-1",
     });
   });
 
@@ -682,21 +602,6 @@ describe("unblockTaskAction", () => {
     expect(startTaskCalls).toHaveLength(0);
   });
 
-  test("a session the caller does not own cannot be attached", async () => {
-    tasksStore = [
-      blockedTask({ chatId: null, sessionId: null, reviewerRejections: 0 }),
-    ];
-
-    const result = await unblockTaskAction("task-1", {
-      sessionId: "session-2",
-    });
-
-    expect(result.ok).toBe(false);
-    expect(tasksStore[0]?.status).toBe("blocked");
-    expect(transitionCalls).toHaveLength(0);
-    expect(startTaskCalls).toHaveLength(0);
-  });
-
   test("a failure to start the fresh chat leaves the task in todo, where Start is offered", async () => {
     tasksStore = [blockedTask({ chatId: null, reviewerRejections: 0 })];
     startTaskResult = { ok: false, error: "no sandbox" };
@@ -719,7 +624,6 @@ describe("startSubtasksAction", () => {
       reviewerRejections: 0,
       chatId: null,
       resultSummary: null,
-      createdBy: "user-1",
     };
     return [
       {

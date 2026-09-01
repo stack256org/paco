@@ -11,7 +11,7 @@ import {
 } from "@/lib/agent/backend-factory";
 import { runAgentTurn } from "@/lib/agent/run-step";
 import { hostChatWorktree } from "@/lib/agent/workspace-paths";
-import { appUrl } from "@/lib/app-url";
+import { appLoopbackUrl } from "@/lib/app-url";
 import { getRoster } from "@/lib/db/roster";
 import type { SessionRecord } from "@/lib/db/sessions";
 import type { Task, TaskStatus } from "@/lib/db/schema";
@@ -70,16 +70,16 @@ const REVIEWER_DISALLOWED_TOOLS = ["Write", "Edit", "NotebookEdit"];
  *
  * Mirrors the chat workflow's own construction (`app/workflows/chat.ts`):
  * the hook runs on this machine, as a child of the CLI this server spawned,
- * so 127.0.0.1 is right even when the app is reached through another
- * origin — and the port comes from `APP_URL`, the one place it is
- * configured. That last detail is load-bearing rather than fussy: the hook
- * fails OPEN on a transport error by design, so a callback aimed at a
- * closed port would not error loudly, it would silently approve every tool
- * call this gate exists to stop.
+ * so it must reach this app's own loopback address, never the public
+ * origin — see `appLoopbackUrl`'s doc for why. That detail is load-bearing
+ * rather than fussy: the hook fails OPEN on a transport error by design, so
+ * a callback aimed at a closed (or nginx-guarded) port would not error
+ * loudly, it would silently approve every tool call this gate exists to
+ * stop.
  */
 function reviewerApproval(): { url: string; token: string } {
   return {
-    url: `http://127.0.0.1:${appUrl().port || "80"}/api/internal/approvals`,
+    url: `${appLoopbackUrl()}/api/internal/approvals`,
     token: approvalToken(),
   };
 }
@@ -261,7 +261,6 @@ function buildFixPrompt(problems: string[]): string {
 export async function kickExecutorFixTurn(params: {
   sessionId: string;
   chatId: string;
-  userId: string;
   problems: string[];
 }): Promise<void> {
   const [session, chat] = await Promise.all([
@@ -278,7 +277,6 @@ export async function kickExecutorFixTurn(params: {
   const outcome = await submitChatMessage({
     chatId: params.chatId,
     sessionId: params.sessionId,
-    userId: params.userId,
     messages: [
       {
         id: generateId(),
@@ -289,7 +287,6 @@ export async function kickExecutorFixTurn(params: {
       },
     ],
     requestUrl: "internal://tasks/reviewer-gate",
-    authSession: null,
     sessionStatus: session.status,
     activeStreamId: chat.activeStreamId ?? null,
     maxSteps: TASK_DEFAULT_MAX_TURNS,
@@ -559,7 +556,6 @@ export async function runReviewerGate(
     await kickExecutorFixTurn({
       sessionId: task.sessionId,
       chatId,
-      userId: session.userId,
       problems,
     });
   } catch (error) {

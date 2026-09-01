@@ -17,7 +17,6 @@ import {
 import { useGitPanel, type WorkspaceTab } from "./git-panel-context";
 import { PreviewNotRunning } from "./preview-not-running";
 import { PreviewRunControls } from "./preview-run-controls";
-import { PreviewShareControl } from "./preview-share-control";
 import { cn } from "@/lib/utils";
 
 const DiffTabView = dynamic(
@@ -87,8 +86,6 @@ function EmbeddedFrame({
 }
 
 type WorkspacePanelProps = {
-  /** The chat whose preview link and visibility the Preview tab shares. */
-  chatId: string;
   devServerUrl: string | null;
   devServerStarting: boolean;
   devServerStopping: boolean;
@@ -118,7 +115,6 @@ export function WorkspacePanel(props: WorkspacePanelProps) {
 }
 
 function WorkspacePanelBody({
-  chatId,
   devServerUrl,
   devServerStarting,
   devServerStopping,
@@ -206,14 +202,6 @@ function WorkspacePanelBody({
           ) : null}
         </div>
       </div>
-
-      {/*
-        The share link and visibility control, separate from the toolbar
-        above it: that row is about the running process (start, stop,
-        reload), this one is about the URL, which exists whether or not the
-        dev server is running right now.
-      */}
-      {isPreview ? <PreviewShareControl chatId={chatId} /> : null}
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {isPreview ? (

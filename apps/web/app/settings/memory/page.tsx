@@ -3,16 +3,14 @@ import { MemoryPageContent } from "./memory-page-content";
 
 export const metadata: Metadata = {
   title: "Memory",
-  description:
-    "Notes distilled from your chats, and the organisation's shared memory.",
+  description: "Notes distilled from your chats, kept for this instance.",
 };
 
 /**
- * Unlike `/settings/agents`, this page is not admin-gated as a whole —
- * every signed-in user has their own memory to read, edit, and delete. Only
- * the second, organisation-wide section is admin only, decided inside
- * `MemoryPageContent` (and enforced again, server-side, by `requireAdmin`
- * in `./actions.ts` regardless of what the client renders).
+ * Shows this instance's memory — a single scope. User and organisation
+ * memory used to be separate sections here; Phase C removed
+ * application-level identity, so there is exactly one tenant and, since
+ * then, exactly one memory scope for it to have.
  */
 export default function MemoryPage() {
   return <MemoryPageContent />;
