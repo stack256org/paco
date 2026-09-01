@@ -102,8 +102,8 @@ type SessionChatContextValue = {
   /**
    * What `chatInfo.backend` actually supports — computed server-side
    * (`capabilitiesForBackend`, threaded down via the chat bootstrap payload
-   * in `page.tsx`, and refreshed from every `updateChatBackend` response) so
-   * the UI never hardcodes a backend id to decide what to show.
+   * in `page.tsx`) so the UI never hardcodes a backend id to decide what to
+   * show.
    */
   chatCapabilities: BackendCapabilities;
   chat: UseChatHelpers<WebAgentUIMessage>;
@@ -120,8 +120,6 @@ type SessionChatContextValue = {
   updateChatModel: (modelId: string) => Promise<void>;
   /** Reasoning effort for this chat; null uses the model's own default. */
   updateChatEffort: (effort: EffortSelection) => Promise<void>;
-  /** Which `AgentBackend` this chat's turns run on (`chats.backend`). */
-  updateChatBackend: (backend: string) => Promise<void>;
   /** Whether the chat had persisted messages when it was loaded */
   hadInitialMessages: boolean;
   /** The initial message snapshot used for SSR hydration */
@@ -246,7 +244,6 @@ type SessionChatMetadataContextValue = Pick<
   | "updateSessionTitle"
   | "updateChatModel"
   | "updateChatEffort"
-  | "updateChatBackend"
   | "hasRuntimeSandboxState"
   | "hasPausedWorkspace"
   | "reconnectionStatus"
@@ -983,11 +980,6 @@ export function SessionChatProvider({
     [patchChat],
   );
 
-  const updateChatBackend = useCallback(
-    (backend: string) => patchChat({ backend }),
-    [patchChat],
-  );
-
   const runtimeContextValue = useMemo<SessionChatRuntimeContextValue>(
     () => ({
       chat,
@@ -1070,7 +1062,6 @@ export function SessionChatProvider({
       updateSessionTitle,
       updateChatModel,
       updateChatEffort,
-      updateChatBackend,
       hasRuntimeSandboxState,
       hasPausedWorkspace,
       reconnectionStatus,
@@ -1094,7 +1085,6 @@ export function SessionChatProvider({
       updateSessionTitle,
       updateChatModel,
       updateChatEffort,
-      updateChatBackend,
       hasRuntimeSandboxState,
       hasPausedWorkspace,
       reconnectionStatus,

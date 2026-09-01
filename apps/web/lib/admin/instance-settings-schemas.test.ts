@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { domainSchema, poolsideSchema } from "./instance-settings-schemas";
+import { domainSchema } from "./instance-settings-schemas";
 
 describe("domainSchema", () => {
   const base = {
@@ -122,89 +122,5 @@ describe("domainSchema", () => {
     });
 
     expect(result.success).toBe(true);
-  });
-});
-
-describe("poolsideSchema", () => {
-  const base = { binaryPath: null, apiKey: null };
-
-  test("trims a whitespace-padded base URL and accepts it", () => {
-    const result = poolsideSchema.safeParse({
-      ...base,
-      baseUrl: "  https://pool.example.com  ",
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.baseUrl).toBe(
-      "https://pool.example.com",
-    );
-  });
-
-  test("normalises a blank base URL to null", () => {
-    const result = poolsideSchema.safeParse({ ...base, baseUrl: "   " });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.baseUrl).toBeNull();
-  });
-
-  test("accepts a null base URL — the default Poolside service", () => {
-    const result = poolsideSchema.safeParse({ ...base, baseUrl: null });
-
-    expect(result.success).toBe(true);
-  });
-
-  test("rejects an invalid base URL", () => {
-    const result = poolsideSchema.safeParse({
-      ...base,
-      baseUrl: "not-a-url",
-    });
-
-    expect(result.success).toBe(false);
-  });
-
-  test("a blank apiKey means 'leave the stored one alone'", () => {
-    const result = poolsideSchema.safeParse({
-      ...base,
-      baseUrl: null,
-      apiKey: "   ",
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.apiKey).toBeNull();
-  });
-
-  test("passes a real apiKey through unchanged", () => {
-    const result = poolsideSchema.safeParse({
-      ...base,
-      baseUrl: null,
-      apiKey: "sk-poolside-secret",
-    });
-
-    expect(result.success).toBe(true);
-    expect(result.success && result.data.apiKey).toBe("sk-poolside-secret");
-  });
-
-  test("rejects a blank binaryPath (use null to mean unset)", () => {
-    const result = poolsideSchema.safeParse({
-      baseUrl: null,
-      apiKey: null,
-      binaryPath: "",
-    });
-
-    expect(result.success).toBe(false);
-  });
-
-  /**
-   * The removed backend's key had its own field name. A form still POSTing
-   * `endpoint` must not slip through as a Poolside base URL by accident.
-   */
-  test("an OpenFX-shaped payload does not validate as Poolside settings", () => {
-    const result = poolsideSchema.safeParse({
-      endpoint: "https://gateway.example.com",
-      apiKey: null,
-      binaryPath: null,
-    });
-
-    expect(result.success).toBe(false);
   });
 });
