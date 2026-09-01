@@ -787,7 +787,24 @@ One thing to check the first time: **the edge must forward the original
 `server_name <slug>.previews.example.com`, so an edge that rewrites `Host`
 sends the request to nginx's default server — you land on Paco itself
 instead of the preview. If that happens, it is the edge's forwarding
-configuration, not Paco's routing.
+configuration, not Paco's routing. Caddy — which several platforms use,
+Krova among them — preserves it by default on `reverse_proxy`.
+
+That header carries more than preview routing, and the second thing it
+carries fails differently enough to be worth knowing about in advance:
+**Next compares a Server Action's `Origin` against `Host` (or
+`X-Forwarded-Host`) and aborts the request when they disagree.** Paco uses
+server actions for most of Settings, tasks and memory, so an edge that
+rewrites `Host` does not merely break previews — it makes saving anything
+fail, while pages still render normally. Two unrelated-looking symptoms,
+one cause.
+
+Nothing needs configuring for this as long as the header survives the hop.
+If your edge genuinely cannot preserve it, Next's escape hatch is
+`experimental.serverActions.allowedOrigins` in `apps/web/next.config.ts`
+(see `node_modules/next/dist/docs/01-app/02-guides/data-security.md`) —
+but fix the edge first; the allow-list weakens a CSRF protection to work
+around a proxy misconfiguration.
 
 **Why previews get their own hostname rather than a path under Paco's own
 domain.** A preview serves whatever the agent wrote. A separate hostname is a
