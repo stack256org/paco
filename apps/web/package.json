@@ -15,7 +15,8 @@
     "db:studio": "drizzle-kit studio",
     "db:check": "node scripts/check-migrations.ts",
     "workflow:bootstrap": "node scripts/workflow-bootstrap.ts",
-    "workflow:inspect": "pnpm dlx workflow inspect runs --backend @workflow/world-postgres"
+    "workflow:inspect": "pnpm dlx workflow inspect runs --backend @workflow/world-postgres",
+    "sweep:multi-repo": "SCENARIO_SWEEP=1 bun test lib/git/multi-repo-sweep.test.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "catalog:",

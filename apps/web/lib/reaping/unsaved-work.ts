@@ -3,6 +3,7 @@ import "server-only";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CHATS_DIRNAME, REPO_DIRNAME } from "@paco/sandbox";
+import { parseNestedRepoRoots } from "@/lib/git/nested-repos";
 import { countLines, runHostCommand } from "./run-host-command";
 import type { UnsavedWork } from "./types";
 
@@ -75,23 +76,106 @@ export async function probeUnsavedWork(
 
   let uncommittedFiles = repoStatus.ok ? countLines(repoStatus.stdout) : 0;
 
-  for (const worktree of await listWorktrees(workspacePath)) {
+  const worktrees = await listWorktrees(workspacePath);
+  for (const worktree of worktrees) {
     const status = await git(worktree, STATUS_ARGS);
     if (status.ok) {
       uncommittedFiles += countLines(status.stdout);
     }
   }
 
-  const unpushedCommits = unpushed.ok
+  let unpushedCommits = unpushed.ok
     ? Number.parseInt(unpushed.stdout.trim(), 10)
     : 0;
+  if (!Number.isFinite(unpushedCommits)) {
+    unpushedCommits = 0;
+  }
+
+  /*
+   * Repositories nested *inside* the workspace — a session used as a
+   * workspace has projects cloned into it, each its own repository, and git
+   * asked at the repository or worktree root cannot see into them. Worse than
+   * a wrong count: a nested repository listed in the parent's `.gitignore`
+   * is invisible to every question above, so a workspace whose only content
+   * was three cloned projects full of unpushed commits read as *clean* — and
+   * this probe is what stands between such a workspace and deletion.
+   *
+   * A commit in a nested repository that no remote-tracking ref contains is
+   * unpushed work by exactly the parent's definition, including every commit
+   * of a repository that has no remote at all: nothing is backed up.
+   */
+  const nestedRepos = new Set<string>();
+  for (const parent of [repo, ...worktrees]) {
+    for (const nested of await findNestedRepos(parent)) {
+      nestedRepos.add(nested);
+    }
+  }
+
+  for (const nested of nestedRepos) {
+    const [nestedStatus, nestedUnpushed] = await Promise.all([
+      git(nested, STATUS_ARGS),
+      git(nested, ["rev-list", "--branches", "--not", "--remotes", "--count"]),
+    ]);
+    if (nestedStatus.ok) {
+      uncommittedFiles += countLines(nestedStatus.stdout);
+    }
+    if (nestedUnpushed.ok) {
+      const count = Number.parseInt(nestedUnpushed.stdout.trim(), 10);
+      if (Number.isFinite(count)) {
+        unpushedCommits += count;
+      }
+    }
+  }
 
   return {
     uncommittedFiles,
-    unpushedCommits: Number.isFinite(unpushedCommits) ? unpushedCommits : 0,
+    unpushedCommits,
     hasRemote: remotes.ok && remotes.stdout.trim().length > 0,
     trackedFiles: tracked.ok ? countLines(tracked.stdout) : 0,
   };
+}
+
+/**
+ * Every repository nested under `parent`, as absolute paths.
+ *
+ * The same `find` shape the sandbox-side discovery uses (`nested-repos.ts`),
+ * spelled as an argument vector because host paths never go through a shell.
+ * `-prune` on `.git` keeps the walk out of object stores; `-prune` on
+ * `node_modules` keeps it out of dependency trees. `parent`'s own `.git` is
+ * dropped by the shared parser.
+ */
+async function findNestedRepos(parent: string): Promise<string[]> {
+  const result = await runHostCommand("find", [
+    parent,
+    "-maxdepth",
+    "8",
+    "(",
+    "-name",
+    "node_modules",
+    "-prune",
+    ")",
+    "-o",
+    "(",
+    "-name",
+    ".git",
+    "-prune",
+    "-print",
+    ")",
+  ]);
+  if (!result.ok) {
+    return [];
+  }
+
+  const relativeLines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${parent}/`))
+    .map((line) => `./${line.slice(parent.length + 1)}`)
+    .join("\n");
+
+  return parseNestedRepoRoots(relativeLines).map((root) =>
+    path.join(parent, root),
+  );
 }
 
 function git(cwd: string, args: string[]) {

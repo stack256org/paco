@@ -10,6 +10,13 @@ import {
 } from "@/lib/error-copy";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 import { shellQuote } from "@/lib/shell/quote";
+import {
+  discoverNestedRepos,
+  isNestedRepoRootRow,
+  ownerOf,
+  repoCwd,
+  rootsWithin,
+} from "@/lib/git/nested-repos";
 
 /**
  * What the user reads when a git command fails here.
@@ -211,18 +218,74 @@ export async function discardChanges(params: {
     );
   }
 
-  const hasHeadResult = await sandbox.exec(
-    "git rev-parse --verify HEAD",
-    cwd,
-    10000,
-  );
-  const hasHead = hasHeadResult.success;
+  /*
+   * The worktree may hold nested repositories — projects cloned into the
+   * workspace, each with its own git. The panel shows their changes with the
+   * project directory as a path prefix, so a discard must route each path to
+   * the repository that owns it, and a discard-everything must clear each
+   * repository's own uncommitted work. What it must never do is delete a
+   * nested repository itself: the dialog promises that anything committed
+   * stays, and the repository's commits are exactly that. (`git clean -fd`
+   * agrees — it refuses untracked nested repositories without a second -f.)
+   */
+  const roots = await discoverNestedRepos(sandbox, cwd);
+
+  const headKnown = new Map<string, boolean>();
+  async function hasHeadIn(dir: string): Promise<boolean> {
+    const known = headKnown.get(dir);
+    if (known !== undefined) {
+      return known;
+    }
+    const result = await sandbox.exec(
+      "git rev-parse --verify HEAD",
+      dir,
+      10000,
+    );
+    headKnown.set(dir, result.success);
+    return result.success;
+  }
+
+  async function discardEverythingIn(dir: string): Promise<void> {
+    if (await hasHeadIn(dir)) {
+      const resetResult = await sandbox.exec(
+        "git reset --hard HEAD",
+        dir,
+        30000,
+      );
+      if (!resetResult.success) {
+        logGitFailure("reset --hard", resetResult);
+        throw new Error(DISCARD_FAILED);
+      }
+    } else {
+      const clearIndexResult = await sandbox.exec(
+        "git rm -rf --cached .",
+        dir,
+        30000,
+      );
+      if (
+        !clearIndexResult.success &&
+        !isPathspecError(toGitOutput(clearIndexResult))
+      ) {
+        logGitFailure("rm --cached", clearIndexResult);
+        throw new Error(DISCARD_FAILED);
+      }
+    }
+
+    const cleanResult = await sandbox.exec("git clean -fd", dir, 30000);
+    if (!cleanResult.success) {
+      logGitFailure("clean", cleanResult);
+      throw new Error(DISCARD_FAILED);
+    }
+  }
 
   if (filePath) {
     for (const targetPath of targetPaths) {
+      const { root, rel } = ownerOf(targetPath, roots);
+      const dir = repoCwd(cwd, root);
+
       const statusCheck = await ensurePathHasUncommittedChanges({
-        cwd,
-        path: targetPath,
+        cwd: dir,
+        path: rel,
         sandbox,
       });
       if (!statusCheck.ok) {
@@ -230,57 +293,62 @@ export async function discardChanges(params: {
       }
 
       const result = await discardPathChanges({
-        cwd,
-        path: targetPath,
-        hasHead,
+        cwd: dir,
+        path: rel,
+        hasHead: await hasHeadIn(dir),
         sandbox,
       });
       if (!result.ok) {
         throw new Error(result.error);
       }
     }
-  } else if (hasHead) {
-    const resetResult = await sandbox.exec("git reset --hard HEAD", cwd, 30000);
-    if (!resetResult.success) {
-      logGitFailure("reset --hard", resetResult);
-      throw new Error(DISCARD_FAILED);
+  } else {
+    await discardEverythingIn(cwd);
+    for (const root of roots) {
+      await discardEverythingIn(repoCwd(cwd, root));
+    }
+  }
+
+  let hasUncommittedChanges = false;
+  if (filePath) {
+    for (const targetPath of targetPaths) {
+      const { root, rel } = ownerOf(targetPath, roots);
+      const statusResult = await sandbox.exec(
+        `git status --porcelain -- ${shellQuote(rel)}`,
+        repoCwd(cwd, root),
+        10000,
+      );
+      if (!statusResult.success) {
+        logGitFailure("status", statusResult);
+        throw new Error(DISCARD_CHECK_FAILED);
+      }
+      hasUncommittedChanges ||= statusResult.stdout.trim().length > 0;
     }
   } else {
-    const clearIndexResult = await sandbox.exec(
-      "git rm -rf --cached .",
-      cwd,
-      30000,
-    );
-    if (
-      !clearIndexResult.success &&
-      !isPathspecError(toGitOutput(clearIndexResult))
-    ) {
-      logGitFailure("rm --cached", clearIndexResult);
-      throw new Error(DISCARD_FAILED);
+    for (const root of ["", ...roots]) {
+      const statusResult = await sandbox.exec(
+        "git status --porcelain",
+        repoCwd(cwd, root),
+        10000,
+      );
+      if (!statusResult.success) {
+        logGitFailure("status", statusResult);
+        throw new Error(DISCARD_CHECK_FAILED);
+      }
+      // A repository's view of a repository nested inside it (`?? project/`)
+      // is not an uncommitted change — the panel does not show it, and no
+      // discard can ever clear it. Everything else counts.
+      const within = rootsWithin(root, roots);
+      const dirty = statusResult.stdout
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .some((line) => !isNestedRepoRootRow(line.slice(3).trim(), within));
+      hasUncommittedChanges ||= dirty;
     }
-  }
-
-  if (!filePath) {
-    const cleanResult = await sandbox.exec("git clean -fd", cwd, 30000);
-    if (!cleanResult.success) {
-      logGitFailure("clean", cleanResult);
-      throw new Error(DISCARD_FAILED);
-    }
-  }
-
-  const statusCommand = filePath
-    ? `git status --porcelain -- ${targetPaths
-        .map((p) => shellQuote(p))
-        .join(" ")}`
-    : "git status --porcelain";
-  const statusResult = await sandbox.exec(statusCommand, cwd, 10000);
-  if (!statusResult.success) {
-    logGitFailure("status", statusResult);
-    throw new Error(DISCARD_CHECK_FAILED);
   }
 
   return {
     discarded: true,
-    hasUncommittedChanges: statusResult.stdout.trim().length > 0,
+    hasUncommittedChanges,
   };
 }

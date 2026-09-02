@@ -9,6 +9,14 @@ import {
   unescapeGitPath,
 } from "@/app/api/sessions/[sessionId]/diff/_lib/diff-utils";
 import { updateSession } from "@/lib/db/sessions";
+import {
+  discoverNestedRepos,
+  isNestedRepoRootRow,
+  prefixPatchPaths,
+  prefixPath,
+  repoCwd,
+  rootsWithin,
+} from "@/lib/git/nested-repos";
 import { isSandboxUnavailableError } from "@/lib/sandbox/utils";
 
 /** Upper bound on untracked files inlined into a diff for a repo with no commits. */
@@ -50,21 +58,32 @@ export class DiffComputationError extends Error {
   }
 }
 
-export async function computeAndCacheDiff(params: {
-  sandbox: Sandbox;
-  sessionId: string;
-  /**
-   * Directory the diff is taken in.
-   *
-   * A chat's worktree when the caller knows which chat it is asking about, so
-   * the panel shows that chat's branch and nothing else. Defaults to the
-   * session's repository, which is what session-wide callers want.
-   */
-  cwd?: string;
-}): Promise<DiffResponse> {
-  const { sandbox, sessionId } = params;
-  const cwd = params.cwd ?? sandbox.workingDirectory;
+/** One repository's share of the response, before any path prefixing. */
+type RepoDiff = {
+  files: DiffFile[];
+  /** null: a repository with no commits yet. */
+  baseRef: string | null;
+  totalAdditions: number;
+  totalDeletions: number;
+  omittedFileCount: number;
+};
 
+/**
+ * The diff of a single repository, taken in `cwd`.
+ *
+ * Everything here used to be `computeAndCacheDiff` itself, minus the caching.
+ * It became a function of one repository when workspaces holding several
+ * repositories arrived: the same questions are asked of each nested
+ * repository, and the answers merged by the caller. `exclude` lets the parent
+ * repository's pass drop the rows that *are* a nested repository — the opaque
+ * `project/` untracked entry, the gitlink — before they are counted, since
+ * the repository's real changes are reported by its own pass.
+ */
+async function computeDiffForRepo(
+  sandbox: Sandbox,
+  cwd: string,
+  exclude: (path: string) => boolean = () => false,
+): Promise<RepoDiff> {
   // Determine the best base ref for the diff:
   // - origin's default branch (for cloned repos)
   // - HEAD (for local repos with commits)
@@ -118,7 +137,12 @@ export async function computeAndCacheDiff(params: {
     const allUntracked = untrackedResult.stdout
       .trim()
       .split("\n")
-      .filter((line) => line.length > 0);
+      .filter((line) => line.length > 0)
+      // `ls-files` quotes paths holding spaces-adjacent escapes or non-ASCII
+      // bytes (`"caf\303\251.ts"`); read literally, that name matches no file
+      // on disk and the entry silently vanished from the diff.
+      .map((line) => unescapeGitPath(line))
+      .filter((line) => !exclude(line));
 
     /*
      * Bound how many files are inlined.
@@ -150,40 +174,13 @@ export async function computeAndCacheDiff(params: {
       files.push(entry.file);
     }
 
-    const statusOrder = { modified: 0, added: 1, renamed: 2, deleted: 3 };
-    files.sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
-
-    const response: DiffResponse = {
+    return {
       files,
-      baseRef: "(no commits)",
-      summary: {
-        totalFiles: files.length + omittedFileCount,
-        totalAdditions,
-        totalDeletions: 0,
-      },
+      baseRef,
+      totalAdditions,
+      totalDeletions: 0,
+      omittedFileCount,
     };
-
-    if (omittedFileCount > 0) {
-      console.warn(
-        `[diff] ${omittedFileCount} untracked files omitted for session ${sessionId}; add a .gitignore to exclude build output.`,
-      );
-    }
-
-    updateSession(sessionId, {
-      cachedDiff: response,
-      cachedDiffUpdatedAt: new Date(),
-      linesAdded: response.summary.totalAdditions,
-      linesRemoved: response.summary.totalDeletions,
-    }).catch((err) =>
-      // Only the message: the failing query carries the whole diff as a
-      // parameter, and logging it once produced a multi-gigabyte log file.
-      console.error(
-        "Failed to cache diff:",
-        err instanceof Error ? err.message : String(err),
-      ),
-    );
-
-    return response;
   }
 
   // Normal path: we have a valid base ref to diff against.
@@ -203,6 +200,10 @@ export async function computeAndCacheDiff(params: {
   // full diff. This avoids huge output that can truncate and lose diffs for
   // other files. We still get their stats from --name-status and --numstat.
   const fileStatuses = parseNameStatus(nameStatusResult.stdout);
+  const excludedPaths = Array.from(fileStatuses.keys()).filter(exclude);
+  for (const path of excludedPaths) {
+    fileStatuses.delete(path);
+  }
   const generatedExcludes = Array.from(fileStatuses.keys())
     .filter(isGeneratedFile)
     .map((p) => `":(exclude)${p}"`)
@@ -339,7 +340,10 @@ export async function computeAndCacheDiff(params: {
   const untrackedFiles = untrackedResult.stdout
     .trim()
     .split("\n")
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0)
+    // Same unescape as the no-commits branch: a quoted path matches nothing.
+    .map((line) => unescapeGitPath(line))
+    .filter((line) => !exclude(line));
 
   // Fetch content for untracked files to generate diff
   const untrackedFileContents = await Promise.all(
@@ -381,19 +385,124 @@ export async function computeAndCacheDiff(params: {
     }
   }
 
+  return {
+    files,
+    baseRef,
+    totalAdditions,
+    totalDeletions,
+    omittedFileCount: 0,
+  };
+}
+
+/** A nested repository's file, renamed to the path the workspace knows it by. */
+function prefixDiffFile(file: DiffFile, root: string): DiffFile {
+  return {
+    ...file,
+    path: prefixPath(root, file.path),
+    diff: prefixPatchPaths(file.diff, root),
+    ...(file.localDiff
+      ? { localDiff: prefixPatchPaths(file.localDiff, root) }
+      : {}),
+    ...(file.oldPath ? { oldPath: prefixPath(root, file.oldPath) } : {}),
+  };
+}
+
+/**
+ * The whole workspace's diff: the worktree's repository, plus every
+ * repository nested inside it.
+ *
+ * A workspace used as a *workspace* — several projects, each cloned into its
+ * own directory — is several repositories, and git run at the root reports
+ * only the root's. Each nested repository is diffed in its own directory
+ * against its own base, and its files join the response under its directory
+ * prefix, exactly as the Source Control panel names them. The parent's view
+ * of a nested repository (an opaque untracked directory, or a gitlink) is
+ * dropped in favour of the real thing.
+ *
+ * A nested repository that fails to answer — deleted mid-request, corrupt —
+ * costs its own files and nothing else: the parent's diff still renders. The
+ * parent failing is fatal, as it always was. `baseRef` is the parent's; a
+ * per-repository base would be a lie in one field, and the panel only prints
+ * it as a label.
+ */
+export async function computeAndCacheDiff(params: {
+  sandbox: Sandbox;
+  sessionId: string;
+  /**
+   * Directory the diff is taken in.
+   *
+   * A chat's worktree when the caller knows which chat it is asking about, so
+   * the panel shows that chat's branch and nothing else. Defaults to the
+   * session's repository, which is what session-wide callers want.
+   */
+  cwd?: string;
+}): Promise<DiffResponse> {
+  const { sandbox, sessionId } = params;
+  const cwd = params.cwd ?? sandbox.workingDirectory;
+
+  const roots = await discoverNestedRepos(sandbox, cwd);
+
+  // Every repository's pass excludes the roots *within it* — the parent's
+  // list is every root, and an intermediate repository holding a repository
+  // of its own (`tools` around `tools/inner`) has its own opaque row to drop.
+  const excludeFor = (repo: string) => {
+    const within = rootsWithin(repo, roots);
+    return (path: string) => isNestedRepoRootRow(path, within);
+  };
+
+  const parent = await computeDiffForRepo(sandbox, cwd, excludeFor(""));
+
+  const files = [...parent.files];
+  let totalAdditions = parent.totalAdditions;
+  let totalDeletions = parent.totalDeletions;
+  let omittedFileCount = parent.omittedFileCount;
+
+  for (const root of roots) {
+    try {
+      const nested = await computeDiffForRepo(
+        sandbox,
+        repoCwd(cwd, root),
+        excludeFor(root),
+      );
+      for (const file of nested.files) {
+        files.push(prefixDiffFile(file, root));
+      }
+      totalAdditions += nested.totalAdditions;
+      totalDeletions += nested.totalDeletions;
+      omittedFileCount += nested.omittedFileCount;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // An unreachable sandbox is not a property of one repository.
+      if (isSandboxUnavailableError(message)) {
+        throw error;
+      }
+      console.error(`Failed to diff nested repository ${root}:`, message);
+    }
+  }
+
   // Sort files: modified first, then added, then renamed, then deleted
   const statusOrder = { modified: 0, added: 1, renamed: 2, deleted: 3 };
-  files.sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
+  files.sort(
+    (a, b) =>
+      statusOrder[a.status] - statusOrder[b.status] ||
+      a.path.localeCompare(b.path),
+  );
 
   const response: DiffResponse = {
     files,
-    baseRef,
+    baseRef: parent.baseRef ?? "(no commits)",
     summary: {
-      totalFiles: files.length,
+      totalFiles: files.length + omittedFileCount,
       totalAdditions,
       totalDeletions,
     },
   };
+
+  if (omittedFileCount > 0) {
+    console.warn(
+      `[diff] ${omittedFileCount} untracked files omitted for session ${sessionId}; add a .gitignore to exclude build output.`,
+    );
+  }
 
   // Cache diff for offline viewing (fire-and-forget)
   updateSession(sessionId, {

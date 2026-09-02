@@ -27,6 +27,27 @@ real repository on the default branch, so a file listing, a `git status`, or a
 diff against it returns an empty-but-valid answer. Chat-scoped work must go
 through `resolveWorkCwd`.
 
+**Git never looks inside a nested repository — and reports that silence as
+clean.** A session used as a workspace has projects cloned *into* it, each
+with its own `.git`. `git status`/`git diff` at the worktree root shows one
+opaque `?? project/` row (or nothing, when the directory is gitignored) and
+none of the changes within, so every surface that ran a single git command at
+the root — the Changes tab, the Source Control panel, the status counts, the
+unsaved-work probe deciding whether a workspace is disposable — under-reported
+or reported clean. Any code asking git about a worktree must go through
+`lib/git/nested-repos.ts`: discover the nested roots, run the command per
+repository, prefix the paths. Staging the `?? project/` row is worse than
+noise: it records a gitlink, which silently replaces the project's files in
+any clone of the parent. And the parent is not the only repository with that
+row — a repo cloned inside a repo gives the *intermediate* one its own
+`inner/` trap, so the filter runs per repository (`rootsWithin`), not just at
+the root. Both of those, plus `git add` dying on a staged rename's source
+path (`fatal: pathspec … did not match any files` — the source exists neither
+on disk nor in the index, so staging must send the new name only), were found
+by the exhaustive scenario sweep (`pnpm --dir apps/web sweep:multi-repo`),
+not by the hand-picked tests. When a change fans out across layouts × states
+× operations, enumerate the product space and run all of it once.
+
 **A predicate that finds nothing can mean "everything".**
 `sendAutomaticallyWhen` located a step boundary by searching for a `step-start`
 part, which Claude Code never emits. With no boundary it scanned the whole

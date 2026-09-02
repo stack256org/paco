@@ -4,6 +4,11 @@ import { connectSandbox } from "@paco/sandbox";
 import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { getSessionById } from "@/lib/db/sessions";
 import { isSafeBranchName } from "@/lib/git/helpers";
+import {
+  discoverNestedRepos,
+  repoCwd,
+  rootsWithin,
+} from "@/lib/git/nested-repos";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 import { SESSION_NOT_FOUND, WORKSPACE_NOT_STARTED } from "@/lib/error-copy";
 
@@ -22,16 +27,28 @@ export interface SessionGitStatus {
 
 // ---- helpers ----
 
-function parsePorcelainStatus(output: string): {
-  stagedCount: number;
-  unstagedCount: number;
-  untrackedCount: number;
-  uncommittedFiles: number;
-} {
-  const stagedFiles = new Set<string>();
-  const unstagedFiles = new Set<string>();
-  const untrackedFiles = new Set<string>();
+type StatusSets = {
+  stagedFiles: Set<string>;
+  unstagedFiles: Set<string>;
+  untrackedFiles: Set<string>;
+};
 
+/**
+ * Fold one repository's porcelain output into the running sets.
+ *
+ * `prefix` is the repository's directory for a nested repository, `""` for
+ * the worktree's own — without it, two repositories both touching a
+ * `README.md` would collapse into one entry and the counts would lie.
+ * `dropPaths` removes the parent's view of a nested repository (the opaque
+ * `project/` row, or a gitlink), whose real changes arrive from the
+ * repository's own pass.
+ */
+function collectPorcelainStatus(
+  output: string,
+  sets: StatusSets,
+  prefix = "",
+  dropPaths: string[] = [],
+): void {
   for (const line of output.trim().split("\n")) {
     if (!line || line.length < 3) continue;
 
@@ -40,30 +57,42 @@ function parsePorcelainStatus(output: string): {
     const filePath = line.slice(3).trim();
     if (!filePath) continue;
 
+    const bare = filePath.endsWith("/") ? filePath.slice(0, -1) : filePath;
+    if (dropPaths.includes(bare)) continue;
+
+    const keyed = prefix ? `${prefix}/${filePath}` : filePath;
+
     if (indexStatus === "?" && worktreeStatus === "?") {
-      untrackedFiles.add(filePath);
+      sets.untrackedFiles.add(keyed);
       continue;
     }
 
     if (indexStatus !== " " && indexStatus !== "?") {
-      stagedFiles.add(filePath);
+      sets.stagedFiles.add(keyed);
     }
 
     if (worktreeStatus !== " " && worktreeStatus !== "?") {
-      unstagedFiles.add(filePath);
+      sets.unstagedFiles.add(keyed);
     }
   }
+}
 
+function countStatusSets(sets: StatusSets): {
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  uncommittedFiles: number;
+} {
   const uncommitted = new Set<string>([
-    ...stagedFiles,
-    ...unstagedFiles,
-    ...untrackedFiles,
+    ...sets.stagedFiles,
+    ...sets.unstagedFiles,
+    ...sets.untrackedFiles,
   ]);
 
   return {
-    stagedCount: stagedFiles.size,
-    unstagedCount: unstagedFiles.size,
-    untrackedCount: untrackedFiles.size,
+    stagedCount: sets.stagedFiles.size,
+    unstagedCount: sets.unstagedFiles.size,
+    untrackedCount: sets.untrackedFiles.size,
     uncommittedFiles: uncommitted.size,
   };
 }
@@ -132,14 +161,45 @@ export async function getGitStatus(params: {
       isDetachedHead = true;
     }
 
-    // check for uncommitted changes
+    // Check for uncommitted changes — in this repository, and in every
+    // repository nested inside the worktree. A workspace holding several
+    // projects is several repositories, and `git status` at the root cannot
+    // see inside them; counting only the root left this badge (and everything
+    // gated on it, like the commit panel) blind to the nested projects' work.
+    const roots = await discoverNestedRepos(sandbox, cwd);
+    const sets: StatusSets = {
+      stagedFiles: new Set(),
+      unstagedFiles: new Set(),
+      untrackedFiles: new Set(),
+    };
+
     const statusResult = await sandbox.exec(
       "git status --porcelain",
       cwd,
       10000,
     );
+    collectPorcelainStatus(statusResult.stdout, sets, "", roots);
+
+    for (const root of roots) {
+      const nestedResult = await sandbox.exec(
+        "git status --porcelain",
+        repoCwd(cwd, root),
+        10000,
+      );
+      if (nestedResult.success) {
+        // An intermediate repository holding a repository of its own has an
+        // opaque row for it too — drop it the same way the parent's is.
+        collectPorcelainStatus(
+          nestedResult.stdout,
+          sets,
+          root,
+          rootsWithin(root, roots),
+        );
+      }
+    }
+
     const { stagedCount, unstagedCount, untrackedCount, uncommittedFiles } =
-      parsePorcelainStatus(statusResult.stdout);
+      countStatusSets(sets);
     const hasUncommittedChanges = uncommittedFiles > 0;
 
     // check for commits ahead of upstream or default remote branch

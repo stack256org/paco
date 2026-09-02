@@ -152,3 +152,79 @@ describe("counting uncommitted files", () => {
     expect(work?.uncommittedFiles).toBe(1);
   });
 });
+
+describe("repositories nested inside the workspace", () => {
+  /** `git init` a nested repository with one committed (unpushed) file. */
+  async function initNested(parent: string, relative: string): Promise<string> {
+    const dir = path.join(parent, relative);
+    await fs.mkdir(dir, { recursive: true });
+    await git(dir, ["init", "-q", "-b", "main"]);
+    await git(dir, ["config", "user.email", "test@example.com"]);
+    await git(dir, ["config", "user.name", "Test"]);
+    await fs.writeFile(path.join(dir, "committed.txt"), "committed\n");
+    await git(dir, ["add", "."]);
+    await git(dir, ["commit", "-q", "-m", "nested work"]);
+    return dir;
+  }
+
+  test("a gitignored nested repository full of work never reads as clean", async () => {
+    const { root, repo } = await makeWorkspace();
+    // The workspace-as-workspace pattern: the projects are gitignored in the
+    // parent, so every question asked of the parent alone answers "clean".
+    await fs.writeFile(path.join(repo, ".gitignore"), "projects/\n");
+    await git(repo, ["add", ".gitignore"]);
+    await git(repo, ["commit", "-q", "-m", "ignore projects"]);
+    const nested = await initNested(repo, "projects/api");
+    await fs.writeFile(path.join(nested, "uncommitted.ts"), "x\n");
+
+    const work = await probeUnsavedWork(root);
+
+    // The parent's own two commits are unpushed too (it has no remote);
+    // the third is the nested repository's — the one that was invisible.
+    expect(work?.unpushedCommits).toBe(3);
+    expect(work?.uncommittedFiles).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a nested repository inside a chat worktree is probed too", async () => {
+    const { root } = await makeWorkspace();
+    const nested = await initNested(path.join(root, "chats", "c1"), "cloned");
+    await fs.writeFile(path.join(nested, "scratch.ts"), "x\n");
+
+    const work = await probeUnsavedWork(root);
+
+    // The parent's initial commit plus the nested repository's one.
+    expect(work?.unpushedCommits).toBe(2);
+    // The worktree's own status counts `cloned/` as one untracked line, and
+    // the nested probe counts the real file — both say "not disposable".
+    expect(work?.uncommittedFiles).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a fully pushed nested clone adds nothing", async () => {
+    const { root, repo } = await makeWorkspace();
+    const upstream = path.join(root, "upstream.git");
+    await fs.mkdir(upstream);
+    await git(upstream, ["init", "-q", "--bare", "-b", "main"]);
+    const nested = await initNested(repo, "projects/api");
+    await git(nested, ["remote", "add", "origin", upstream]);
+    await git(nested, ["push", "-q", "origin", "main"]);
+
+    const work = await probeUnsavedWork(root);
+
+    // Only the parent's own initial commit: the pushed clone contributes 0.
+    expect(work?.unpushedCommits).toBe(1);
+    // The parent still sees the untracked `projects/` directory as one line —
+    // that is the parent's own answer, not the nested repository's.
+    expect(work?.uncommittedFiles).toBeLessThanOrEqual(1);
+  });
+
+  test("never walks into node_modules looking for repositories", async () => {
+    const { root, repo } = await makeWorkspace();
+    await initNested(repo, "node_modules/some-dep");
+
+    const work = await probeUnsavedWork(root);
+
+    // Only the parent's own initial commit — the repository buried in
+    // node_modules was never probed.
+    expect(work?.unpushedCommits).toBe(1);
+  });
+});
