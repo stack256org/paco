@@ -10,7 +10,21 @@ import {
 } from "@/lib/error-copy";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 import { shellQuote } from "@/lib/shell/quote";
-import { parsePorcelainZ, pathsToTouch } from "./porcelain-status";
+import {
+  discoverNestedRepos,
+  groupByOwner,
+  isNestedRepoRootRow,
+  ownerOf,
+  prefixPatchPaths,
+  prefixPath,
+  repoCwd,
+  rootsWithin,
+} from "./nested-repos";
+import {
+  type ParsedStatus,
+  parsePorcelainZ,
+  pathsToTouch,
+} from "./porcelain-status";
 import {
   chatIdSchema,
   commitMessageSchema,
@@ -33,6 +47,15 @@ import {
  * rather than something cleverer. The index survives a reload, survives a
  * server restart, and is exactly what the operator's own `git status` shows if
  * they open a terminal in the worktree.
+ *
+ * A worktree may hold more than one repository: an operator running several
+ * projects out of one session has cloned each *into* the workspace, and git
+ * run at the worktree root cannot see inside them. So every operation here is
+ * per-repository — status is gathered from each nested repository and merged
+ * with its directory as a path prefix, and every action routes each path back
+ * to the repository that owns it (`nested-repos.ts`). The panel itself never
+ * learns any of this: it keys rows by path, and the prefixed path is just a
+ * path.
  *
  * Every function takes a chat id and nothing else that identifies anything.
  * The session is derived from the chat rather than accepted alongside it, so
@@ -59,9 +82,14 @@ const COMMIT_FAILED =
 const NOTHING_STAGED =
   "Nothing is staged. Stage the changes you want to include, then commit.";
 
+/** The parent repository's key in a per-repository map. */
+const PARENT = "";
+
 type Access = {
   sandbox: Sandbox;
   cwd: string;
+  /** Nested repository roots under `cwd`, longest-first. Empty for the common case. */
+  roots: string[];
 };
 
 /**
@@ -72,6 +100,9 @@ type Access = {
  * result. Every caller below converts it into the `{ success: false, error
  * }` the panel renders, so the copy the operator reads is the copy in
  * `error-copy.ts` and nothing leaks past it.
+ *
+ * Nested repositories are discovered here, once per request, so every
+ * operation in the request routes against the same picture of the workspace.
  */
 async function requireSourceControlAccess(rawChatId: string): Promise<Access> {
   const chatId = chatIdSchema.parse(rawChatId);
@@ -91,7 +122,9 @@ async function requireSourceControlAccess(rawChatId: string): Promise<Access> {
   }
 
   const sandbox = await connectSandbox(session.sandboxState);
-  return { sandbox, cwd: resolveWorkCwd(session.sandboxState, chatId) };
+  const cwd = resolveWorkCwd(session.sandboxState, chatId);
+  const roots = await discoverNestedRepos(sandbox, cwd);
+  return { sandbox, cwd, roots };
 }
 
 function messageFor(error: unknown, fallback: string): string {
@@ -111,22 +144,117 @@ async function run(
   };
 }
 
+/** `run`, but in one repository's directory — `root` "" is the parent. */
+async function runIn(
+  access: Access,
+  root: string,
+  command: string,
+  timeoutMs = GIT_TIMEOUT_MS,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const result = await access.sandbox.exec(
+    command,
+    repoCwd(access.cwd, root),
+    timeoutMs,
+  );
+  return {
+    ok: result.success,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
 function quoteAll(paths: string[]): string {
   return paths.map((path) => shellQuote(path)).join(" ");
 }
 
-async function readStatus(access: Access) {
+/**
+ * One repository's status, paths relative to that repository.
+ *
+ * For the parent, rows that *are* a nested repository — `?? project/` for an
+ * untracked one, a gitlink entry for a tracked one — are dropped: the
+ * repository's real changes are listed instead, and staging the untracked row
+ * would record a gitlink, a pointer that silently replaces the project's
+ * files in any clone of the parent.
+ */
+async function readRepoStatus(
+  access: Access,
+  root: string,
+): Promise<ParsedStatus> {
   // `--untracked-files=all`: git's default collapses a new directory to a
   // single `a folder/` row, which is not something the operator can stage,
   // discard, or click to see a diff of. The panel lists files.
-  const result = await run(
+  const result = await runIn(
     access,
+    root,
     "git status --porcelain=v1 -z --untracked-files=all",
   );
   if (!result.ok) {
+    // A nested repository can disappear between discovery and this command
+    // (the agent deleted it mid-request). For a nested repo that is an empty
+    // answer; for the parent it is the failure it always was.
+    if (root !== PARENT) {
+      return { staged: [], unstaged: [], untracked: [] };
+    }
     throw new Error(STATUS_FAILED);
   }
-  return parsePorcelainZ(result.stdout);
+  const parsed = parsePorcelainZ(result.stdout);
+
+  // Not only the parent: a repository cloned inside another repository gives
+  // the *intermediate* repository its own opaque `inner/` row. Every
+  // repository filters against the discovered roots inside it.
+  const within = rootsWithin(root, access.roots);
+  if (within.length === 0) {
+    return parsed;
+  }
+  const notARepoRow = (change: { path: string }) =>
+    !isNestedRepoRootRow(change.path, within);
+  return {
+    staged: parsed.staged.filter(notARepoRow),
+    unstaged: parsed.unstaged.filter(notARepoRow),
+    untracked: parsed.untracked.filter(notARepoRow),
+  };
+}
+
+/**
+ * Status of every repository in the worktree, keyed by root ("" = parent).
+ *
+ * Sequential, not `Promise.all`: some sandbox backends are not reliable with
+ * concurrent command streams after a reconnect.
+ */
+async function readStatuses(
+  access: Access,
+): Promise<Map<string, ParsedStatus>> {
+  const statuses = new Map<string, ParsedStatus>([
+    [PARENT, await readRepoStatus(access, PARENT)],
+  ]);
+  for (const root of access.roots) {
+    statuses.set(root, await readRepoStatus(access, root));
+  }
+  return statuses;
+}
+
+/** The per-repository statuses flattened into what the panel draws. */
+function mergeStatuses(statuses: Map<string, ParsedStatus>): ParsedStatus {
+  const merged: ParsedStatus = { staged: [], unstaged: [], untracked: [] };
+  for (const [root, status] of statuses) {
+    for (const list of ["staged", "unstaged", "untracked"] as const) {
+      for (const change of status[list]) {
+        merged[list].push({
+          ...change,
+          path: prefixPath(root, change.path),
+          ...(change.oldPath
+            ? { oldPath: prefixPath(root, change.oldPath) }
+            : {}),
+        });
+      }
+    }
+  }
+  // Each repository's porcelain arrives path-sorted; the merge interleaves
+  // them back into one path order so the panel's lists read as one workspace.
+  for (const list of ["staged", "unstaged", "untracked"] as const) {
+    merged[list].sort((a, b) => a.path.localeCompare(b.path));
+  }
+  return merged;
 }
 
 /**
@@ -138,6 +266,9 @@ async function readStatus(access: Access) {
  * branch, so that is the comparison — the remote's idea of it when there is a
  * remote, the local branch when there is not, and nothing at all in a
  * repository that has neither.
+ *
+ * Parent repository only: nested repositories have no chat branch, so "ahead
+ * of base" is not a question they can be asked.
  */
 async function resolveBaseRef(access: Access): Promise<string | null> {
   // `2>/dev/null`: a repository with no remote answers this with `fatal:`,
@@ -199,14 +330,15 @@ export async function getWorkingTreeStatus(
   chatId: string,
 ): Promise<WorkingTreeStatus> {
   const access = await requireSourceControlAccess(chatId);
-  const parsed = await readStatus(access);
+  const parsed = mergeStatuses(await readStatuses(access));
   const aheadOfBase = await countAheadOfBase(access);
 
   return { ...parsed, aheadOfBase };
 }
 
 /**
- * Move paths into the index.
+ * Move paths into the index — each path into the index of the repository
+ * that owns it.
  *
  * `git add -A --` rather than `git add --`: without `-A` a deleted file is not
  * staged as a deletion, so a row the operator ticked would quietly stay out of
@@ -219,15 +351,23 @@ export async function stageFiles(
   try {
     const access = await requireSourceControlAccess(chatId);
     const wanted = pathListSchema.parse(paths);
-    const status = await readStatus(access);
 
-    const result = await run(
-      access,
-      `git add -A -- ${quoteAll(pathsToTouch(wanted, status))}`,
-    );
-    if (!result.ok) {
-      console.error("[source-control] stage failed:", result.stderr.trim());
-      return { success: false, error: STAGE_FAILED };
+    for (const [root, rels] of groupByOwner(wanted, access.roots)) {
+      // The requested names only — never `pathsToTouch`. That expansion adds
+      // a staged rename's *source*, which is right for restore and discard
+      // (both halves have index or HEAD entries to act on) and fatal here:
+      // the source exists neither on disk nor in the index, and `git add`
+      // dies with `fatal: pathspec … did not match any files`. The rename is
+      // already staged; adding the new name alone is the whole job.
+      const result = await runIn(
+        access,
+        root,
+        `git add -A -- ${quoteAll(rels)}`,
+      );
+      if (!result.ok) {
+        console.error("[source-control] stage failed:", result.stderr.trim());
+        return { success: false, error: STAGE_FAILED };
+      }
     }
 
     return { success: true };
@@ -241,7 +381,10 @@ export async function stageFiles(
  *
  * On an unborn branch there is no HEAD to restore the index entry *from*, so
  * the entry is dropped instead. Same outcome — the path is no longer staged —
- * reached the only way git offers before the first commit exists.
+ * reached the only way git offers before the first commit exists. Asked per
+ * repository: a freshly cloned project inside a workspace that has commits is
+ * the common case, and the reverse — an unborn project inside it — happens
+ * the moment the agent runs `git init` somewhere.
  */
 export async function unstageFiles(
   chatId: string,
@@ -250,18 +393,25 @@ export async function unstageFiles(
   try {
     const access = await requireSourceControlAccess(chatId);
     const wanted = pathListSchema.parse(paths);
-    const status = await readStatus(access);
-    const quoted = quoteAll(pathsToTouch(wanted, status));
 
-    const hasHead = await run(access, "git rev-parse --verify --quiet HEAD");
-    const command = hasHead.ok
-      ? `git restore --staged -- ${quoted}`
-      : `git rm --cached -r --quiet -- ${quoted}`;
+    for (const [root, rels] of groupByOwner(wanted, access.roots)) {
+      const status = await readRepoStatus(access, root);
+      const quoted = quoteAll(pathsToTouch(rels, status));
 
-    const result = await run(access, command);
-    if (!result.ok) {
-      console.error("[source-control] unstage failed:", result.stderr.trim());
-      return { success: false, error: UNSTAGE_FAILED };
+      const hasHead = await runIn(
+        access,
+        root,
+        "git rev-parse --verify --quiet HEAD",
+      );
+      const command = hasHead.ok
+        ? `git restore --staged -- ${quoted}`
+        : `git rm --cached -r --quiet -- ${quoted}`;
+
+      const result = await runIn(access, root, command);
+      if (!result.ok) {
+        console.error("[source-control] unstage failed:", result.stderr.trim());
+        return { success: false, error: UNSTAGE_FAILED };
+      }
     }
 
     return { success: true };
@@ -290,31 +440,42 @@ export async function discardFiles(
   try {
     const access = await requireSourceControlAccess(chatId);
     const wanted = pathListSchema.parse(paths);
-    const status = await readStatus(access);
 
-    const untracked = new Set(status.untracked.map((change) => change.path));
-    const tracked = wanted.filter((path) => !untracked.has(path));
-    const toDelete = wanted.filter((path) => untracked.has(path));
+    for (const [root, rels] of groupByOwner(wanted, access.roots)) {
+      const status = await readRepoStatus(access, root);
 
-    if (tracked.length > 0) {
-      const restore = await run(
-        access,
-        `git restore --worktree -- ${quoteAll(pathsToTouch(tracked, status))}`,
-      );
-      if (!restore.ok) {
-        console.error(
-          "[source-control] discard failed:",
-          restore.stderr.trim(),
+      const untracked = new Set(status.untracked.map((change) => change.path));
+      const tracked = rels.filter((path) => !untracked.has(path));
+      const toDelete = rels.filter((path) => untracked.has(path));
+
+      if (tracked.length > 0) {
+        const restore = await runIn(
+          access,
+          root,
+          `git restore --worktree -- ${quoteAll(pathsToTouch(tracked, status))}`,
         );
-        return { success: false, error: DISCARD_FAILED };
+        if (!restore.ok) {
+          console.error(
+            "[source-control] discard failed:",
+            restore.stderr.trim(),
+          );
+          return { success: false, error: DISCARD_FAILED };
+        }
       }
-    }
 
-    if (toDelete.length > 0) {
-      const removed = await run(access, `rm -rf -- ${quoteAll(toDelete)}`);
-      if (!removed.ok) {
-        console.error("[source-control] remove failed:", removed.stderr.trim());
-        return { success: false, error: DISCARD_FAILED };
+      if (toDelete.length > 0) {
+        const removed = await runIn(
+          access,
+          root,
+          `rm -rf -- ${quoteAll(toDelete)}`,
+        );
+        if (!removed.ok) {
+          console.error(
+            "[source-control] remove failed:",
+            removed.stderr.trim(),
+          );
+          return { success: false, error: DISCARD_FAILED };
+        }
       }
     }
 
@@ -330,6 +491,13 @@ export async function discardFiles(
  * No `-a`, no `add -A` first: the point of the staging area is that the
  * operator chose its contents, and a commit that swept in the rest would make
  * that choice meaningless.
+ *
+ * One commit **per repository that has something staged**, all with the same
+ * message: each repository's index is its own staging area, and a workspace
+ * holding three projects gets three commits when the operator staged work in
+ * all three. The sha returned is the parent repository's when it committed —
+ * that is the commit the chat's branch and pull request are built from —
+ * otherwise the first nested repository's.
  *
  * Two refusals, both before git is asked. An empty message, because `git
  * commit` aborts on one anyway and its abort text is not something a
@@ -359,29 +527,40 @@ export async function commitStaged(
       };
     }
 
-    const status = await readStatus(access);
-    if (status.staged.length === 0) {
+    const statuses = await readStatuses(access);
+    const withStaged = [...statuses].filter(
+      ([, status]) => status.staged.length > 0,
+    );
+    if (withStaged.length === 0) {
       return { success: false, error: NOTHING_STAGED };
     }
 
-    // `shellQuote`, not `JSON.stringify`: the command runs through `bash -lc`,
-    // so double quotes would leave a backtick in the message live and would
-    // flatten a multi-line body onto the subject line.
-    const committed = await run(
-      access,
-      `git commit -m ${shellQuote(parsedMessage.data)}`,
-      COMMIT_TIMEOUT_MS,
-    );
-    if (!committed.ok) {
-      console.error("[source-control] commit failed:", committed.stderr.trim());
-      return { success: false, error: COMMIT_FAILED };
+    let sha: string | undefined;
+    for (const [root] of withStaged) {
+      // `shellQuote`, not `JSON.stringify`: the command runs through `bash
+      // -lc`, so double quotes would leave a backtick in the message live and
+      // would flatten a multi-line body onto the subject line.
+      const committed = await runIn(
+        access,
+        root,
+        `git commit -m ${shellQuote(parsedMessage.data)}`,
+        COMMIT_TIMEOUT_MS,
+      );
+      if (!committed.ok) {
+        console.error(
+          "[source-control] commit failed:",
+          committed.stderr.trim(),
+        );
+        return { success: false, error: COMMIT_FAILED };
+      }
+
+      const head = await runIn(access, root, "git rev-parse HEAD");
+      if (head.ok && head.stdout.trim() && (root === PARENT || !sha)) {
+        sha = head.stdout.trim();
+      }
     }
 
-    const head = await run(access, "git rev-parse HEAD");
-    return {
-      success: true,
-      ...(head.ok && head.stdout.trim() ? { sha: head.stdout.trim() } : {}),
-    };
+    return { success: true, ...(sha ? { sha } : {}) };
   } catch (error) {
     return { success: false, error: messageFor(error, COMMIT_FAILED) };
   }
@@ -412,6 +591,11 @@ function normalizeUntrackedPatch(patch: string, path: string): string {
 /**
  * One file's diff, as a complete unified patch.
  *
+ * The path routes to the repository that owns it, the commands run there with
+ * the repository's own relative path, and the finished patch has its headers
+ * rewritten to the prefixed path the panel knows the file by
+ * (`prefixPatchPaths`).
+ *
  * Three cases, because git needs three different questions asked:
  *
  * - **Staged** — index against HEAD. A rename is only detectable when git can
@@ -432,26 +616,28 @@ export async function getFileDiff(
   opts: FileDiffOptions,
 ): Promise<FileDiff> {
   const access = await requireSourceControlAccess(chatId);
-  const target = repoRelativePathSchema.parse(path);
+  const requested = repoRelativePathSchema.parse(path);
   const { staged } = fileDiffOptionsSchema.parse(opts);
 
-  const status = await readStatus(access);
+  const { root, rel: target } = ownerOf(requested, access.roots);
+  const status = await readRepoStatus(access, root);
   const quoted = shellQuote(target);
 
   if (staged) {
     const entry = status.staged.find((change) => change.path === target);
     const oldPath = entry?.oldPath;
     const pathspec = oldPath ? `${shellQuote(oldPath)} ${quoted}` : quoted;
-    const result = await run(
+    const result = await runIn(
       access,
+      root,
       `git diff --cached -M --find-copies -- ${pathspec}`,
       DIFF_TIMEOUT_MS,
     );
     const patch = result.stdout;
     return {
-      patch: looksBinary(patch) ? "" : patch,
+      patch: looksBinary(patch) ? "" : prefixPatchPaths(patch, root),
       binary: looksBinary(patch),
-      ...(oldPath ? { oldPath } : {}),
+      ...(oldPath ? { oldPath: prefixPath(root, oldPath) } : {}),
     };
   }
 
@@ -459,22 +645,32 @@ export async function getFileDiff(
   if (isUntracked) {
     // `--no-index` exits 1 when the files differ, which is the whole point of
     // running it, so its exit code says nothing useful here.
-    const result = await run(
+    const result = await runIn(
       access,
+      root,
       `git diff --no-index -- /dev/null ${quoted}`,
       DIFF_TIMEOUT_MS,
     );
     const patch = result.stdout;
     return {
-      patch: looksBinary(patch) ? "" : normalizeUntrackedPatch(patch, target),
+      // Normalize first, with the repository-relative name — that is what the
+      // `a/dev/null` anchor matches against — then prefix the whole patch.
+      patch: looksBinary(patch)
+        ? ""
+        : prefixPatchPaths(normalizeUntrackedPatch(patch, target), root),
       binary: looksBinary(patch),
     };
   }
 
-  const result = await run(access, `git diff -M -- ${quoted}`, DIFF_TIMEOUT_MS);
+  const result = await runIn(
+    access,
+    root,
+    `git diff -M -- ${quoted}`,
+    DIFF_TIMEOUT_MS,
+  );
   const patch = result.stdout;
   return {
-    patch: looksBinary(patch) ? "" : patch,
+    patch: looksBinary(patch) ? "" : prefixPatchPaths(patch, root),
     binary: looksBinary(patch),
   };
 }

@@ -17,9 +17,41 @@ export type DiffFileShape = {
  * Handles both fully quoted paths ("path") and already-unquoted escaped content
  */
 export function unescapeGitPath(path: string): string {
-  // If path is surrounded by quotes, strip them first
+  // If path is surrounded by quotes, decode git's C-style escaping. That is
+  // more than dropping backslashes: a non-ASCII byte arrives as up-to-three
+  // octal digits (`caf\303\251.ts`), and merely stripping the backslashes
+  // produced `caf303251.ts` — a name that matches nothing on disk, so the
+  // file silently vanished from every list built on this parse.
   if (path.startsWith('"') && path.endsWith('"')) {
-    return path.slice(1, -1).replace(/\\(.)/g, "$1");
+    const inner = path.slice(1, -1);
+    const bytes: number[] = [];
+    for (let i = 0; i < inner.length; i++) {
+      const char = inner[i];
+      if (char !== "\\") {
+        // Inside a quoted git path, everything unescaped is plain ASCII.
+        bytes.push(inner.charCodeAt(i));
+        continue;
+      }
+      const octal = /^[0-7]{1,3}/.exec(inner.slice(i + 1, i + 4))?.[0];
+      if (octal) {
+        bytes.push(Number.parseInt(octal, 8));
+        i += octal.length;
+        continue;
+      }
+      const next = inner[i + 1] ?? "";
+      const control: Record<string, number> = {
+        a: 7,
+        b: 8,
+        f: 12,
+        n: 10,
+        r: 13,
+        t: 9,
+        v: 11,
+      };
+      bytes.push(control[next] ?? next.charCodeAt(0));
+      i += 1;
+    }
+    return Buffer.from(bytes).toString("utf8");
   }
   // For paths captured from inside quotes (e.g., by regex), still unescape
   // For truly unquoted paths (no special chars), this is a no-op

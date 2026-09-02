@@ -3,6 +3,7 @@ import { resolveWorkCwd } from "@/lib/agent/workspace-paths";
 import { connectSandbox } from "@paco/sandbox";
 
 import { getSessionById } from "@/lib/db/sessions";
+import { discoverNestedRepos, repoCwd } from "@/lib/git/nested-repos";
 import { checkRateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { isSandboxActive } from "@/lib/sandbox/utils";
 import { SESSION_NOT_FOUND, WORKSPACE_NOT_STARTED } from "@/lib/error-copy";
@@ -38,14 +39,28 @@ export async function POST(
     new URL(req.url).searchParams.get("chatId"),
   );
 
-  // Get the diff for commit message generation
+  // Get the diff for commit message generation — from the worktree's own
+  // repository and from every repository nested inside it, so a commit
+  // message written for a multi-project workspace describes all of the work
+  // rather than only the parent's slice.
   const diffResult = await sandbox.exec(
     "git diff HEAD --stat && echo '---DIFF---' && git diff HEAD",
     cwd,
     30000,
   );
 
-  const diff = diffResult.stdout;
+  let diff = diffResult.stdout;
+  for (const root of await discoverNestedRepos(sandbox, cwd)) {
+    const nested = await sandbox.exec(
+      "git diff HEAD --stat && echo '---DIFF---' && git diff HEAD",
+      repoCwd(cwd, root),
+      30000,
+    );
+    if (nested.success && nested.stdout.trim()) {
+      diff += `\n--- in ${root}/ ---\n${nested.stdout}`;
+    }
+  }
+
   if (!diff.trim() || !diff.includes("---DIFF---")) {
     return Response.json({ message: "chore: update repository changes" });
   }
